@@ -248,7 +248,7 @@ def get_prices():
 
             f"https://api.twelvedata.com/time_series?symbol={SYMBOL}"
 
-            f"&interval=1min&outputsize=70&apikey={TWELVE_API_KEY}"
+        f"&interval=15min&outputsize=70&apikey={TWELVE_API_KEY}"
 
         )
 
