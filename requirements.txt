@@ -2,3 +2,4 @@ twelvedata
 pandas
 requests
 urllib3<2
+python-dotenv
