@@ -1,0 +1,4 @@
+twelvedata
+pandas
+requests
+urllib3<2
