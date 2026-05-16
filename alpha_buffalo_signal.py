@@ -9,7 +9,6 @@ RAILWAY_URL = "https://glistening-fascination-production-e6c1.up.railway.app/web
 SYMBOL = "XAU/USD"
 
 last_signal = None
-
 def get_prices():
     try:
         url = f"https://api.twelvedata.com/time_series?symbol={SYMBOL}&interval=1min&outputsize=50&apikey={TWELVE_API_KEY}"
@@ -81,7 +80,7 @@ while True:
             else:
                 print(f"⏳ {bkk} | No signal | Price:{price}")
         
-        time.sleep(60)
+        time.sleep(120)
     except KeyboardInterrupt:
         print("\n🛑 Bot stopped")
         break
