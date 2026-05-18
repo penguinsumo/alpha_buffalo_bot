@@ -38,31 +38,31 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) \
 
 # âââ bot_status table (persist last_signal) âââââââââââââââ
 def load_last_signal():
-        """à¹à¸«à¸¥à¸ last_signal à¸à¸²à¸ Supabase à¹à¸¡à¸·à¹à¸­ restart"""
-        global last_signal, last_signal_time
-        if not supabase:
-                    return
-                try:
-                            res = supabase.table("bot_status").select("*").eq("id", 1).single().execute()
-                            if res.data:
-                                            last_signal = res.data.get("last_signal")
-                                            ts = res.data.get("last_signal_time")
-                                            if ts:
-                                                                last_signal_time = datetime.fromisoformat(ts)
-                                                            log(f"ð Loaded last_signal: {last_signal}")
-                except Exception as e:
-                            log(f"load_last_signal: {e}")
+    """Load last_signal from Supabase on restart"""
+    global last_signal, last_signal_time
+    if not supabase:
+        return
+    try:
+        res = supabase.table("bot_status").select("*").eq("id", 1).single().execute()
+        if res.data:
+            last_signal = res.data.get("last_signal")
+            ts = res.data.get("last_signal_time")
+            if ts:
+                last_signal_time = datetime.fromisoformat(ts)
+            log(f"Loaded last_signal: {last_signal}")
+    except Exception as e:
+        log(f"load_last_signal: {e}")
 
 def save_last_signal(action: str):
-        if not supabase:
-                    return
-                try:
+    if not supabase:
+        return
+    try:
         supabase.table("bot_status").upsert({
-                                "id": 1,
-                                "last_signal": action,
-                                "last_signal_time": now_bkk().isoformat()
-                }, on_conflict="id").execute()
-except Exception as e:
+            "id": 1,
+            "last_signal": action,
+            "last_signal_time": now_bkk().isoformat()
+        }, on_conflict="id").execute()
+    except Exception as e:
         log(f"save_last_signal error: {e}")
 
 # âââ Market Hours ââââââââââââââââââââââââââââââââââââââââââ
