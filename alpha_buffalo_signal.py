@@ -15,7 +15,7 @@ RAILWAY_WEBHOOK_URL = os.getenv("RAILWAY_WEBHOOK_URL")
 ADMIN_ID            = int(os.getenv("ADMIN_ID", "0"))
 TELEGRAM_API        = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 SYMBOL              = "XAU/USD"
-COOLDOWN_MIN        = 10
+COOLDOWN_MIN        = 60
 POLL_INTERVAL       = 120
 CMD_INTERVAL        = 3
 
@@ -356,9 +356,9 @@ def calculate_signal(prices):
         loss  = (-delta.clip(upper=0)).rolling(14).mean()
         rsi   = (100 - 100 / (1 + gain / loss)).iloc[-1]
         score = 80  # TODO: replace with real Fibonacci score
-        if ema9 > ema21 and 50 < rsi < 75:
+        if ema9 > ema21 and 55 < rsi < 70:
             return {"action": "BUY",  "score": score, "rsi": rsi}
-        if ema9 < ema21 and 25 < rsi < 50:
+        if ema9 < ema21 and 30 < rsi < 45:
             return {"action": "SELL", "score": score, "rsi": rsi}
     except Exception as e:
         log(f"calculate_signal error: {e}")
