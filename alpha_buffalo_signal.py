@@ -396,6 +396,26 @@ def send_signal(signal, price):
                 last_signal_time = now_bkk()
             save_last_signal(signal["action"])
             log(f"✅ {signal['action']} | RSI:{signal['rsi']:.1f} | Price:{price:,.2f}")
+            # save ลง Supabase signals table
+            if supabase:
+                try:
+                    sl = round(price + 8 if signal["action"] == "SELL" else price - 8, 2)
+                    tp = round(price - 15 if signal["action"] == "SELL" else price + 15, 2)
+                    supabase.table("signals").insert({
+                        "symbol":           "XAUUSD",
+                        "action":           signal["action"],
+                        "price":            price,
+                        "lot":              0.1,
+                        "fibo_score":       signal["score"],
+                        "confluence_score": signal["score"],
+                        "sl":               sl,
+                        "tp":               tp,
+                        "source":           "python_bot",
+                        "status":           "active"
+                    }).execute()
+                    log(f"📝 Saved to Supabase signals")
+                except Exception as e:
+                    log(f"save signal error: {e}")
         else:
             log(f"send_signal response: {r.text}")
     except Exception as e:
