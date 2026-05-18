@@ -5,6 +5,7 @@ import pandas as pd
 import os
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
+from pivot_engine_v2 import PivotEngine, BasketState
 
 # ── Config (Railway env vars) ──────────────────────────────
 TWELVE_API_KEY      = os.getenv("TWELVE_API_KEY")
@@ -25,6 +26,10 @@ last_signal_time = None
 last_update_id   = 0
 state_lock       = threading.Lock()
 BKK              = timezone(timedelta(hours=7))
+
+# ── Pivot Engine ───────────────────────────────────────────
+pivot_engine = PivotEngine(left=5, right=5)
+basket_state = BasketState()
 
 
 def now_bkk():
@@ -345,26 +350,59 @@ def get_prices():
 
 
 def calculate_signal(prices):
-    if len(prices) < 26:
+    """
+    v5: ใช้ PivotEngine แทน rolling window
+    คืน signal dict หรือ None
+    """
+    if len(prices) < 30:
         return None
     try:
-        close  = pd.Series(prices)
-        ema9   = close.ewm(span=9).mean().iloc[-1]
-        ema21  = close.ewm(span=21).mean().iloc[-1]
-        ema200 = close.ewm(span=200).mean().iloc[-1]
-        delta  = close.diff()
-        gain   = delta.clip(lower=0).rolling(14).mean()
-        loss   = (-delta.clip(upper=0)).rolling(14).mean()
-        rsi    = (100 - 100 / (1 + gain / loss)).iloc[-1]
-        price  = close.iloc[-1]
-        score  = 80
-        # trend filter: ราคาต้องอยู่ฝั่งเดียวกับ EMA200
-        uptrend   = price > ema200
-        downtrend = price < ema200
-        if uptrend   and ema9 > ema21 and 55 < rsi < 70:
-            return {"action": "BUY",  "score": score, "rsi": rsi}
-        if downtrend and ema9 < ema21 and 30 < rsi < 45:
-            return {"action": "SELL", "score": score, "rsi": rsi}
+        # สร้าง DataFrame สำหรับ engine
+        df = pd.DataFrame({
+            "open":   prices,
+            "high":   [p * 1.0002 for p in prices],
+            "low":    [p * 0.9998 for p in prices],
+            "close":  prices,
+            "volume": [1000.0] * len(prices),
+        })
+
+        # update pivot engine
+        state, basket = pivot_engine.update(df, basket_state)
+
+        # ต้องมี pivot ก่อน
+        if not state.is_ready():
+            log("⏳ Pivot not ready yet")
+            return None
+
+        # BOS → skip
+        if state.bos_detected:
+            log("⚡ BOS detected — skip signal")
+            return None
+
+        # sideways → skip
+        if state.trend_dir == "sideways":
+            log("↔️ Sideways — skip signal")
+            return None
+
+        # confluence threshold
+        if state.confluence < 70:
+            log(f"📊 Confluence {state.confluence}/100 — below threshold")
+            return None
+
+        # map trend → action
+        action = "BUY" if state.trend_dir == "up" else "SELL"
+
+        return {
+            "action":     action,
+            "score":      state.confluence,
+            "rsi":        0.0,
+            "sl":         state.sl,
+            "tp1":        state.tp1,
+            "tp2":        state.tp2,
+            "fibo_ratio": state.fibo_ratio,
+            "trend_dir":  state.trend_dir,
+            "in_deep":    state.in_deep_zone,
+        }
     except Exception as e:
         log(f"calculate_signal error: {e}")
     return None
@@ -399,8 +437,8 @@ def send_signal(signal, price):
             # save ลง Supabase signals table
             if supabase:
                 try:
-                    sl = round(price + 8 if signal["action"] == "SELL" else price - 8, 2)
-                    tp = round(price - 15 if signal["action"] == "SELL" else price + 15, 2)
+                    sl  = signal.get("sl")  or round(price + 8  if signal["action"] == "SELL" else price - 8,  2)
+                    tp1 = signal.get("tp1") or round(price - 15 if signal["action"] == "SELL" else price + 15, 2)
                     supabase.table("signals").insert({
                         "symbol":           "XAUUSD",
                         "action":           signal["action"],
@@ -409,11 +447,11 @@ def send_signal(signal, price):
                         "fibo_score":       signal["score"],
                         "confluence_score": signal["score"],
                         "sl":               sl,
-                        "tp":               tp,
-                        "source":           "python_bot",
+                        "tp":               tp1,
+                        "source":           "python_bot_v5",
                         "status":           "active"
                     }).execute()
-                    log(f"📝 Saved to Supabase signals")
+                    log(f"📝 Saved signal v5 | score:{signal['score']} sl:{sl} tp:{tp1}")
                 except Exception as e:
                     log(f"save signal error: {e}")
         else:
