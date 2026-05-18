@@ -348,17 +348,22 @@ def calculate_signal(prices):
     if len(prices) < 26:
         return None
     try:
-        close = pd.Series(prices)
-        ema9  = close.ewm(span=9).mean().iloc[-1]
-        ema21 = close.ewm(span=21).mean().iloc[-1]
-        delta = close.diff()
-        gain  = delta.clip(lower=0).rolling(14).mean()
-        loss  = (-delta.clip(upper=0)).rolling(14).mean()
-        rsi   = (100 - 100 / (1 + gain / loss)).iloc[-1]
-        score = 80  # TODO: replace with real Fibonacci score
-        if ema9 > ema21 and 55 < rsi < 70:
+        close  = pd.Series(prices)
+        ema9   = close.ewm(span=9).mean().iloc[-1]
+        ema21  = close.ewm(span=21).mean().iloc[-1]
+        ema200 = close.ewm(span=200).mean().iloc[-1]
+        delta  = close.diff()
+        gain   = delta.clip(lower=0).rolling(14).mean()
+        loss   = (-delta.clip(upper=0)).rolling(14).mean()
+        rsi    = (100 - 100 / (1 + gain / loss)).iloc[-1]
+        price  = close.iloc[-1]
+        score  = 80
+        # trend filter: ราคาต้องอยู่ฝั่งเดียวกับ EMA200
+        uptrend   = price > ema200
+        downtrend = price < ema200
+        if uptrend   and ema9 > ema21 and 55 < rsi < 70:
             return {"action": "BUY",  "score": score, "rsi": rsi}
-        if ema9 < ema21 and 30 < rsi < 45:
+        if downtrend and ema9 < ema21 and 30 < rsi < 45:
             return {"action": "SELL", "score": score, "rsi": rsi}
     except Exception as e:
         log(f"calculate_signal error: {e}")
