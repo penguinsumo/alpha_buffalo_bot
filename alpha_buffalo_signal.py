@@ -178,6 +178,7 @@ def handle_commands():
     global last_update_id
     for update in get_updates():
         last_update_id = update["update_id"]
+        log(f"📨 update_id={update['update_id']}")
         msg = update.get("message") or update.get("edited_message")
         if not msg:
             continue
