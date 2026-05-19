@@ -16,7 +16,7 @@ ADMIN_ID            = int(os.getenv("ADMIN_ID", "0"))
 TELEGRAM_API        = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 SYMBOL              = "XAU/USD"
 COOLDOWN_MIN        = 60
-POLL_INTERVAL       = 120
+POLL_INTERVAL       = 180
 CMD_INTERVAL        = 3
 
 # ── State ──────────────────────────────────────────────────
