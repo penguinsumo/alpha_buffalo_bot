@@ -164,7 +164,10 @@ def get_updates():
         r = requests.get(f"{TELEGRAM_API}/getUpdates", params={
             "offset": last_update_id + 1, "timeout": 2
         }, timeout=8)
-        return r.json().get("result", [])
+        updates = r.json().get("result", [])
+        if updates:
+            log(f"📨 Got {len(updates)} updates")
+        return updates
     except Exception as e:
         log(f"get_updates error: {e}")
         return []
