@@ -468,9 +468,6 @@ def command_loop():
     log("🤖 Command loop started (3s)")
     while True:
         try:
-            updates = get_updates()
-            if updates:
-                log(f"📨 Got {len(updates)} updates")
             handle_commands()
         except Exception as e:
             log(f"command_loop error: {e}")
