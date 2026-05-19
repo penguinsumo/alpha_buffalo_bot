@@ -162,7 +162,8 @@ def get_updates():
     global last_update_id
     try:
         r = requests.get(f"{TELEGRAM_API}/getUpdates", params={
-            "offset": last_update_id + 1, "timeout": 2
+            "offset": last_update_id + 1, "timeout": 2,
+            "allowed_updates": ["message", "edited_message"]
         }, timeout=8)
         updates = r.json().get("result", [])
         if updates:
