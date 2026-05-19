@@ -28,7 +28,7 @@ state_lock       = threading.Lock()
 BKK              = timezone(timedelta(hours=7))
 
 # ── Pivot Engine ───────────────────────────────────────────
-pivot_engine = PivotEngine(left=5, right=5)
+pivot_engine = PivotEngine(left=3, right=3)
 basket_state = BasketState()
 
 
@@ -468,6 +468,9 @@ def command_loop():
     log("🤖 Command loop started (3s)")
     while True:
         try:
+            updates = get_updates()
+            if updates:
+                log(f"📨 Got {len(updates)} updates")
             handle_commands()
         except Exception as e:
             log(f"command_loop error: {e}")
