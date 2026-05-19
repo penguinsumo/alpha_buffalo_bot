@@ -476,6 +476,32 @@ if __name__ == "__main__":
 # keep-alive
 import threading, http.server
 
+if __name__ == "__main__":
+    print("🐃 ALPHA BUFFALO Signal Bot v4 started\n")
+    load_last_signal()
+    threading.Thread(target=keep_alive,   daemon=True).start()
+    threading.Thread(target=command_loop, daemon=True).start()
+    threading.Thread(target=signal_loop,  daemon=True).start()
+    while True:
+        time.sleep(60)
+
+
+# keep-alive
+import threading, http.server
+
+if __name__ == "__main__":
+    print("🐃 ALPHA BUFFALO Signal Bot v4 started\n")
+    load_last_signal()
+    threading.Thread(target=keep_alive,   daemon=True).start()
+    threading.Thread(target=command_loop, daemon=True).start()
+    threading.Thread(target=signal_loop,  daemon=True).start()
+    while True:
+        time.sleep(60)
+
+
+# keep-alive
+import threading, http.server
+
 def keep_alive():
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
