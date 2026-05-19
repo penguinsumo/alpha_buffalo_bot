@@ -435,11 +435,41 @@ def signal_loop():
         time.sleep(POLL_INTERVAL)
 
 
+# ── Keep-Alive Server ─────────────────────────────────────
+import http.server, socketserver
+
+def keep_alive():
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Alpha Buffalo OK")
+        def log_message(self, *args): pass
+    port = int(os.getenv("PORT", 8080))
+    with socketserver.TCPServer(("0.0.0.0", port), Handler) as httpd:
+        httpd.serve_forever()
+
 # ── Main ───────────────────────────────────────────────────
 if __name__ == "__main__":
     print("🐃 ALPHA BUFFALO Signal Bot v4 started\n")
     load_last_signal()
+    threading.Thread(target=keep_alive,   daemon=True).start()
     threading.Thread(target=command_loop, daemon=True).start()
     threading.Thread(target=signal_loop,  daemon=True).start()
     while True:
         time.sleep(60)
+
+
+# keep-alive
+import threading, http.server
+
+def keep_alive():
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        def log_message(self, *args): pass
+    http.server.HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+
+threading.Thread(target=keep_alive, daemon=True).start()
