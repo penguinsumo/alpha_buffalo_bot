@@ -341,7 +341,7 @@ def handle_commands():
 def get_prices():
     try:
         url = (f"https://api.twelvedata.com/time_series"
-               f"?symbol={SYMBOL}&interval=1min&outputsize=50"
+               f"?symbol={SYMBOL}&interval=1min&outputsize=200"
                f"&apikey={TWELVE_API_KEY}")
         data = requests.get(url, timeout=10).json()
         if "values" in data:
