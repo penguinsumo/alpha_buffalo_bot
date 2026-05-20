@@ -26,23 +26,18 @@ last_update_id   = 0
 state_lock       = threading.Lock()
 BKK              = timezone(timedelta(hours=7))
 
-
 def now_bkk():
     return datetime.now(BKK)
 
-
 def log(msg):
     print(f"{now_bkk().strftime('%H:%M:%S')} | {msg}", flush=True)
-
 
 # ── Supabase ───────────────────────────────────────────────
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) \
     if SUPABASE_URL and SUPABASE_KEY else None
 
-
 # ── bot_status table (persist last_signal) ─────────────────
 def load_last_signal():
-    """Load last_signal from Supabase on restart"""
     global last_signal, last_signal_time
     if not supabase:
         return
@@ -57,7 +52,6 @@ def load_last_signal():
     except Exception as e:
         log(f"load_last_signal: {e}")
 
-
 def save_last_signal(action: str):
     if not supabase:
         return
@@ -70,7 +64,6 @@ def save_last_signal(action: str):
     except Exception as e:
         log(f"save_last_signal error: {e}")
 
-
 # ── Market Hours ───────────────────────────────────────────
 def is_market_open():
     now = datetime.now(timezone.utc)
@@ -78,7 +71,6 @@ def is_market_open():
     if wd == 5: return now.hour < 22
     if wd == 6: return now.hour >= 22
     return True
-
 
 # ── Access Control ─────────────────────────────────────────
 def get_user_role(user_id: int) -> str:
@@ -95,10 +87,8 @@ def get_user_role(user_id: int) -> str:
         log(f"get_user_role error: {e}")
         return "admin" if user_id == ADMIN_ID else "guest"
 
-
 def is_admin(uid):  return get_user_role(uid) == "admin"
 def is_member(uid): return get_user_role(uid) in ("admin", "member")
-
 
 def add_user(user_id, username, role, approved_by):
     if not supabase:
@@ -117,7 +107,6 @@ def add_user(user_id, username, role, approved_by):
         log(f"add_user error: {e}")
         return False
 
-
 def deactivate_user(user_id):
     if not supabase:
         return False
@@ -128,7 +117,6 @@ def deactivate_user(user_id):
     except Exception as e:
         log(f"deactivate_user error: {e}")
         return False
-
 
 def get_all_members():
     if not supabase:
@@ -142,7 +130,6 @@ def get_all_members():
         log(f"get_all_members error: {e}")
         return []
 
-
 # ── Telegram ───────────────────────────────────────────────
 def send_message(chat_id, text):
     try:
@@ -151,7 +138,6 @@ def send_message(chat_id, text):
         }, timeout=10)
     except Exception as e:
         log(f"send_message error: {e}")
-
 
 def get_updates():
     global last_update_id
@@ -163,7 +149,6 @@ def get_updates():
     except Exception as e:
         log(f"get_updates error: {e}")
         return []
-
 
 # ── Command Handler ────────────────────────────────────────
 def handle_commands():
@@ -227,9 +212,10 @@ def handle_commands():
             if not is_member(user_id):
                 send_message(chat_id, "❌ ไม่มีสิทธิ์")
                 continue
-            prices = get_prices()
-            if prices:
-                send_message(chat_id, f"💰 XAUUSD: <b>{prices[-1]:,.2f}</b> USD")
+            df = get_prices()
+            if df is not None and not df.empty:
+                current_price = float(df['close'].iloc[-1])
+                send_message(chat_id, f"💰 XAUUSD: <b>{current_price:,.2f}</b> USD")
             else:
                 send_message(chat_id, "❌ ดึงราคาไม่ได้")
 
@@ -328,7 +314,6 @@ def handle_commands():
                 continue
             send_message(chat_id, "⚙️ Circuit Breaker: coming soon")
 
-
 # ── Price & Signal ─────────────────────────────────────────
 def get_prices():
     try:
@@ -337,18 +322,26 @@ def get_prices():
                f"&apikey={TWELVE_API_KEY}")
         data = requests.get(url, timeout=10).json()
         if "values" in data:
-            return [float(v["close"]) for v in reversed(data["values"])]
+            # 🔧 แก้ไข: แปลงข้อมูลเป็น DataFrame แทน List เพื่อให้เข้ากับ V4
+            df = pd.DataFrame(data["values"])
+            df = df.iloc[::-1].reset_index(drop=True)
+            df['close'] = df['close'].astype(float)
+            for col in ['open', 'high', 'low']:
+                if col in df.columns:
+                    df[col] = df[col].astype(float)
+            return df
         log(f"Twelve Data error: {data.get('message', 'unknown')}")
     except Exception as e:
         log(f"get_prices error: {e}")
     return None
 
-
 from pivot_engine_v2 import PivotEngine
 from session_clock   import SessionClock
+from equity_guard    import EquityGuard  # 🔧 แก้ไข: เพิ่ม Import ที่ลืมใส่
 
 engine  = PivotEngine(left=5, right=5, macro_lookback=144)
 session = SessionClock()
+guard   = EquityGuard()  # 🔧 แก้ไข: สร้าง instance ของ guard ไว้ใช้ในโค้ด
 
 def calculate_signal(df):
     sess = session.current()
@@ -359,8 +352,10 @@ def calculate_signal(df):
     pivot_state, basket = engine.update(df)
 
     if pivot_state.bos_detected:
-        guard.new_cycle()
-        guard.set_cashflow_mode("BOS/MSS reset")
+        if hasattr(guard, 'new_cycle'):
+            guard.new_cycle()
+        if hasattr(guard, 'set_cashflow_mode'):
+            guard.set_cashflow_mode("BOS/MSS reset")
         return None
 
     if not pivot_state.is_ready():
@@ -385,16 +380,22 @@ def calculate_signal(df):
     )
 
     if is_sniper:
-        guard.set_sniper_mode(f"VSA:{pivot_state.vsa_signal} Score:{pivot_state.confluence}")
+        if hasattr(guard, 'set_sniper_mode'):
+            guard.set_sniper_mode(f"VSA:{pivot_state.vsa_signal} Score:{pivot_state.confluence}")
     else:
-        guard.set_cashflow_mode("Cashflow zone")
+        if hasattr(guard, 'set_cashflow_mode'):
+            guard.set_cashflow_mode("Cashflow zone")
 
+    mode_str = guard.mode() if hasattr(guard, 'mode') else "N/A"
+    
     if not pivot_state.signal_valid():
-        log(f"No signal | Mode:{guard.mode()} | Score:{pivot_state.confluence} | Zone:{pivot_state.fibo_ratio} | VSA:{pivot_state.vsa_signal}")
+        log(f"No signal | Mode:{mode_str} | Score:{pivot_state.confluence} | Zone:{pivot_state.fibo_ratio} | VSA:{pivot_state.vsa_signal}")
         return None
 
     action = "BUY" if pivot_state.trend_dir == "up" else "SELL"
     lot = 0.01
+    
+    cycle_id = guard.state.cycle_id if hasattr(guard, 'state') else "N/A"
 
     if is_sniper:
         return {
@@ -402,7 +403,7 @@ def calculate_signal(df):
             "sl": pivot_state.sl, "tp1": pivot_state.tp1, "tp2": pivot_state.tp2,
             "mode": "SNIPER", "vsa": pivot_state.vsa_signal,
             "zone": pivot_state.fibo_ratio, "lot": lot,
-            "cycle_id": guard.state.cycle_id,
+            "cycle_id": cycle_id,
         }
     else:
         tp = round(price + 15*0.01 if action == "BUY" else price - 15*0.01, 2)
@@ -412,9 +413,8 @@ def calculate_signal(df):
             "sl": sl, "tp1": tp, "tp2": None,
             "mode": "CASHFLOW", "vsa": pivot_state.vsa_signal,
             "zone": pivot_state.fibo_ratio, "lot": lot,
-            "cycle_id": guard.state.cycle_id,
+            "cycle_id": cycle_id,
         }
-
 
 def send_signal(signal, price):
     global last_signal, last_signal_time
@@ -441,12 +441,13 @@ def send_signal(signal, price):
                 last_signal      = signal["action"]
                 last_signal_time = now_bkk()
             save_last_signal(signal["action"])
-            log(f"✅ {signal['action']} | RSI:{signal['rsi']:.1f} | Price:{price:,.2f}")
+            # 🔧 แก้ไข: ลบ ['rsi'] ออก และใช้คะแนน ['score'] แทน
+            score = signal.get("score", 0)
+            log(f"✅ {signal['action']} | Score:{score} | Price:{price:,.2f}")
         else:
             log(f"send_signal response: {r.text}")
     except Exception as e:
         log(f"send_signal error: {e}")
-
 
 # ── Threads ────────────────────────────────────────────────
 def command_loop():
@@ -458,7 +459,6 @@ def command_loop():
             log(f"command_loop error: {e}")
         time.sleep(CMD_INTERVAL)
 
-
 def signal_loop():
     log(f"📡 Signal loop started ({POLL_INTERVAL}s)")
     while True:
@@ -467,19 +467,19 @@ def signal_loop():
                 log("🔴 ตลาดปิด")
                 time.sleep(POLL_INTERVAL)
                 continue
-            prices = get_prices()
-            if prices:
-                signal = calculate_signal(prices)
+            df = get_prices()
+            if df is not None and not df.empty:
+                current_price = float(df['close'].iloc[-1])
+                signal = calculate_signal(df)
                 if signal:
-                    send_signal(signal, prices[-1])
+                    send_signal(signal, current_price)
                 else:
-                    log(f"⏳ No signal | Price:{prices[-1]:,.2f}")
+                    log(f"⏳ No signal | Price:{current_price:,.2f}")
             else:
                 log("⚠️ ดึงราคาไม่ได้")
         except Exception as e:
             log(f"signal_loop error: {e}")
         time.sleep(POLL_INTERVAL)
-
 
 # ── Main ───────────────────────────────────────────────────
 if __name__ == "__main__":
