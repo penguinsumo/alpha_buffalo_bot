@@ -346,17 +346,11 @@ def get_prices():
 
 from pivot_engine_v2 import PivotEngine
 from session_clock   import SessionClock
-from equity_guard    import EquityGuard
 
 engine  = PivotEngine(left=5, right=5, macro_lookback=144)
 session = SessionClock()
-guard   = EquityGuard()
 
 def calculate_signal(df):
-    if not guard.ok():
-        log(f"Guard PAUSED: {guard.state.mode_reason}")
-        return None
-
     sess = session.current()
     if not sess.is_open:
         log(f"Session closed: {sess.note}")
@@ -391,20 +385,13 @@ def calculate_signal(df):
     )
 
     if is_sniper:
-        guard.set_sniper_mode(f"VSA:{pivot_state.vsa_signal} Score:{pivot_state.confluence}")
-    else:
-        guard.set_cashflow_mode("Cashflow zone")
-
+        
     if not pivot_state.signal_valid():
         log(f"No signal | Mode:{guard.mode()} | Score:{pivot_state.confluence} | Zone:{pivot_state.fibo_ratio} | VSA:{pivot_state.vsa_signal}")
         return None
 
     action = "BUY" if pivot_state.trend_dir == "up" else "SELL"
-    lot    = guard.lot_size(
-        base_lot     = 0.01,
-        stress_level = basket.stress_level,
-        is_sniper    = is_sniper,
-    )
+    lot = 0.01
 
     if is_sniper:
         return {
@@ -415,7 +402,8 @@ def calculate_signal(df):
             "cycle_id": guard.state.cycle_id,
         }
     else:
-        tp, sl = guard.cashflow_tp_sl(price=price, side=action)
+        tp = round(price + 15*0.01 if action == "BUY" else price - 15*0.01, 2)
+        sl = round(price - 10*0.01 if action == "BUY" else price + 10*0.01, 2)
         return {
             "action": action, "score": pivot_state.confluence,
             "sl": sl, "tp1": tp, "tp2": None,
