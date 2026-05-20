@@ -385,7 +385,10 @@ def calculate_signal(df):
     )
 
     if is_sniper:
-        
+        guard.set_sniper_mode(f"VSA:{pivot_state.vsa_signal} Score:{pivot_state.confluence}")
+    else:
+        guard.set_cashflow_mode("Cashflow zone")
+
     if not pivot_state.signal_valid():
         log(f"No signal | Mode:{guard.mode()} | Score:{pivot_state.confluence} | Zone:{pivot_state.fibo_ratio} | VSA:{pivot_state.vsa_signal}")
         return None
