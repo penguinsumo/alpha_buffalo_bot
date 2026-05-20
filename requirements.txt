@@ -3,3 +3,4 @@ pandas
 numpy
 supabase
 python-dotenv
+# bust Wed May 20 13:58:13 +07 2026
