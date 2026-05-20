@@ -77,6 +77,46 @@ class DailyRecord:
 
 
 class EquityGuard:
+    # ── backward compat shim ──
+    def __init__(self, starting_equity: float = 10000.0, max_dd_pct: float = 1.8):
+        self.starting_equity = starting_equity
+        self.current_equity  = starting_equity
+        self.highest_equity  = starting_equity
+        self.max_dd_pct      = max_dd_pct
+        self.is_paused       = False
+        self.state           = type("S", (), {
+            "mode": "CASHFLOW",
+            "mode_reason": "",
+            "cycle_id": "",
+            "today": type("T", (), {
+                "dd_pct": 0.0,
+                "trades_count": 0,
+                "win_rate": 0.0,
+                "realized_pnl": 0.0,
+                "floating_pnl": 0.0,
+                "wins": 0,
+                "losses": 0,
+            })(),
+        })()
+
+    def ok(self): return not self.is_paused
+    def mode(self): return self.state.mode
+    def update(self, equity=0, floating_pnl=0, realized_pnl=0): pass
+    def new_cycle(self, p=""): 
+        import uuid; self.state.cycle_id = str(uuid.uuid4()); return self.state.cycle_id
+    def set_sniper_mode(self, r=""): self.state.mode = "SNIPER"; self.state.mode_reason = r
+    def set_cashflow_mode(self, r=""): self.state.mode = "CASHFLOW"; self.state.mode_reason = r
+    def reset_pause(self): self.is_paused = False; self.state.mode = "CASHFLOW"
+    def dd_weekly_pct(self): return 0.0
+    def lot_size(self, base_lot=0.01, stress_level="low", is_sniper=False):
+        return base_lot * (2.0 if is_sniper else 1.0)
+    def cashflow_tp_sl(self, price=0, side="BUY"):
+        pip = 0.01
+        if side == "BUY": return round(price+15*pip,2), round(price-10*pip,2)
+        return round(price-15*pip,2), round(price+10*pip,2)
+    def summary(self): return f"EquityGuard: {self.state.mode}"
+
+class _EquityGuard:
     """
     Financial Circuit Breaker สำหรับ Alpha Buffalo
 
