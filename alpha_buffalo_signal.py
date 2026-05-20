@@ -15,7 +15,6 @@ RAILWAY_WEBHOOK_URL = os.getenv("RAILWAY_WEBHOOK_URL")
 ADMIN_ID            = int(os.getenv("ADMIN_ID", "0"))
 TELEGRAM_API        = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 SYMBOL              = "XAU/USD"
-COOLDOWN_MIN        = 10
 POLL_INTERVAL       = 120
 CMD_INTERVAL        = 3
 
@@ -307,8 +306,7 @@ def handle_commands():
             market = "✅ เปิด" if is_market_open() else "🔴 ปิด"
             cd = ""
             if t:
-                rem = max(0, COOLDOWN_MIN - (now_bkk() - t).total_seconds() / 60)
-                cd = f"\n⏸ Cooldown: {rem:.0f} นาที" if rem > 0 else ""
+                cd = ""
             db = "✅" if supabase else "❌ Supabase ดาวน์"
             send_message(chat_id,
                 f"📊 <b>Bot Status</b>\n"
@@ -370,9 +368,7 @@ def send_signal(signal, price):
     with state_lock:
         if last_signal_time:
             diff = (now_bkk() - last_signal_time).total_seconds() / 60
-            if diff < COOLDOWN_MIN:
-                log(f"⏸ Cooldown {COOLDOWN_MIN - diff:.1f} นาที")
-                return
+
         if last_signal == signal["action"]:
             log("⏸ Same direction — skip")
             return
