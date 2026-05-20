@@ -15,6 +15,7 @@ RAILWAY_WEBHOOK_URL = os.getenv("RAILWAY_WEBHOOK_URL")
 ADMIN_ID            = int(os.getenv("ADMIN_ID", "0"))
 TELEGRAM_API        = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 SYMBOL              = "XAU/USD"
+COOLDOWN_MIN        = 10
 POLL_INTERVAL       = 120
 CMD_INTERVAL        = 3
 
@@ -306,7 +307,8 @@ def handle_commands():
             market = "✅ เปิด" if is_market_open() else "🔴 ปิด"
             cd = ""
             if t:
-                cd = ""
+                rem = max(0, COOLDOWN_MIN - (now_bkk() - t).total_seconds() / 60)
+                cd = f"\n⏸ Cooldown: {rem:.0f} นาที" if rem > 0 else ""
             db = "✅" if supabase else "❌ Supabase ดาวน์"
             send_message(chat_id,
                 f"📊 <b>Bot Status</b>\n"
@@ -342,25 +344,85 @@ def get_prices():
     return None
 
 
-def calculate_signal(prices):
-    if len(prices) < 26:
+from pivot_engine_v2 import PivotEngine
+from session_clock   import SessionClock
+from equity_guard    import EquityGuard
+
+engine  = PivotEngine(left=5, right=5, macro_lookback=144)
+session = SessionClock()
+guard   = EquityGuard(starting_equity=10000.0)
+
+def calculate_signal(df):
+    if not guard.ok():
+        log(f"Guard PAUSED: {guard.state.mode_reason}")
         return None
-    try:
-        close = pd.Series(prices)
-        ema9  = close.ewm(span=9).mean().iloc[-1]
-        ema21 = close.ewm(span=21).mean().iloc[-1]
-        delta = close.diff()
-        gain  = delta.clip(lower=0).rolling(14).mean()
-        loss  = (-delta.clip(upper=0)).rolling(14).mean()
-        rsi   = (100 - 100 / (1 + gain / loss)).iloc[-1]
-        score = 80  # TODO: replace with real Fibonacci score
-        if ema9 > ema21 and 50 < rsi < 75:
-            return {"action": "BUY",  "score": score, "rsi": rsi}
-        if ema9 < ema21 and 25 < rsi < 50:
-            return {"action": "SELL", "score": score, "rsi": rsi}
-    except Exception as e:
-        log(f"calculate_signal error: {e}")
-    return None
+
+    sess = session.current()
+    if not sess.is_open:
+        log(f"Session closed: {sess.note}")
+        return None
+
+    pivot_state, basket = engine.update(df)
+
+    if pivot_state.bos_detected:
+        guard.new_cycle()
+        guard.set_cashflow_mode("BOS/MSS reset")
+        return None
+
+    if not pivot_state.is_ready():
+        log(f"Pivot not ready | Price:{float(df['close'].iloc[-1]):,.2f}")
+        return None
+
+    price = float(df["close"].iloc[-1])
+
+    ok, reason = session.can_entry(
+        fibo_ratio   = pivot_state.fibo_ratio or 0,
+        confluence   = pivot_state.confluence,
+        in_inst_zone = pivot_state.in_inst_zone,
+    )
+    if not ok:
+        log(f"No entry: {reason}")
+        return None
+
+    is_sniper = (
+        pivot_state.in_inst_zone and
+        pivot_state.vsa_signal == "stopping_volume" and
+        pivot_state.confluence >= 80
+    )
+
+    if is_sniper:
+        guard.set_sniper_mode(f"VSA:{pivot_state.vsa_signal} Score:{pivot_state.confluence}")
+    else:
+        guard.set_cashflow_mode("Cashflow zone")
+
+    if not pivot_state.signal_valid():
+        log(f"No signal | Mode:{guard.mode()} | Score:{pivot_state.confluence} | Zone:{pivot_state.fibo_ratio} | VSA:{pivot_state.vsa_signal}")
+        return None
+
+    action = "BUY" if pivot_state.trend_dir == "up" else "SELL"
+    lot    = guard.lot_size(
+        base_lot     = 0.01,
+        stress_level = basket.stress_level,
+        is_sniper    = is_sniper,
+    )
+
+    if is_sniper:
+        return {
+            "action": action, "score": pivot_state.confluence,
+            "sl": pivot_state.sl, "tp1": pivot_state.tp1, "tp2": pivot_state.tp2,
+            "mode": "SNIPER", "vsa": pivot_state.vsa_signal,
+            "zone": pivot_state.fibo_ratio, "lot": lot,
+            "cycle_id": guard.state.cycle_id,
+        }
+    else:
+        tp, sl = guard.cashflow_tp_sl(price=price, side=action)
+        return {
+            "action": action, "score": pivot_state.confluence,
+            "sl": sl, "tp1": tp, "tp2": None,
+            "mode": "CASHFLOW", "vsa": pivot_state.vsa_signal,
+            "zone": pivot_state.fibo_ratio, "lot": lot,
+            "cycle_id": guard.state.cycle_id,
+        }
 
 
 def send_signal(signal, price):
@@ -368,7 +430,9 @@ def send_signal(signal, price):
     with state_lock:
         if last_signal_time:
             diff = (now_bkk() - last_signal_time).total_seconds() / 60
-
+            if diff < COOLDOWN_MIN:
+                log(f"⏸ Cooldown {COOLDOWN_MIN - diff:.1f} นาที")
+                return
         if last_signal == signal["action"]:
             log("⏸ Same direction — skip")
             return
