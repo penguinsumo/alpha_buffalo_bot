@@ -15,8 +15,8 @@ RAILWAY_WEBHOOK_URL = os.getenv("RAILWAY_WEBHOOK_URL")
 ADMIN_ID            = int(os.getenv("ADMIN_ID", "0"))
 TELEGRAM_API        = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 SYMBOL              = "XAU/USD"
-COOLDOWN_MIN        = 60
-POLL_INTERVAL       = 180
+COOLDOWN_MIN        = 10
+POLL_INTERVAL       = 120
 CMD_INTERVAL        = 3
 
 # ── State ──────────────────────────────────────────────────
@@ -348,22 +348,17 @@ def calculate_signal(prices):
     if len(prices) < 26:
         return None
     try:
-        close  = pd.Series(prices)
-        ema9   = close.ewm(span=9).mean().iloc[-1]
-        ema21  = close.ewm(span=21).mean().iloc[-1]
-        ema200 = close.ewm(span=200).mean().iloc[-1]
-        delta  = close.diff()
-        gain   = delta.clip(lower=0).rolling(14).mean()
-        loss   = (-delta.clip(upper=0)).rolling(14).mean()
-        rsi    = (100 - 100 / (1 + gain / loss)).iloc[-1]
-        price  = close.iloc[-1]
-        score  = 80
-        # trend filter: ราคาต้องอยู่ฝั่งเดียวกับ EMA200
-        uptrend   = price > ema200
-        downtrend = price < ema200
-        if uptrend   and ema9 > ema21 and 55 < rsi < 70:
+        close = pd.Series(prices)
+        ema9  = close.ewm(span=9).mean().iloc[-1]
+        ema21 = close.ewm(span=21).mean().iloc[-1]
+        delta = close.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rsi   = (100 - 100 / (1 + gain / loss)).iloc[-1]
+        score = 80  # TODO: replace with real Fibonacci score
+        if ema9 > ema21 and 50 < rsi < 75:
             return {"action": "BUY",  "score": score, "rsi": rsi}
-        if downtrend and ema9 < ema21 and 30 < rsi < 45:
+        if ema9 < ema21 and 25 < rsi < 50:
             return {"action": "SELL", "score": score, "rsi": rsi}
     except Exception as e:
         log(f"calculate_signal error: {e}")
@@ -435,80 +430,11 @@ def signal_loop():
         time.sleep(POLL_INTERVAL)
 
 
-# ── Keep-Alive Server ─────────────────────────────────────
-import http.server, socketserver
-
-def keep_alive():
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"Alpha Buffalo OK")
-        def log_message(self, *args): pass
-    port = int(os.getenv("PORT", 8080))
-    with socketserver.TCPServer(("0.0.0.0", port), Handler) as httpd:
-        httpd.serve_forever()
-
 # ── Main ───────────────────────────────────────────────────
 if __name__ == "__main__":
     print("🐃 ALPHA BUFFALO Signal Bot v4 started\n")
     load_last_signal()
-    threading.Thread(target=keep_alive,   daemon=True).start()
     threading.Thread(target=command_loop, daemon=True).start()
     threading.Thread(target=signal_loop,  daemon=True).start()
     while True:
         time.sleep(60)
-
-
-# keep-alive
-import threading, http.server
-
-if __name__ == "__main__":
-    print("🐃 ALPHA BUFFALO Signal Bot v4 started\n")
-    load_last_signal()
-    threading.Thread(target=keep_alive,   daemon=True).start()
-    threading.Thread(target=command_loop, daemon=True).start()
-    threading.Thread(target=signal_loop,  daemon=True).start()
-    while True:
-        time.sleep(60)
-
-
-# keep-alive
-import threading, http.server
-
-if __name__ == "__main__":
-    print("🐃 ALPHA BUFFALO Signal Bot v4 started\n")
-    load_last_signal()
-    threading.Thread(target=keep_alive,   daemon=True).start()
-    threading.Thread(target=command_loop, daemon=True).start()
-    threading.Thread(target=signal_loop,  daemon=True).start()
-    while True:
-        time.sleep(60)
-
-
-# keep-alive
-import threading, http.server
-
-if __name__ == "__main__":
-    print("🐃 ALPHA BUFFALO Signal Bot v4 started\n")
-    load_last_signal()
-    threading.Thread(target=keep_alive,   daemon=True).start()
-    threading.Thread(target=command_loop, daemon=True).start()
-    threading.Thread(target=signal_loop,  daemon=True).start()
-    while True:
-        time.sleep(60)
-
-
-# keep-alive
-import threading, http.server
-
-def keep_alive():
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-        def log_message(self, *args): pass
-    http.server.HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
-
-threading.Thread(target=keep_alive, daemon=True).start()

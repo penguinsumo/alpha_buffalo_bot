@@ -23,6 +23,7 @@ Usage:
 """
 
 from __future__ import annotations
+from fvg_detector import FVGDetector
 from dataclasses import dataclass, field
 from typing import Optional
 import pandas as pd
@@ -216,6 +217,7 @@ class PivotEngine:
 
         self.state  = PivotState()
         self.basket = BasketState()
+        self.fvg    = FVGDetector()
 
     # ════════════════════════════════════
     # PUBLIC API
@@ -271,6 +273,7 @@ class PivotEngine:
         """Manual reset — /reset_basket command"""
         self.state  = PivotState()
         self.basket = BasketState()
+        self.fvg    = FVGDetector()
 
     def get_zone_for_price(self, price: float, tolerance_pct: float = 0.05) -> Optional[Zone]:
         """ราคาอยู่ใน zone ไหน — ใช้ใน bot ตอนตัดสิน add lot"""
@@ -516,33 +519,59 @@ class PivotEngine:
             return
         price = float(df['close'].iloc[-1])
 
+        broke = False
         if self.state.trend_dir == "up":
             threshold = self.state.locked_low * (1 - BOS_BUFFER)
-            if price < threshold:
-                self.state.bos_detected = True
-                self._on_bos(price)
-
+            broke = price < threshold
         elif self.state.trend_dir == "down":
             threshold = self.state.locked_high * (1 + BOS_BUFFER)
-            if price > threshold:
-                self.state.bos_detected = True
-                self._on_bos(price)
+            broke = price > threshold
 
-    def _on_bos(self, trigger_price: float):
-        """
-        BOS เกิด:
-        1. queue action ให้ bot รับรู้ (อาจต้อง cut basket)
-        2. reset pivot state
-        3. basket stress → critical
-        """
+        if not broke:
+            return
+
+        result = self.fvg.analyze(
+            df,
+            swing_high = self.state.locked_high,
+            swing_low  = self.state.locked_low,
+            trend_dir  = self.state.trend_dir,
+        )
+
+        if result.verdict == "HUNT":
+            self.state.bos_detected = False
+            self.basket.add_action(
+                "LIQUIDITY_HUNT",
+                trigger_price = price,
+                confidence    = result.confidence,
+                note          = result.reason,
+            )
+        elif result.verdict == "MSS":
+            self.state.bos_detected = True
+            self._on_bos(price, result)
+        else:
+            self.state.bos_detected = False
+            self.basket.add_action(
+                "STRUCTURE_WAIT",
+                trigger_price = price,
+                note          = result.reason,
+            )
+
+    def _on_bos(self, trigger_price: float, shift_result=None):
+        fvg_zone = None
+        if shift_result and shift_result.fvg:
+            fvg_zone = {
+                "top":       shift_result.fvg.top,
+                "bottom":    shift_result.fvg.bottom,
+                "direction": shift_result.fvg.direction,
+            }
         self.basket.add_action(
-            "BOS_DETECTED",
+            "MSS_CONFIRMED",
             trigger_price = trigger_price,
-            note          = "ราคาทะลุ structure — พิจารณา cut basket",
+            fvg_zone      = fvg_zone,
+            confidence    = shift_result.confidence if shift_result else 0,
+            note          = shift_result.reason if shift_result else "MSS detected",
         )
         self.basket.stress_level = "critical"
-
-        # reset pivot — จะ scan ใหม่รอบหน้า
         self.state.locked_high  = None
         self.state.locked_low   = None
         self.state.high_time    = None

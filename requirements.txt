@@ -1,6 +1,5 @@
-twelvedata
-pandas
 requests
-urllib3<2
-python-dotenv
+pandas
+numpy
 supabase
+python-dotenv
