@@ -350,7 +350,7 @@ from equity_guard    import EquityGuard
 
 engine  = PivotEngine(left=5, right=5, macro_lookback=144)
 session = SessionClock()
-guard   = EquityGuard(starting_equity=10000.0)
+guard   = EquityGuard()
 
 def calculate_signal(df):
     if not guard.ok():
