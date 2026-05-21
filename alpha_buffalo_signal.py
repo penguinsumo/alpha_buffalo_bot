@@ -1,4 +1,21 @@
 import os
+import threading
+from flask import Flask
+
+app = Flask(__name__)
+@app.route('/')
+def health_check():
+    return "Alpha Buffalo Bot is Alive and Running!"
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
+# สั่งเปิด Web Server ไว้เป็น Background
+threading.Thread(target=run_web_server, daemon=True).start()
+
+# --- ด้านล่างนี้คือโค้ดระบบเดิมของคุณ ---
+import os
 import time
 import threading
 import telebot
