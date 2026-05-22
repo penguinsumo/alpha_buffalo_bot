@@ -330,6 +330,32 @@ def handle_commands():
 
 
 # ── Price & Signal ─────────────────────────────────────────
+
+def get_ohlcv():
+    try:
+        url = (f"https://api.twelvedata.com/time_series"
+               f"?symbol={SYMBOL}&interval=1h&outputsize=200"
+               f"&apikey={TWELVE_API_KEY}")
+        data = __import__("requests").get(url, timeout=10).json()
+        if "values" not in data:
+            return None
+        rows = []
+        for v in reversed(data["values"]):
+            rows.append({
+                "time":   v["datetime"],
+                "open":   float(v["open"]),
+                "high":   float(v["high"]),
+                "low":    float(v["low"]),
+                "close":  float(v["close"]),
+                "volume": float(v.get("volume", 1000)),
+            })
+        import pandas as pd
+        df = pd.DataFrame(rows)
+        df.set_index("time", inplace=True)
+        return df
+    except Exception as e:
+        log(f"get_ohlcv error: {e}")
+        return None
 def get_prices():
     try:
         url = (f"https://api.twelvedata.com/time_series"
@@ -476,13 +502,14 @@ def signal_loop():
                 log("🔴 ตลาดปิด")
                 time.sleep(POLL_INTERVAL)
                 continue
-            prices = get_prices()
-            if prices:
-                signal = calculate_signal(prices)
+            df = get_ohlcv()
+            if df is not None:
+                price = float(df["close"].iloc[-1])
+                signal = calculate_signal(df)
                 if signal:
-                    send_signal(signal, prices[-1])
+                    send_signal(signal, price)
                 else:
-                    log(f"⏳ No signal | Price:{prices[-1]:,.2f}")
+                    log(f"⏳ No signal | Price:{price:,.2f} | Mode:{guard.mode()} | Score:{engine.state.confluence}")
             else:
                 log("⚠️ ดึงราคาไม่ได้")
         except Exception as e:
