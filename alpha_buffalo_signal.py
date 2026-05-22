@@ -1,4 +1,4 @@
-import os, time, threading, telebot, requests
+import os, time, threading, telebot, requests, logging
 from flask import Flask
 import keep_alive
 from pivot_engine_v2 import get_flexible_score
@@ -21,27 +21,30 @@ def on_startup():
 # Run Startup
 on_startup()
 
-# Server & Price...
+# Server
 app = Flask(__name__)
 @app.route('/')
 def health(): return "Bot is alive"
 def run_web(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 threading.Thread(target=run_web, daemon=True).start()
 
-def get_xau_price():
-    try:
-        url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={API_KEY}"
-        return f"{float(requests.get(url, timeout=5).json().get('price', 0)):.2f}"
-    except: return "0.00"
-
 @bot.message_handler(commands=['price'])
 def price(m):
-    price_val = get_xau_price()
-    try: score = get_flexible_score()
-    except: score = "N/A"
-    text = f"💰 *Price*: `{price_val}`\n🎯 *V5-Score*: `{score}`"
-    bot.reply_to(m, text, parse_mode="Markdown")
+    try:
+        url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={API_KEY}"
+        price_val = f"{float(requests.get(url, timeout=5).json().get('price', 0)):.2f}"
+        score = get_flexible_score()
+    except: 
+        price_val, score = "0.00", "N/A"
+    bot.reply_to(m, f"💰 *Price*: `{price_val}`\n🎯 *V5-Score*: `{score}`", parse_mode="Markdown")
 
+# Safe Polling
 if BOT_MODE == "active":
+    print("Starting Polling Mode...")
     keep_alive.keep_alive()
-    bot.infinity_polling()
+    try:
+        bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    except Exception as e:
+        print(f"Polling Error: {e}")
+else:
+    print("Passive Mode: No Polling.")
