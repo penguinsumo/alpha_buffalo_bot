@@ -20,6 +20,10 @@ import os
 import time
 import threading
 import telebot
+@bot.message_handler(commands=["status"])
+def status(message):
+    host = os.uname()[1]
+    bot.reply_to(message, f"✅ Bot is running on: {host}\nสถานะ: Active\nเวลา: 2026-05-22")
 from dotenv import load_dotenv
 
 # --- SETUP ---
