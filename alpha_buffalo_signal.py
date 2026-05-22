@@ -1,3 +1,4 @@
+import keep_alive
 import os
 import threading
 from flask import Flask
@@ -40,7 +41,7 @@ def command_loop():
         else:
             bot.reply_to(message, "ได้รับข้อความแล้ว: " + message.text)
     
-    bot.infinity_polling()
+    keep_alive.keep_alive(); bot.infinity_polling()
 
 # --- 2. SIGNAL LOOP (สมอง) ---
 def signal_loop():
