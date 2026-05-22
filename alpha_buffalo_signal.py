@@ -1,21 +1,15 @@
 import os, telebot
 
-# 1. Setup พื้นฐาน
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 bot = telebot.TeleBot(TOKEN)
 
-# 2. ป้องกัน Conflict (เคลียร์ Webhook เก่า)
-bot.remove_webhook()
+# ล้าง Webhook และล้างคิวเก่าทิ้งทั้งหมด (Drop pending updates)
+bot.delete_webhook(drop_pending_updates=True)
 
-# 3. คำสั่งทดสอบพื้นฐาน
 @bot.message_handler(commands=['start'])
 def start(m):
-    bot.reply_to(m, "System Online - Baseline Stable")
+    bot.reply_to(m, "System Online - Force Cleaned")
 
-@bot.message_handler(commands=['ping'])
-def ping(m):
-    bot.reply_to(m, "Pong!")
-
-# 4. Polling แบบมาตรฐานที่สุด
-print("Bot starting...")
-bot.infinity_polling(timeout=10, long_polling_timeout=5)
+print("Bot starting with force clean...")
+# ใช้ none_stop=True เพื่อให้มันทนทานขึ้น
+bot.infinity_polling(timeout=20, long_polling_timeout=20, none_stop=True)
