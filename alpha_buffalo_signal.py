@@ -4,9 +4,13 @@ import keep_alive
 
 # Setup
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-API_KEY = os.environ.get('TWELVE_DATA_API_KEY')
-BOT_MODE = os.environ.get('BOT_MODE', 'passive') # Default passive เพื่อกันชน
+API_KEY = os.environ.get('TWELVE_API_KEY') # ดึงจากชื่อที่ตรงกับ Dashboard ของคุณ
+BOT_MODE = os.environ.get('BOT_MODE', 'active') # Default เป็น Active ถ้าไม่ได้ตั้งค่า
 bot = telebot.TeleBot(TOKEN)
+
+# Debug: Print env to logs (ช่วยให้เราเห็นว่าบอทเห็นตัวแปรอะไรบ้าง)
+print(f"DEBUG: TWELVE_API_KEY found: {bool(API_KEY)}")
+print(f"DEBUG: All env vars: {list(os.environ.keys())}")
 
 # Web Server
 app = Flask(__name__)
@@ -16,21 +20,13 @@ def run_web(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 threading.Thread(target=run_web, daemon=True).start()
 
 # Price Fetcher
-
-
 def get_xau_price():
-    # ลองหาทุกชื่อที่เป็นไปได้ ทั้งที่ตั้งไว้เดิม และชื่อมาตรฐาน
-    api_key = os.environ.get("TWELVE_API_KEY") or os.environ.get("TWELVE_DATA_API_KEY") or os.environ.get("API_KEY")
-    if not api_key:
-        return "Error: API Key Not Found"
+    if not API_KEY: return "Error: API Key Not Found (Check TWELVE_API_KEY in Dashboard)"
     try:
-        url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={api_key}"
+        url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={API_KEY}"
         res = requests.get(url, timeout=10).json()
-        return f"{float(res["price"]):.2f}" if "price" in res else f"Data Error: {res}"
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-
+        return f"{float(res['price']):.2f}" if 'price' in res else f"Data Error: {res}"
+    except Exception as e: return f"Error: {str(e)}"
 
 # Commands
 @bot.message_handler(commands=['price'])
@@ -42,7 +38,7 @@ def status(m): bot.reply_to(m, f"✅ Bot is running on: {os.uname()[1]} | Mode: 
 @bot.message_handler(func=lambda m: True)
 def handle(m): bot.reply_to(m, "บอททำงานอยู่ครับ")
 
-# Start Polling (Only if Active)
+# Start Polling
 if BOT_MODE == "active":
     print("🚀 Active Mode: Starting Polling")
     keep_alive.keep_alive()
