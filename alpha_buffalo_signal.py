@@ -1,4 +1,5 @@
-import os, time, threading, telebot, requests
+import 
+from pivot_engine_v2 import get_flexible_scoreos, time, threading, telebot, requests
 from flask import Flask
 import keep_alive
 
@@ -30,7 +31,8 @@ def get_xau_price():
 
 # Commands
 @bot.message_handler(commands=['price'])
-def price(m): bot.reply_to(m, f"💰 ราคาทอง XAU/USD: {get_xau_price()}")
+def price(m):
+    score = get_flexible_score() bot.reply_to(m, f"💰 ราคาทอง XAU/USD: {get_xau_price()} | V5-Score: {score}\")
 
 @bot.message_handler(commands=['status'])
 def status(m): bot.reply_to(m, f"✅ Bot is running on: {os.uname()[1]} | Mode: {BOT_MODE}")
