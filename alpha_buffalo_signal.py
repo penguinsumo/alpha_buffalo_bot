@@ -22,7 +22,7 @@ import telebot
 from dotenv import load_dotenv
 
 # --- SETUP ---
-TOKEN = '8700567296:AAE8TNqJUN2X97ASVbQKyy4KuIUdAehIfxI'
+TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 bot = telebot.TeleBot(TOKEN)
 
 # --- 1. COMMAND LOOP (หู) ---
