@@ -38,7 +38,7 @@ def command_loop():
         elif '/menu' in text or 'menu' in text:
             bot.reply_to(message, "🐃 **Alpha Buffalo Menu**\n/status - เช็คสถานะบอท\n/price - เช็คราคาทอง\n/signal - ดูสัญญาณล่าสุด")
         elif '/price' in text:
-            bot.reply_to(message, "💰 ราคาทองตอนนี้ประมาณ 4,535.xx")
+            price = get_xau_price(); bot.reply_to(message, f"💰 ราคาทอง XAU/USD ตอนนี้คือ {price}")
         else:
             bot.reply_to(message, "ได้รับข้อความแล้ว: " + message.text)
     
