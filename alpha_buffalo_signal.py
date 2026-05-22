@@ -17,16 +17,19 @@ threading.Thread(target=run_web, daemon=True).start()
 
 # Price Fetcher
 
+
 def get_xau_price():
-    api_key = os.environ.get("TWELVE_DATA_API_KEY")
+    # ลองหาทุกชื่อที่เป็นไปได้ ทั้งที่ตั้งไว้เดิม และชื่อมาตรฐาน
+    api_key = os.environ.get("TWELVE_API_KEY") or os.environ.get("TWELVE_DATA_API_KEY") or os.environ.get("API_KEY")
     if not api_key:
-        print("DEBUG LOG: Environment variables available:", list(os.environ.keys()))
         return "Error: API Key Not Found"
     try:
         url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={api_key}"
         res = requests.get(url, timeout=10).json()
-        return f"{float(res["price"]):.2f}" if "price" in res else "Data Error"
-    except: return "Connection Error"
+        return f"{float(res["price"]):.2f}" if "price" in res else f"Data Error: {res}"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
 
 
 # Commands
