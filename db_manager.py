@@ -3,7 +3,9 @@ from supabase import create_client, Client
 
 class DBManager:
     def __init__(self):
-        self.supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
+        self.url = os.environ.get("SUPABASE_URL")
+        self.key = os.environ.get("SUPABASE_KEY")
+        self.supabase: Client = create_client(self.url, self.key)
     
     def load_all_state(self):
         try:
@@ -17,3 +19,6 @@ class DBManager:
 
     def save_pivot_state(self, locked_high, locked_low, trend_dir):
         return self.supabase.table("pivot_state").upsert({"id": 1, "locked_high": locked_high, "locked_low": locked_low, "trend_dir": trend_dir}).execute()
+
+# สร้าง instance ที่ import ได้
+db = DBManager()
