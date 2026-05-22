@@ -1,5 +1,6 @@
-import os, telebot, threading, requests, time
+import os, telebot, time
 from flask import Flask
+import threading
 
 # Setup
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -9,30 +10,22 @@ app = Flask(__name__)
 @app.route('/')
 def health(): return "OK"
 
-# 1. ทดสอบว่า Railway ออกเน็ตหา Telegram ได้ไหม
-def test_connection():
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/getMe"
-        res = requests.get(url, timeout=10)
-        print(f"DEBUG: Telegram API Connection Test: {res.status_code}")
-        print(f"DEBUG: Response: {res.text}")
-    except Exception as e:
-        print(f"DEBUG: CRITICAL Network Error: {e}")
+# 1. ล้าง Webhook ให้สะอาดที่สุด (บางทีค้างจากอดีต)
+try:
+    bot.remove_webhook()
+    print("DEBUG: Webhook removed successfully.")
+except Exception as e:
+    print(f"DEBUG: Webhook remove failed: {e}")
 
-# 2. Start
+# 2. Start Web Server
 threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
-test_connection()
 
-print("Bot starting manual polling...")
-# ใช้ get_updates แบบ manual ทีละรอบเพื่อเลี่ยง Error ในตัว infinity_polling
-offset = None
+# 3. เริ่มต้น Polling แบบเคลียร์คิวถาวร
+print("Bot starting with exclusive polling...")
 while True:
     try:
-        updates = bot.get_updates(offset=offset, timeout=10)
-        for update in updates:
-            offset = update.update_id + 1
-            print(f"DEBUG: Received: {update}")
-            bot.reply_to(update.message, "Pong!")
+        # ใช้วิธีนี้เพื่อหลีกเลี่ยง Conflict
+        bot.infinity_polling(timeout=20, long_polling_timeout=20, drop_pending_updates=True)
     except Exception as e:
-        print(f"DEBUG: Polling loop error: {e}")
+        print(f"DEBUG: Polling Error: {e}")
         time.sleep(5)
