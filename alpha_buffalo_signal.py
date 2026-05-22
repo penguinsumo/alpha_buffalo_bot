@@ -518,13 +518,6 @@ def signal_loop():
 
 
 # ── Main ───────────────────────────────────────────────────
-if __name__ == "__main__":
-    print("🐃 ALPHA BUFFALO Signal Bot v4 started\n")
-    load_last_signal()
-    threading.Thread(target=command_loop, daemon=True).start()
-    threading.Thread(target=signal_loop,  daemon=True).start()
-    while True:
-        time.sleep(60)
 
 # ── Health Check Server ────────────────────────────────────
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -537,8 +530,11 @@ class HealthHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-def run_health_server():
+# ── Main ───────────────────────────────────────────────────
+if __name__ == "__main__":
+    print("🐃 ALPHA BUFFALO Signal Bot v4 started\n")
+    load_last_signal()
+    threading.Thread(target=command_loop, daemon=True).start()
+    threading.Thread(target=signal_loop,  daemon=True).start()
     port = int(os.getenv("PORT", 8080))
     HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
-
-threading.Thread(target=run_health_server, daemon=True).start()
