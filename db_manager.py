@@ -13,12 +13,11 @@ class DBManager:
                 print(f"DEBUG: DB Init Error: {e}")
 
     def load_all_state(self):
-        # ทดสอบการเชื่อมต่อ
         if not self.supabase: return "DB Not Initialized"
         try:
-            # สมมติว่ามีตารางชื่อ states
-            data = self.supabase.table("states").select("*").execute()
-            return "Connection OK"
+            # เปลี่ยนจาก 'states' เป็น 'bot_status' ตามที่ Error แนะนำครับ
+            data = self.supabase.table("bot_status").select("*").execute()
+            return "Connection OK (Data Retrieved)"
         except Exception as e:
             return f"Error: {e}"
 
