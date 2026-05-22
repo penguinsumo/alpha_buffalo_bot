@@ -25,10 +25,6 @@ from dotenv import load_dotenv
 # --- SETUP ---
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 bot = telebot.TeleBot(TOKEN)
-@bot.message_handler(commands=["status"])
-def status(message):
-    host = os.uname()[1]
-    bot.reply_to(message, f"✅ Bot is running on: {host}\nสถานะ: Active")
 
 
 # --- 1. COMMAND LOOP (หู) ---
@@ -62,3 +58,8 @@ def signal_loop():
 if __name__ == "__main__":
     threading.Thread(target=command_loop, daemon=True).start()
     signal_loop()
+
+@bot.message_handler(commands=["status"])
+def status(message):
+    host = os.uname()[1]
+    bot.reply_to(message, f"✅ Bot is running on: {host}\nสถานะ: Active")
