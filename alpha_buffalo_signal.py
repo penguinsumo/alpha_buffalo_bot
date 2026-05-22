@@ -1,15 +1,21 @@
-import os, telebot
+import os, telebot, threading, time
+from flask import Flask
+from db_manager import db
 
-TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-bot = telebot.TeleBot(TOKEN)
+# Setup
+bot = telebot.TeleBot(os.environ.get('TELEGRAM_BOT_TOKEN'))
+app = Flask(__name__)
 
-# ล้าง Webhook และล้างคิวเก่าทิ้งทั้งหมด (Drop pending updates)
-bot.delete_webhook(drop_pending_updates=True)
+@app.route('/')
+def health(): return "OK"
+
+def run_web(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+threading.Thread(target=run_web, daemon=True).start()
 
 @bot.message_handler(commands=['start'])
-def start(m):
-    bot.reply_to(m, "System Online - Force Cleaned")
+def start(m): bot.reply_to(m, "System Cleaned & Online")
 
-print("Bot starting with force clean...")
-# ใช้ none_stop=True เพื่อให้มันทนทานขึ้น
-bot.infinity_polling(timeout=20, long_polling_timeout=20, none_stop=True)
+# Force Clear
+bot.delete_webhook(drop_pending_updates=True)
+print("Bot starting clean...")
+bot.infinity_polling(timeout=10, long_polling_timeout=10, none_stop=True)
