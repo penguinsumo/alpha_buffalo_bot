@@ -286,13 +286,6 @@ def handle_command(text: str, chat_id: int):
     elif t == "/reset_sell":
         reset_basket("SELL")
         send_telegram("✅ SELL Basket Reset", chat_id)
-    elif t == "/price":
-        df_p = get_ohlcv("15min", 1)
-        if df_p is not None:
-            p = float(df_p["close"].iloc[-1])
-            send_telegram(f"💰 XAUUSD: {p:,.2f}", chat_id)
-        else:
-            send_telegram("⚠️ ดึงราคาไม่ได้", chat_id)
     elif t in ("/help", "/?"):
         send_telegram(
             "/status — สถานะ bot\n"
