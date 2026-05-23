@@ -1,3 +1,15 @@
+from typing import Optional
+"""
+alpha_buffalo_signal.py — Alpha Buffalo v5
+เพิ่ม Multi-Timeframe: 4H + 1H + 15M
+เพิ่ม signal_composer (V4+ Session + V5 Sniper)
+
+เปลี่ยนจาก v4:
+  - get_ohlcv() → get_ohlcv(interval, bars) รับ TF ได้
+  - signal loop → ดึง df_4h, df_1h, df_15m พร้อมกัน
+  - calculate_signal() → compose_signal() จาก signal_composer
+"""
+
 import requests
 import time
 import threading
@@ -5,8 +17,12 @@ import pandas as pd
 import os
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ── Config (Railway env vars) ──────────────────────────────
+# ── นำเข้า modules ใหม่ ───────────────────────────────────
+from signal_composer import compose_signal, format_composed, kill_basket, reset_basket
+
+# ── Config ────────────────────────────────────────────────
 TWELVE_API_KEY      = os.getenv("TWELVE_API_KEY")
 SUPABASE_URL        = os.getenv("SUPABASE_URL")
 SUPABASE_KEY        = os.getenv("SUPABASE_KEY")
@@ -16,8 +32,15 @@ ADMIN_ID            = int(os.getenv("ADMIN_ID", "0"))
 TELEGRAM_API        = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 SYMBOL              = "XAU/USD"
 COOLDOWN_MIN        = 10
-POLL_INTERVAL       = 120
+POLL_INTERVAL       = 900   # 15 นาที (sync กับ 15M TF)
 CMD_INTERVAL        = 3
+
+# ── Timeframe Config ──────────────────────────────────────
+TF_CONFIG = {
+    "4h":   {"interval": "4h",   "bars": 100},
+    "1h":   {"interval": "1h",   "bars": 200},
+    "15min":{"interval": "15min","bars": 96},
+}
 
 # ── State ──────────────────────────────────────────────────
 last_signal      = None
@@ -28,500 +51,233 @@ BKK              = timezone(timedelta(hours=7))
 
 
 def now_bkk():
-    return datetime.now(BKK)
+    return datetime.now(BKK).strftime("%H:%M:%S")
 
 
-def log(msg):
-    print(f"{now_bkk().strftime('%H:%M:%S')} | {msg}", flush=True)
+def log(msg: str):
+    print(f"{now_bkk()} | {msg}", flush=True)
 
 
-# ── Supabase ───────────────────────────────────────────────
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) \
-    if SUPABASE_URL and SUPABASE_KEY else None
+# ── Supabase ──────────────────────────────────────────────
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-# ── bot_status table (persist last_signal) ─────────────────
 def load_last_signal():
-    """Load last_signal from Supabase on restart"""
     global last_signal, last_signal_time
-    if not supabase:
-        return
     try:
-        res = supabase.table("bot_status").select("*").eq("id", 1).single().execute()
+        res = supabase.table("signals").select("*").order(
+            "created_at", desc=True).limit(1).execute()
         if res.data:
-            last_signal = res.data.get("last_signal")
-            ts = res.data.get("last_signal_time")
-            if ts:
-                last_signal_time = datetime.fromisoformat(ts)
+            row = res.data[0]
+            last_signal      = row.get("direction")
+            last_signal_time = row.get("created_at")
             log(f"Loaded last_signal: {last_signal}")
     except Exception as e:
-        log(f"load_last_signal: {e}")
+        log(f"load_last_signal error: {e}")
 
 
-def save_last_signal(action: str):
-    if not supabase:
-        return
+def save_signal(sig_dict: dict):
     try:
-        supabase.table("bot_status").upsert({
-            "id": 1,
-            "last_signal": action,
-            "last_signal_time": now_bkk().isoformat()
-        }, on_conflict="id").execute()
+        supabase.table("signals").insert(sig_dict).execute()
     except Exception as e:
-        log(f"save_last_signal error: {e}")
+        log(f"save_signal error: {e}")
 
 
-# ── Market Hours ───────────────────────────────────────────
-def is_market_open():
+# ── OHLCV ─────────────────────────────────────────────────
+def get_ohlcv(interval: str = "1h", bars: int = 200) -> "Optional[pd.DataFrame]":
+    """ดึง OHLCV จาก TwelveData — รองรับทุก TF"""
+    try:
+        url = "https://api.twelvedata.com/time_series"
+        params = {
+            "symbol":      SYMBOL,
+            "interval":    interval,
+            "outputsize":  bars,
+            "apikey":      TWELVE_API_KEY,
+            "format":      "JSON",
+        }
+        r = requests.get(url, params=params, timeout=15)
+        data = r.json()
+
+        if "values" not in data:
+            log(f"OHLCV {interval} error: {data.get('message','no values')}")
+            return None
+
+        df = pd.DataFrame(data["values"])
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.sort_values("datetime").reset_index(drop=True)
+        df.set_index("datetime", inplace=True)
+        df.index = df.index.tz_localize("UTC")
+
+        for col in ["open", "high", "low", "close"]:
+            df[col] = df[col].astype(float)
+        if "volume" in df.columns:
+            df["volume"] = df["volume"].astype(float)
+
+        return df
+
+    except Exception as e:
+        log(f"get_ohlcv({interval}) error: {e}")
+        return None
+
+
+# ── Market Open Check ─────────────────────────────────────
+def is_market_open() -> bool:
     now = datetime.now(timezone.utc)
-    wd  = now.weekday()
-    if wd == 5: return now.hour < 22
-    if wd == 6: return now.hour >= 22
+    # XAU/USD ปิด Sat 22:00 UTC - Sun 22:00 UTC
+    if now.weekday() == 5:  # Saturday
+        return now.hour < 22
+    if now.weekday() == 6:  # Sunday
+        return now.hour >= 22
     return True
 
 
-# ── Access Control ─────────────────────────────────────────
-def get_user_role(user_id: int) -> str:
-    if not supabase:
-        return "admin" if user_id == ADMIN_ID else "guest"
+# ── Telegram ──────────────────────────────────────────────
+def send_telegram(msg: str, chat_id: int = None):
+    cid = chat_id or ADMIN_ID
     try:
-        res = (supabase.table("bot_users")
-               .select("role, is_active")
-               .eq("id", user_id).single().execute())
-        if res.data and res.data.get("is_active"):
-            return res.data["role"]
-        return "guest"
+        requests.post(
+            f"{TELEGRAM_API}/sendMessage",
+            json={"chat_id": cid, "text": msg, "parse_mode": "HTML"},
+            timeout=10,
+        )
     except Exception as e:
-        log(f"get_user_role error: {e}")
-        return "admin" if user_id == ADMIN_ID else "guest"
+        log(f"send_telegram error: {e}")
 
 
-def is_admin(uid):  return get_user_role(uid) == "admin"
-def is_member(uid): return get_user_role(uid) in ("admin", "member")
-
-
-def add_user(user_id, username, role, approved_by):
-    if not supabase:
-        return False
-    try:
-        supabase.table("bot_users").upsert({
-            "id": user_id,
-            "username": username,
-            "role": role,
-            "approved_at": now_bkk().isoformat(),
-            "approved_by": approved_by,
-            "is_active": True
-        }, on_conflict="id").execute()
-        return True
-    except Exception as e:
-        log(f"add_user error: {e}")
-        return False
-
-
-def deactivate_user(user_id):
-    if not supabase:
-        return False
-    try:
-        supabase.table("bot_users").update(
-            {"is_active": False}).eq("id", user_id).execute()
-        return True
-    except Exception as e:
-        log(f"deactivate_user error: {e}")
-        return False
-
-
-def get_all_members():
-    if not supabase:
-        return []
-    try:
-        res = (supabase.table("bot_users")
-               .select("id, username, role")
-               .eq("is_active", True).execute())
-        return res.data or []
-    except Exception as e:
-        log(f"get_all_members error: {e}")
-        return []
-
-
-# ── Telegram ───────────────────────────────────────────────
-def send_message(chat_id, text):
-    try:
-        requests.post(f"{TELEGRAM_API}/sendMessage", json={
-            "chat_id": chat_id, "text": text, "parse_mode": "HTML"
-        }, timeout=10)
-    except Exception as e:
-        log(f"send_message error: {e}")
-
-
-def get_updates():
-    global last_update_id
-    try:
-        r = requests.get(f"{TELEGRAM_API}/getUpdates", params={
-            "offset": last_update_id + 1, "timeout": 2
-        }, timeout=8)
-        return r.json().get("result", [])
-    except Exception as e:
-        log(f"get_updates error: {e}")
-        return []
-
-
-# ── Command Handler ────────────────────────────────────────
-def handle_commands():
-    global last_update_id
-    for update in get_updates():
-        last_update_id = update["update_id"]
-        msg = update.get("message") or update.get("edited_message")
-        if not msg:
-            continue
-        text     = msg.get("text", "").strip()
-        chat_id  = msg["chat"]["id"]
-        user     = msg.get("from", {})
-        user_id  = user.get("id", 0)
-        username = user.get("username", str(user_id))
-
-        if not text.startswith("/"):
-            continue
-
-        parts = text.split()
-        cmd   = parts[0].lower().split("@")[0]
-        arg   = parts[1] if len(parts) > 1 else ""
-
-        log(f"CMD: {cmd} from @{username} ({user_id})")
-
-        # /start
-        if cmd == "/start":
-            role = get_user_role(user_id)
-            if role == "guest":
-                send_message(chat_id,
-                    f"👋 สวัสดี @{username}!\n"
-                    f"ยังไม่ได้รับสิทธิ์ → ติดต่อ Admin เพื่อขอ Approve")
-                send_message(ADMIN_ID,
-                    f"🔔 ผู้ใช้ใหม่: @{username} (ID: {user_id})\n"
-                    f"พิมพ์ /approve {user_id} {username} เพื่ออนุมัติ")
-            else:
-                send_message(chat_id, f"✅ ยินดีต้อนรับ @{username}! (Role: {role})")
-
-        # /help
-        elif cmd == "/help":
-            role = get_user_role(user_id)
-            if role == "guest":
-                send_message(chat_id, "❌ ไม่มีสิทธิ์เข้าถึง")
-            elif role == "member":
-                send_message(chat_id,
-                    "📋 <b>Alpha Buffalo Bot</b>\n\n"
-                    "/price — ราคา XAUUSD\n"
-                    "/signal — signal ล่าสุด\n"
-                    "/help — คำสั่ง")
-            else:
-                send_message(chat_id,
-                    "📋 <b>Alpha Buffalo Bot — Admin</b>\n\n"
-                    "/price /signal\n"
-                    "/approve &lt;id&gt; &lt;username&gt;\n"
-                    "/kick &lt;id&gt;\n"
-                    "/members\n"
-                    "/status\n"
-                    "/cb on|off")
-
-        # /price
-        elif cmd == "/price":
-            if not is_member(user_id):
-                send_message(chat_id, "❌ ไม่มีสิทธิ์")
-                continue
-            prices = get_prices()
-            if prices:
-                send_message(chat_id, f"💰 XAUUSD: <b>{prices[-1]:,.2f}</b> USD")
-            else:
-                send_message(chat_id, "❌ ดึงราคาไม่ได้")
-
-        # /signal
-        elif cmd == "/signal":
-            if not is_member(user_id):
-                send_message(chat_id, "❌ ไม่มีสิทธิ์")
-                continue
-            with state_lock:
-                s, t = last_signal, last_signal_time
-            if s and t:
-                elapsed = (now_bkk() - t).total_seconds() / 60
-                send_message(chat_id,
-                    f"📊 Signal ล่าสุด: <b>{s}</b>\n⏱ {elapsed:.0f} นาทีที่แล้ว")
-            else:
-                send_message(chat_id, "📭 ยังไม่มี signal")
-
-        # /approve
-        elif cmd == "/approve":
-            if not is_admin(user_id):
-                send_message(chat_id, "❌ Admin เท่านั้น")
-                continue
-            if not arg:
-                send_message(chat_id, "❌ /approve &lt;id&gt; &lt;username&gt;")
-                continue
-            try:
-                tid  = int(arg)
-                name = parts[2] if len(parts) > 2 else str(tid)
-                if add_user(tid, name, "member", user_id):
-                    send_message(chat_id, f"✅ Approved @{name}")
-                    send_message(tid, "✅ คุณได้รับสิทธิ์เข้าถึง Alpha Buffalo Bot แล้ว!")
-                else:
-                    send_message(chat_id, "❌ บันทึกไม่สำเร็จ")
-            except ValueError:
-                send_message(chat_id, "❌ id ต้องเป็นตัวเลข")
-
-        # /kick
-        elif cmd == "/kick":
-            if not is_admin(user_id):
-                send_message(chat_id, "❌ Admin เท่านั้น")
-                continue
-            try:
-                tid = int(arg)
-                if tid == ADMIN_ID:
-                    send_message(chat_id, "❌ ไม่สามารถ kick Admin")
-                    continue
-                if deactivate_user(tid):
-                    send_message(chat_id, f"✅ ถอนสิทธิ์ {tid} แล้ว")
-                else:
-                    send_message(chat_id, "❌ ถอนสิทธิ์ไม่สำเร็จ")
-            except ValueError:
-                send_message(chat_id, "❌ id ต้องเป็นตัวเลข")
-
-        # /members
-        elif cmd == "/members":
-            if not is_admin(user_id):
-                send_message(chat_id, "❌ Admin เท่านั้น")
-                continue
-            members = get_all_members()
-            if not members:
-                send_message(chat_id, "📭 ยังไม่มีสมาชิก")
-            else:
-                lines = ["👥 <b>สมาชิก:</b>"]
-                for m in members:
-                    lines.append(f"• @{m['username']} ({m['id']}) — {m['role']}")
-                send_message(chat_id, "\n".join(lines))
-
-        # /status
-        elif cmd == "/status":
-            if not is_admin(user_id):
-                send_message(chat_id, "❌ Admin เท่านั้น")
-                continue
-            with state_lock:
-                s, t = last_signal, last_signal_time
-            market = "✅ เปิด" if is_market_open() else "🔴 ปิด"
-            cd = ""
-            if t:
-                rem = max(0, COOLDOWN_MIN - (now_bkk() - t).total_seconds() / 60)
-                cd = f"\n⏸ Cooldown: {rem:.0f} นาที" if rem > 0 else ""
-            db = "✅" if supabase else "❌ Supabase ดาวน์"
-            send_message(chat_id,
-                f"📊 <b>Bot Status</b>\n"
-                f"ตลาด: {market}\n"
-                f"DB: {db}\n"
-                f"Signal ล่าสุด: {s or 'ยังไม่มี'}{cd}")
-
-        # /buy /sell (blocked)
-        elif cmd in ("/buy", "/sell"):
-            send_message(chat_id,
-                "⚠️ /buy /sell ส่งโดย Bot อัตโนมัติเท่านั้น\nดูที่ /signal")
-
-        # /cb
-        elif cmd == "/cb":
-            if not is_admin(user_id):
-                send_message(chat_id, "❌ Admin เท่านั้น")
-                continue
-            send_message(chat_id, "⚙️ Circuit Breaker: coming soon")
-
-
-# ── Price & Signal ─────────────────────────────────────────
-
-def get_ohlcv():
-    try:
-        url = (f"https://api.twelvedata.com/time_series"
-               f"?symbol={SYMBOL}&interval=1h&outputsize=200"
-               f"&apikey={TWELVE_API_KEY}")
-        data = __import__("requests").get(url, timeout=10).json()
-        if "values" not in data:
-            return None
-        rows = []
-        for v in reversed(data["values"]):
-            rows.append({
-                "time":   v["datetime"],
-                "open":   float(v["open"]),
-                "high":   float(v["high"]),
-                "low":    float(v["low"]),
-                "close":  float(v["close"]),
-                "volume": float(v.get("volume", 1000)),
-            })
-        import pandas as pd
-        df = pd.DataFrame(rows)
-        df.set_index("time", inplace=True)
-        return df
-    except Exception as e:
-        log(f"get_ohlcv error: {e}")
-        return None
-def get_prices():
-    try:
-        url = (f"https://api.twelvedata.com/time_series"
-               f"?symbol={SYMBOL}&interval=1min&outputsize=50"
-               f"&apikey={TWELVE_API_KEY}")
-        data = requests.get(url, timeout=10).json()
-        if "values" in data:
-            return [float(v["close"]) for v in reversed(data["values"])]
-        log(f"Twelve Data error: {data.get('message', 'unknown')}")
-    except Exception as e:
-        log(f"get_prices error: {e}")
-    return None
-
-
-from pivot_engine_v2 import PivotEngine
-from session_clock   import SessionClock
-from equity_guard    import EquityGuard
-
-engine  = PivotEngine(left=5, right=5, macro_lookback=144)
-session = SessionClock()
-guard   = EquityGuard(starting_equity=10000.0)
-
-def calculate_signal(df):
-    if not guard.ok():
-        log(f"Guard PAUSED: {guard.state.mode_reason}")
-        return None
-
-    sess = session.current()
-    if not sess.is_open:
-        log(f"Session closed: {sess.note}")
-        return None
-
-    pivot_state, basket = engine.update(df)
-
-    if pivot_state.bos_detected:
-        guard.new_cycle()
-        guard.set_cashflow_mode("BOS/MSS reset")
-        return None
-
-    if not pivot_state.is_ready():
-        log(f"Pivot not ready | Price:{float(df['close'].iloc[-1]):,.2f}")
-        return None
-
-    price = float(df["close"].iloc[-1])
-
-    ok, reason = session.can_entry(
-        fibo_ratio   = pivot_state.fibo_ratio or 0,
-        confluence   = pivot_state.confluence,
-        in_inst_zone = pivot_state.in_inst_zone,
-    )
-    if not ok:
-        log(f"No entry: {reason}")
-        return None
-
-    is_sniper = (
-        pivot_state.in_inst_zone and
-        pivot_state.vsa_signal == "stopping_volume" and
-        pivot_state.confluence >= 80
-    )
-
-    if is_sniper:
-        guard.set_sniper_mode(f"VSA:{pivot_state.vsa_signal} Score:{pivot_state.confluence}")
-    else:
-        guard.set_cashflow_mode("Cashflow zone")
-
-    if not pivot_state.signal_valid():
-        log(f"No signal | Mode:{guard.mode()} | Score:{pivot_state.confluence} | Zone:{pivot_state.fibo_ratio} | VSA:{pivot_state.vsa_signal}")
-        return None
-
-    action = "BUY" if pivot_state.trend_dir == "up" else "SELL"
-    lot    = guard.lot_size(
-        base_lot     = 0.01,
-        stress_level = basket.stress_level,
-        is_sniper    = is_sniper,
-    )
-
-    if is_sniper:
-        return {
-            "action": action, "score": pivot_state.confluence,
-            "sl": pivot_state.sl, "tp1": pivot_state.tp1, "tp2": pivot_state.tp2,
-            "mode": "SNIPER", "vsa": pivot_state.vsa_signal,
-            "zone": pivot_state.fibo_ratio, "lot": lot,
-            "cycle_id": guard.state.cycle_id,
-        }
-    else:
-        tp, sl = guard.cashflow_tp_sl(price=price, side=action)
-        return {
-            "action": action, "score": pivot_state.confluence,
-            "sl": sl, "tp1": tp, "tp2": None,
-            "mode": "CASHFLOW", "vsa": pivot_state.vsa_signal,
-            "zone": pivot_state.fibo_ratio, "lot": lot,
-            "cycle_id": guard.state.cycle_id,
-        }
-
-
-def send_signal(signal, price):
+def send_signal(sig):
     global last_signal, last_signal_time
     with state_lock:
-        if last_signal_time:
-            diff = (now_bkk() - last_signal_time).total_seconds() / 60
-            if diff < COOLDOWN_MIN:
-                log(f"⏸ Cooldown {COOLDOWN_MIN - diff:.1f} นาที")
-                return
-        if last_signal == signal["action"]:
-            log("⏸ Same direction — skip")
-            return
+        last_signal      = sig.direction
+        last_signal_time = datetime.now(BKK).isoformat()
+
+    msg = format_composed(sig)
+    send_telegram(msg)
+    log(f"Signal sent: {sig.direction} Score:{sig.confluence_score}")
+
+    save_signal({
+        "direction":        sig.direction,
+        "signal_type":      sig.signal_type,
+        "entry_price":      sig.entry_price,
+        "sl_price":         sig.sl_price,
+        "tp1_price":        sig.tp1_price,
+        "tp2_price":        sig.tp2_price,
+        "lot_multiplier":   sig.lot_multiplier,
+        "basket_layer":     sig.basket_layer,
+        "confluence_score": sig.confluence_score,
+        "sources":          ", ".join(sig.sources),
+        "created_at":       last_signal_time,
+    })
+
+
+# ── Cooldown Check ────────────────────────────────────────
+def can_send_signal(direction: str) -> bool:
+    global last_signal, last_signal_time
+    if last_signal_time is None:
+        return True
     try:
-        r = requests.post(RAILWAY_WEBHOOK_URL, json={
-            "symbol":     "XAUUSD",
-            "action":     signal["action"],
-            "price":      price,
-            "lot":        0.1,
-            "fibo_score": signal["score"],
-            "source":     "python_bot"
-        }, timeout=10)
-        if r.json().get("status") == "ok":
-            with state_lock:
-                last_signal      = signal["action"]
-                last_signal_time = now_bkk()
-            save_last_signal(signal["action"])
-            log(f"✅ {signal['action']} | RSI:{signal['rsi']:.1f} | Price:{price:,.2f}")
-        else:
-            log(f"send_signal response: {r.text}")
-    except Exception as e:
-        log(f"send_signal error: {e}")
+        last_dt  = datetime.fromisoformat(last_signal_time)
+        elapsed  = (datetime.now(BKK) - last_dt).total_seconds() / 60
+        # ถ้า direction เดิม ต้อง cooldown
+        if last_signal == direction and elapsed < COOLDOWN_MIN:
+            return False
+    except Exception:
+        pass
+    return True
 
 
-# ── Threads ────────────────────────────────────────────────
-def command_loop():
-    log("🤖 Command loop started (3s)")
-    while True:
-        try:
-            handle_commands()
-        except Exception as e:
-            log(f"command_loop error: {e}")
-        time.sleep(CMD_INTERVAL)
-
-
+# ── Signal Loop ───────────────────────────────────────────
 def signal_loop():
-    log(f"📡 Signal loop started ({POLL_INTERVAL}s)")
+    log("📡 Signal loop started (15m)")
     while True:
         try:
             if not is_market_open():
                 log("🔴 ตลาดปิด")
                 time.sleep(POLL_INTERVAL)
                 continue
-            df = get_ohlcv()
-            if df is not None:
-                price = float(df["close"].iloc[-1])
-                signal = calculate_signal(df)
-                if signal:
-                    send_signal(signal, price)
+
+            # ดึงทั้ง 3 TF
+            log("⏳ Fetching 4H / 1H / 15M...")
+            df_4h  = get_ohlcv("4h",    TF_CONFIG["4h"]["bars"])
+            df_1h  = get_ohlcv("1h",    TF_CONFIG["1h"]["bars"])
+            df_15m = get_ohlcv("15min", TF_CONFIG["15min"]["bars"])
+
+            if df_4h is None or df_1h is None or df_15m is None:
+                log("⚠️ ดึงข้อมูลไม่ครบ")
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            price = float(df_15m["close"].iloc[-1])
+            log(f"💰 XAUUSD: {price:,.2f}")
+
+            # Compose signal
+            sig = compose_signal(df_4h, df_1h, df_15m)
+
+            if sig:
+                if can_send_signal(sig.direction):
+                    send_signal(sig)
                 else:
-                    log(f"⏳ No signal | Price:{price:,.2f} | Mode:{guard.mode()} | Score:{engine.state.confluence}")
+                    log(f"⏳ Cooldown | {sig.direction} Score:{sig.confluence_score}")
             else:
-                log("⚠️ ดึงราคาไม่ได้")
+                log(f"⏳ No signal | Price:{price:,.2f}")
+
         except Exception as e:
             log(f"signal_loop error: {e}")
+
         time.sleep(POLL_INTERVAL)
 
 
-# ── Main ───────────────────────────────────────────────────
+# ── Command Loop (Telegram Bot) ───────────────────────────
+def command_loop():
+    global last_update_id
+    log("🤖 Command loop started (3s)")
+    while True:
+        try:
+            r = requests.get(
+                f"{TELEGRAM_API}/getUpdates",
+                params={"offset": last_update_id + 1, "timeout": 2},
+                timeout=10,
+            )
+            updates = r.json().get("result", [])
+            for upd in updates:
+                last_update_id = upd["update_id"]
+                msg  = upd.get("message", {})
+                text = msg.get("text", "").strip()
+                cid  = msg.get("chat", {}).get("id")
+                if not text or not cid:
+                    continue
+                handle_command(text, cid)
+        except Exception as e:
+            log(f"command_loop error: {e}")
+        time.sleep(CMD_INTERVAL)
+
+
+def handle_command(text: str, chat_id: int):
+    t = text.lower()
+    if t == "/start":
+        send_telegram("🐃 Alpha Buffalo v5 Online", chat_id)
+    elif t == "/status":
+        msg = (
+            f"🐃 Alpha Buffalo v5\n"
+            f"Last: {last_signal} @ {last_signal_time}\n"
+            f"Market: {'🟢 Open' if is_market_open() else '🔴 Closed'}"
+        )
+        send_telegram(msg, chat_id)
+    elif t == "/reset_buy":
+        reset_basket("BUY")
+        send_telegram("✅ BUY Basket Reset", chat_id)
+    elif t == "/reset_sell":
+        reset_basket("SELL")
+        send_telegram("✅ SELL Basket Reset", chat_id)
+    elif t in ("/help", "/?"):
+        send_telegram(
+            "/status — สถานะ bot\n"
+            "/reset_buy — reset BUY basket\n"
+            "/reset_sell — reset SELL basket",
+            chat_id,
+        )
+
 
 # ── Health Check Server ────────────────────────────────────
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -530,9 +286,10 @@ class HealthHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+
 # ── Main ───────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("🐃 ALPHA BUFFALO Signal Bot v4 started\n")
+    print("🐃 ALPHA BUFFALO Signal Bot v5 started\n")
     load_last_signal()
     threading.Thread(target=command_loop, daemon=True).start()
     threading.Thread(target=signal_loop,  daemon=True).start()
