@@ -1,4 +1,3 @@
-from typing import Optional
 """
 alpha_buffalo_signal.py — Alpha Buffalo v5
 เพิ่ม Multi-Timeframe: 4H + 1H + 15M
@@ -84,7 +83,7 @@ def save_signal(sig_dict: dict):
 
 
 # ── OHLCV ─────────────────────────────────────────────────
-def get_ohlcv(interval: str = "1h", bars: int = 200) -> "Optional[pd.DataFrame]":
+def get_ohlcv(interval: str = "1h", bars: int = 200) -> pd.DataFrame | None:
     """ดึง OHLCV จาก TwelveData — รองรับทุก TF"""
     try:
         url = "https://api.twelvedata.com/time_series"
@@ -234,20 +233,39 @@ def command_loop():
         try:
             r = requests.get(
                 f"{TELEGRAM_API}/getUpdates",
-                params={"offset": last_update_id + 1, "timeout": 2},
+                params={
+                    "offset":          last_update_id + 1,
+                    "timeout":         2,
+                    "allowed_updates": ["message"],
+                },
                 timeout=10,
             )
-            updates = r.json().get("result", [])
-            for upd in updates:
-                last_update_id = upd["update_id"]
-                msg  = upd.get("message", {})
-                text = msg.get("text", "").strip()
-                cid  = msg.get("chat", {}).get("id")
-                if not text or not cid:
-                    continue
-                handle_command(text, cid)
+            data = r.json()
+
+            # reset offset ถ้า Telegram ตอบ error
+            if not data.get("ok"):
+                log(f"getUpdates error: {data.get('description','unknown')} — reset offset")
+                last_update_id = 0
+                time.sleep(5)
+                continue
+
+            updates = data.get("result", [])
+
+            # อัพเดท offset ทุกครั้งแม้ไม่มี message
+            if updates:
+                last_update_id = updates[-1]["update_id"]
+                for upd in updates:
+                    msg  = upd.get("message", {})
+                    text = msg.get("text", "").strip()
+                    cid  = msg.get("chat", {}).get("id")
+                    if text and cid:
+                        handle_command(text, cid)
+
+        except requests.exceptions.Timeout:
+            pass  # timeout ปกติ ไม่ต้อง log
         except Exception as e:
             log(f"command_loop error: {e}")
+            time.sleep(10)  # รอนานขึ้นถ้า error
         time.sleep(CMD_INTERVAL)
 
 
