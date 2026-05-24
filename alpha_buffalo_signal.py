@@ -1,40 +1,188 @@
 """
-alpha_buffalo_signal.py — Alpha Buffalo v5 (Cloud-Driven)
+alpha_buffalo_signal.py — Alpha Buffalo v5 Cloud-Driven
 """
-import os
-import requests
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import os, requests, time, threading, uuid
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
+from pydantic import BaseModel
+import uvicorn
 from signal_engine import compute_signal, signal_to_dict
 
-# 1. จัดการ Webhook ที่ Railway เรียกใช้ (แก้ 502 Error)
-class AlphaHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Alpha Buffalo V5 Online")
+BKK = timezone(timedelta(hours=7))
 
-    def do_POST(self):
-        self.send_response(200)
-        self.end_headers()
+# ── FastAPI ───────────────────────────────────────────────
+app = FastAPI(title="Alpha Buffalo v5")
+latest_signal: dict = {}
+signal_history: list = []
 
-# 2. ฟังก์ชันหลักสำหรับรัน Server และประมวลผล
-def run_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), AlphaHandler)
-    print(f"Starting server on port {port}...")
-    server.serve_forever()
+VALID_LICENSES = set(os.getenv("VALID_LICENSES", "DEMO123").split(","))
+def chk(key): return key in VALID_LICENSES
 
-# 3. Main Logic
-if __name__ == "__main__":
-    import threading
-    
-    # รัน Server ใน Background thread
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    
-    # ใส่ส่วน Logic เดิมของคุณที่นี่ (เช่น signal_loop)
-    print("System Ready")
+class SP(BaseModel):
+    direction: str; signal_type: str
+    entry: float; sl: float; be_price: float
+    trail_from: float; tp_final: float
+    partial: list; pattern: str = ""
+    score: int; layer: int; session: str
+    fallback_sl: float; fallback_tp: float
+    signal_id: str = ""; action: str = "OPEN"
+
+class CP(BaseModel):
+    signal_id: str; executed: bool; license: str
+
+@app.get("/")
+def root(): return "OK"
+
+@app.head("/")
+def head(): return Response(status_code=200)
+
+@app.get("/health")
+def health():
+    return {"status":"ok","version":"v5","latest_signal":latest_signal.get("direction","none")}
+
+@app.post("/webhook/signal")
+async def recv(p: SP):
+    global latest_signal
+    sid = p.signal_id or str(uuid.uuid4())[:8]
+    latest_signal = {**p.model_dump(), "signal_id":sid, "confirmed":False,
+                     "created_at":datetime.now(BKK).isoformat()}
+    signal_history.append(latest_signal.copy())
+    if len(signal_history)>100: signal_history.pop(0)
+    return {"ok":True,"signal_id":sid}
+
+@app.get("/signal/latest")
+def latest(key:str=""):
+    if not chk(key): raise HTTPException(403,"Invalid license")
+    return latest_signal or {"direction":"","signal_id":""}
+
+@app.post("/signal/confirm")
+async def confirm(p: CP):
+    if not chk(p.license): raise HTTPException(403,"Invalid license")
+    if latest_signal.get("signal_id")==p.signal_id:
+        latest_signal["confirmed"]=p.executed
+    return {"ok":True}
+
+@app.get("/signal/history")
+def history(key:str="",limit:int=20):
+    if not chk(key): raise HTTPException(403,"Invalid license")
+    return signal_history[-limit:]
+
+# ── Config ────────────────────────────────────────────────
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+ADMIN_ID       = int(os.getenv("ADMIN_ID","0"))
+TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+POLL_INTERVAL  = int(os.getenv("POLL_INTERVAL","1800"))
+TWELVE_KEY     = os.getenv("TWELVE_API_KEY","")
+SYMBOL         = os.getenv("TRADE_SYMBOL","XAUUSD")
+
+last_update_id = 0
+last_signal_time = None
+
+def log(msg): print(f"{datetime.now(BKK).strftime('%H:%M:%S')} | {msg}", flush=True)
+
+def send_telegram(msg, chat_id=None):
+    try:
+        requests.post(f"{TELEGRAM_API}/sendMessage",
+            json={"chat_id":chat_id or ADMIN_ID,"text":msg,"parse_mode":"HTML"},timeout=10)
+    except Exception as e: log(f"telegram error: {e}")
+
+def get_ohlcv(interval="1h", bars=200):
+    try:
+        sym_map = {"XAUUSD":"XAU/USD","EURUSD":"EUR/USD","BTCUSD":"BTC/USD"}
+        sym = sym_map.get(SYMBOL, SYMBOL)
+        r = requests.get("https://api.twelvedata.com/time_series",
+            params={"symbol":sym,"interval":interval,"outputsize":bars,
+                    "apikey":TWELVE_KEY,"format":"JSON"},timeout=15)
+        data = r.json()
+        if "values" not in data: return None
+        import pandas as pd
+        df = pd.DataFrame(data["values"])
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.sort_values("datetime").reset_index(drop=True)
+        df.set_index("datetime",inplace=True)
+        df.index = df.index.tz_localize("UTC")
+        for c in ["open","high","low","close"]:
+            df[c] = df[c].astype(float)
+        if "volume" in df.columns: df["volume"] = df["volume"].astype(float)
+        return df
+    except Exception as e: log(f"ohlcv error: {e}"); return None
+
+def is_market_open():
+    now = datetime.now(timezone.utc)
+    if now.weekday()==5: return now.hour<22
+    if now.weekday()==6: return now.hour>=22
+    return True
+
+def signal_loop():
+    log("📡 Signal loop started")
     while True:
-        # ใส่ signal_loop ของคุณที่ทำงานวนลูปที่นี่
-        import time
-        time.sleep(60)
+        try:
+            if not is_market_open():
+                log("🔴 ตลาดปิด"); time.sleep(POLL_INTERVAL); continue
+            log("⏳ Fetching 4H/1H/15M...")
+            df_4h  = get_ohlcv("4h",  100)
+            df_1h  = get_ohlcv("1h",  200)
+            df_15m = get_ohlcv("15min",96)
+            if df_4h is None or df_1h is None or df_15m is None:
+                log("⚠️ ดึงข้อมูลไม่ครบ"); time.sleep(POLL_INTERVAL); continue
+            price = float(df_15m["close"].iloc[-1])
+            log(f"💰 {SYMBOL}: {price:,.2f}")
+            sig = compute_signal(df_4h, df_1h, df_15m)
+            if sig:
+                sig_dict = signal_to_dict(sig)
+                port = int(os.getenv("PORT",8080))
+                try:
+                    requests.post(f"http://localhost:{port}/webhook/signal",
+                                  json=sig_dict, timeout=3)
+                except: pass
+                send_telegram(f"🐃 {sig.direction} | {sig.signal_type} | Score:{sig.score}")
+                log(f"Signal: {sig.direction} {sig.signal_type} Score:{sig.score}")
+            else:
+                log(f"⏳ No signal | {price:,.2f}")
+        except Exception as e: log(f"signal_loop error: {e}")
+        time.sleep(POLL_INTERVAL)
+
+def command_loop():
+    global last_update_id
+    log("🤖 Command loop started")
+    while True:
+        try:
+            r = requests.get(f"{TELEGRAM_API}/getUpdates",
+                params={"offset":last_update_id+1,"timeout":2,"allowed_updates":["message"]},
+                timeout=10)
+            data = r.json()
+            if not data.get("ok"):
+                last_update_id=0; time.sleep(5); continue
+            updates = data.get("result",[])
+            if updates:
+                last_update_id = updates[-1]["update_id"]
+                for upd in updates:
+                    msg  = upd.get("message",{})
+                    text = msg.get("text","").strip()
+                    cid  = msg.get("chat",{}).get("id")
+                    if text and cid: handle_cmd(text, cid)
+        except requests.exceptions.Timeout: pass
+        except Exception as e: log(f"cmd error: {e}"); time.sleep(10)
+        time.sleep(3)
+
+def handle_cmd(text, chat_id):
+    t = text.lower()
+    if t=="/start":    send_telegram("🐃 Alpha Buffalo v5 Online", chat_id)
+    elif t=="/status": send_telegram(f"🐃 v5\nMarket:{'🟢' if is_market_open() else '🔴'}", chat_id)
+    elif t=="/price":
+        df = get_ohlcv("15min",1)
+        p  = float(df["close"].iloc[-1]) if df is not None else 0
+        send_telegram(f"💰 {SYMBOL}: {p:,.2f}", chat_id)
+    elif t=="/health":
+        send_telegram(f"✅ Bot running | Latest: {latest_signal.get('direction','none')}", chat_id)
+    elif t in ("/help","/?"):
+        send_telegram("/status /price /health /context", chat_id)
+
+if __name__ == "__main__":
+    print("🐃 ALPHA BUFFALO v5 started\n")
+    threading.Thread(target=command_loop, daemon=True).start()
+    threading.Thread(target=signal_loop,  daemon=True).start()
+    port = int(os.getenv("PORT",8080))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
