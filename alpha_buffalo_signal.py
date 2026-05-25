@@ -169,76 +169,44 @@ def command_loop():
 
 def handle_cmd(text, chat_id):
     t = text.lower()
-    if t=="/start":    send_telegram("🐃 Alpha Buffalo v5 Online", chat_id)
-    elif t=="/status": send_telegram(f"🐃 v5\nMarket:{'🟢' if is_market_open() else '🔴'}", chat_id)
-    elif t=="/price":
-        df = get_ohlcv("15min",1)
-        p  = float(df["close"].iloc[-1]) if df is not None else 0
-        send_telegram(f"💰 {SYMBOL}: {p:,.2f}", chat_id)
-    elif t=="/health":
-        send_telegram(f"✅ Bot running | Latest: {latest_signal.get('direction','none')}", chat_id)
+    if t == "/start":
+        send_telegram("Alpha Buffalo v5 Online", chat_id)
+    elif t == "/status":
+        send_telegram("v5 Market:" + ("Open" if is_market_open() else "Closed"), chat_id)
+    elif t == "/price":
+        df = get_ohlcv("15min", 1)
+        p = float(df["close"].iloc[-1]) if df is not None else 0
+        send_telegram("XAUUSD: " + "{:,.2f}".format(p), chat_id)
+    elif t == "/health":
+        send_telegram("Bot running | Latest: " + latest_signal.get("direction", "none"), chat_id)
     elif t == "/context":
         try:
             from context_engine import get_context_status
             s = get_context_status()
-            lines = [
-                "🌍 Market Context",
-                "News: " + ("✅" if s["news_safe"] else "🚫") + " " + s["news_reason"],
-                "F&G : " + s["fear_greed"],
-                "DXY : " + s["dxy_trend"],
-                "COT : " + s["cot_rank"],
-                "⏰ " + s["timestamp"],
-            ]
-            msg = "
-".join(lines)
+            msg = "Market Context"
+            msg += "\nNews : " + ("OK" if s["news_safe"] else "BLOCK") + " " + str(s["news_reason"])
+            msg += "\nF&G  : " + str(s["fear_greed"])
+            msg += "\nDXY  : " + str(s["dxy_trend"])
+            msg += "\nCOT  : " + str(s["cot_rank"])
+            msg += "\nTime : " + str(s["timestamp"])
         except Exception as e:
-            msg = "⚠️ Context error: " + str(e)
+            msg = "Context error: " + str(e)
         send_telegram(msg, chat_id)
     elif t == "/setup":
         try:
             from early_warning import get_warning_status
             s = get_warning_status("XAUUSD")
-            lines = [
-                "⚡ Setup Status",
-                "Symbol : " + s["symbol"],
-                "Stage  : " + str(s["stage"]) + " (" + s["status"] + ")",
-                "Dir    : " + s.get("direction", "N/A"),
-                "Score  : " + str(s.get("score", 0)),
-                "Pattern: " + s.get("pattern", "N/A"),
-            ]
-            msg = "
-".join(lines)
-        except Exception as e:
-            msg = "⚠️ Setup error: " + str(e)
-        send_telegram(msg, chat_id)
-    elif t == "/context":
-        try:
-            from context_engine import get_context_status
-            s = get_context_status()
-            msg = "🌍 Market Context"
-            msg += "\nNews: " + ("✅" if s["news_safe"] else "🚫") + " " + str(s["news_reason"])
-            msg += "\nF&G : " + str(s["fear_greed"])
-            msg += "\nDXY : " + str(s["dxy_trend"])
-            msg += "\nCOT : " + str(s["cot_rank"])
-            msg += "\n⏰ " + str(s["timestamp"])
-        except Exception as e:
-            msg = "⚠️ Context error: " + str(e)
-        send_telegram(msg, chat_id)
-    elif t == "/setup":
-        try:
-            from early_warning import get_warning_status
-            s = get_warning_status("XAUUSD")
-            msg = "⚡ Setup Status"
-            msg += "\nSymbol : " + str(s["symbol"])
+            msg = "Setup Status"
             msg += "\nStage  : " + str(s["stage"]) + " (" + str(s["status"]) + ")"
-            msg += "\nDir    : " + str(s.get("direction","N/A"))
-            msg += "\nScore  : " + str(s.get("score",0))
-            msg += "\nPattern: " + str(s.get("pattern","N/A"))
+            msg += "\nDir    : " + str(s.get("direction", "N/A"))
+            msg += "\nScore  : " + str(s.get("score", 0))
+            msg += "\nPattern: " + str(s.get("pattern", "N/A"))
         except Exception as e:
-            msg = "⚠️ Setup error: " + str(e)
+            msg = "Setup error: " + str(e)
         send_telegram(msg, chat_id)
-    elif t in ("/help","/?"):
+    elif t in ("/help", "/?"):
         send_telegram("/status /price /health /context /setup", chat_id)
+
 
 if __name__ == "__main__":
     print("🐃 ALPHA BUFFALO v5 started\n")
