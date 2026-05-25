@@ -196,11 +196,18 @@ def handle_cmd(text, chat_id):
         try:
             from early_warning import get_warning_status
             s = get_warning_status("XAUUSD")
-            msg = "Setup Status"
-            msg += "\nStage  : " + str(s["stage"]) + " (" + str(s["status"]) + ")"
-            msg += "\nDir    : " + str(s.get("direction", "N/A"))
-            msg += "\nScore  : " + str(s.get("score", 0))
-            msg += "\nPattern: " + str(s.get("pattern", "N/A"))
+            if s["stage"] == 0:
+                msg = "⚡ Setup Status\n⏳ No active setup"
+            else:
+                stage_emoji = {1: "👀", 2: "🎯", 3: "🚀"}
+                msg = "⚡ Setup Status"
+                msg += "\n" + stage_emoji.get(s["stage"], "") + " Stage: " + str(s["status"])
+                msg += "\nDir    : " + str(s.get("direction", "N/A"))
+                msg += "\nScore  : " + str(s.get("score", 0))
+                if s.get("pattern"):
+                    msg += "\nPattern: " + str(s["pattern"])
+                if s.get("setup_price"):
+                    msg += "\nPrice  : " + "{:,.2f}".format(s["setup_price"])
         except Exception as e:
             msg = "Setup error: " + str(e)
         send_telegram(msg, chat_id)
