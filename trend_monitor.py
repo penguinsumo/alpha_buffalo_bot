@@ -154,6 +154,8 @@ def analyze_trend(
 def format_trend_message(tr: TrendResult) -> str:
     """Format Trend Update สำหรับ Telegram"""
 
+    delta_buy  = "🟢 Δ+"
+    delta_sell = "🔴 Δ-"
     lines = [
         "📊 " + tr.symbol + " TREND UPDATE",
         "━━━━━━━━━━━━━━━━━━━━━",
@@ -164,9 +166,17 @@ def format_trend_message(tr: TrendResult) -> str:
 
     # TF rows
     for tf in [tr.m15, tr.h1, tr.h4]:
-        tf_emoji = "📈" if "Δ+" in tf.state or "↗️" in tf.emoji else \
-                   "📉" if "Δ-" in tf.state or "↘️" in tf.emoji else "➡️"
-        line = tf_emoji + " " + tf.tf + "  : " + tf.state
+        if "Impulse Δ+" in tf.state:
+            tf_sym = "🟢 Δ+"
+        elif "Impulse Δ-" in tf.state:
+            tf_sym = "🔴 Δ-"
+        elif "Pullback" in tf.state:
+            tf_sym = "🔄 Pullback"
+        elif "SELLING" in tf.state:
+            tf_sym = "🔴 Sell Press"
+        else:
+            tf_sym = "⬜ Sideways"
+        line = tf.tf + " : " + tf_sym
         lines.append(line)
 
     # Pressure alerts
