@@ -9,6 +9,9 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 import uvicorn
 from signal_engine import compute_signal, signal_to_dict
+from trend_monitor import (analyze_trend, format_trend_message,
+                            format_signal_message, format_welcome_message,
+                            should_send_trend_alert)
 
 BKK = timezone(timedelta(hours=7))
 
@@ -170,7 +173,7 @@ def command_loop():
 def handle_cmd(text, chat_id):
     t = text.lower()
     if t == "/start":
-        send_telegram("Alpha Buffalo v5 Online", chat_id)
+        send_telegram(format_welcome_message(), chat_id)
     elif t == "/status":
         send_telegram("v5 Market:" + ("Open" if is_market_open() else "Closed"), chat_id)
     elif t == "/price":
