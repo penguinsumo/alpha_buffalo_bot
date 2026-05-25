@@ -211,6 +211,32 @@ def handle_cmd(text, chat_id):
         except Exception as e:
             msg = "⚠️ Setup error: " + str(e)
         send_telegram(msg, chat_id)
+    elif t == "/context":
+        try:
+            from context_engine import get_context_status
+            s = get_context_status()
+            msg = "🌍 Market Context"
+            msg += "\nNews: " + ("✅" if s["news_safe"] else "🚫") + " " + str(s["news_reason"])
+            msg += "\nF&G : " + str(s["fear_greed"])
+            msg += "\nDXY : " + str(s["dxy_trend"])
+            msg += "\nCOT : " + str(s["cot_rank"])
+            msg += "\n⏰ " + str(s["timestamp"])
+        except Exception as e:
+            msg = "⚠️ Context error: " + str(e)
+        send_telegram(msg, chat_id)
+    elif t == "/setup":
+        try:
+            from early_warning import get_warning_status
+            s = get_warning_status("XAUUSD")
+            msg = "⚡ Setup Status"
+            msg += "\nSymbol : " + str(s["symbol"])
+            msg += "\nStage  : " + str(s["stage"]) + " (" + str(s["status"]) + ")"
+            msg += "\nDir    : " + str(s.get("direction","N/A"))
+            msg += "\nScore  : " + str(s.get("score",0))
+            msg += "\nPattern: " + str(s.get("pattern","N/A"))
+        except Exception as e:
+            msg = "⚠️ Setup error: " + str(e)
+        send_telegram(msg, chat_id)
     elif t in ("/help","/?"):
         send_telegram("/status /price /health /context /setup", chat_id)
 
