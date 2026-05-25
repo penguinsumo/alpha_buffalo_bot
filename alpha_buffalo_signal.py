@@ -132,6 +132,11 @@ def signal_loop():
                 log("⚠️ ดึงข้อมูลไม่ครบ"); time.sleep(POLL_INTERVAL); continue
             price = float(df_15m["close"].iloc[-1])
             log(f"💰 {SYMBOL}: {price:,.2f}")
+            trend = analyze_trend(df_4h, df_1h, df_15m, SYMBOL)
+            if should_send_trend_alert(trend.session):
+                send_telegram(format_trend_message(trend))
+                log("📊 Trend: " + trend.session + " " + trend.bias)
+
             sig = compute_signal(df_4h, df_1h, df_15m)
             if sig:
                 sig_dict = signal_to_dict(sig)
@@ -140,8 +145,15 @@ def signal_loop():
                     requests.post(f"http://localhost:{port}/webhook/signal",
                                   json=sig_dict, timeout=3)
                 except: pass
-                send_telegram(f"🐃 {sig.direction} | {sig.signal_type} | Score:{sig.score}")
-                log(f"Signal: {sig.direction} {sig.signal_type} Score:{sig.score}")
+                tp1 = sig.partial[0]["price"] if sig.partial else sig.tp_final
+                tp2 = sig.partial[1]["price"] if len(sig.partial) > 1 else sig.tp_final
+                msg = format_signal_message(
+                    direction=sig.direction, signal_type=sig.signal_type,
+                    entry=sig.entry, sl=sig.sl, tp1=tp1, tp2=tp2,
+                    pattern=sig.pattern, score=sig.score, session=trend.session,
+                )
+                send_telegram(msg)
+                log("Signal: " + sig.direction + " " + sig.signal_type + " Score:" + str(sig.score))
             else:
                 log(f"⏳ No signal | {price:,.2f}")
         except Exception as e: log(f"signal_loop error: {e}")
