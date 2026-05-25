@@ -215,3 +215,110 @@ def format_license_info(lic: License) -> str:
         "━━━━━━━━━━━━━━━━━\n"
         "⚠️ Not financial advice. Trade at your own risk."
     )
+
+
+# ── Quota System ──────────────────────────────────────────
+from datetime import date as _date
+
+# In-memory: {"KEY": {"date": "2026-05-25", "count": 3}}
+_quota_store: dict = {}
+
+
+def check_quota(key: str) -> dict:
+    """
+    เช็คโควต้าประจำวัน
+    คืน {"allowed": bool, "used": int, "limit": int, "remaining": int}
+    """
+    if key in MASTER_LICENSES:
+        return {"allowed": True, "used": 0, "limit": 999, "remaining": 999}
+
+    result = validate_license(key)
+    if not result["valid"]:
+        return {"allowed": False, "used": 0, "limit": 0, "remaining": 0}
+
+    limit = result.get("signals_day", 10)
+    today = str(_date.today())
+    quota = _quota_store.get(key, {"date": "", "count": 0})
+
+    if quota["date"] != today:
+        quota = {"date": today, "count": 0}
+        _quota_store[key] = quota
+
+    used      = quota["count"]
+    remaining = max(0, limit - used)
+
+    return {
+        "allowed":   remaining > 0,
+        "used":      used,
+        "limit":     limit,
+        "remaining": remaining,
+        "reset_at":  "00:00 BKK",
+    }
+
+
+def consume_quota(key: str) -> bool:
+    """
+    ตัดโควต้า 1 ครั้ง หลัง signal ยิงสำเร็จ
+    คืน True เสมอ (fire and forget)
+    """
+    if key in MASTER_LICENSES:
+        return True
+
+    today = str(_date.today())
+    quota = _quota_store.get(key, {"date": "", "count": 0})
+
+    if quota["date"] != today:
+        quota = {"date": today, "count": 0}
+
+    quota["count"] += 1
+    quota["date"]   = today
+    _quota_store[key] = quota
+
+    _sync_quota_supabase(key, quota["count"])
+    return True
+
+
+def reset_quota(key: str) -> bool:
+    """Reset โควต้า manual (admin ใช้)"""
+    if key in _quota_store:
+        _quota_store[key] = {"date": str(_date.today()), "count": 0}
+        _sync_quota_supabase(key, 0)
+        return True
+    return False
+
+
+def _sync_quota_supabase(key: str, count: int):
+    """Sync quota ไป Supabase"""
+    try:
+        from supabase import create_client
+        url = os.getenv("SUPABASE_URL", "")
+        k   = os.getenv("SUPABASE_KEY", "")
+        if not url or not k:
+            return
+        sb = create_client(url, k)
+        sb.table("licenses").update({
+            "signals_used": count,
+            "quota_date":   str(_date.today()),
+        }).eq("key", key).execute()
+    except Exception:
+        pass
+
+
+def format_quota_info(key: str) -> str:
+    """Format สำหรับ Telegram /quota"""
+    q = check_quota(key)
+    bar_total = 10
+    bar_used  = int(q["used"] / max(q["limit"], 1) * bar_total)
+    bar       = "█" * bar_used + "░" * (bar_total - bar_used)
+    return (
+        "📊 Signal Quota\n"
+        "━━━━━━━━━━━━━━━━━\n"
+        "Key      : " + key[:12] + "...\n"
+        "Used     : " + str(q["used"]) + "/" + str(q["limit"]) + "\n"
+        "[" + bar + "]\n"
+        "Remaining: " + str(q["remaining"]) + "\n"
+        "Status   : " + ("✅ OK" if q["allowed"] else "🚫 Quota exceeded") + "\n"
+        "Reset    : " + q.get("reset_at", "00:00 BKK") + "\n"
+        "━━━━━━━━━━━━━━━━━\n"
+        "⚠️ Not financial advice. Trade at your own risk."
+    )
