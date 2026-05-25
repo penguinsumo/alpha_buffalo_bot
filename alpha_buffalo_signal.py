@@ -177,8 +177,48 @@ def handle_cmd(text, chat_id):
         send_telegram(f"💰 {SYMBOL}: {p:,.2f}", chat_id)
     elif t=="/health":
         send_telegram(f"✅ Bot running | Latest: {latest_signal.get('direction','none')}", chat_id)
+    elif t == "/context":
+        try:
+            from context_engine import get_context_status
+            s = get_context_status()
+            msg = (
+                f"🌍 Market Context
+"
+                f"News: {'✅' if s['news_safe'] else '🚫'} {s['news_reason']}
+"
+                f"F&G : {s['fear_greed']}
+"
+                f"DXY : {s['dxy_trend']}
+"
+                f"COT : {s['cot_rank']}
+"
+                f"⏰ {s['timestamp']}"
+            )
+        except Exception as e:
+            msg = f"⚠️ Context error: {e}"
+        send_telegram(msg, chat_id)
+    elif t == "/setup":
+        try:
+            from early_warning import get_warning_status
+            s = get_warning_status("XAUUSD")
+            msg = (
+                f"⚡ Setup Status
+"
+                f"Symbol : {s['symbol']}
+"
+                f"Stage  : {s['stage']} ({s['status']})
+"
+                f"Dir    : {s.get('direction','N/A')}
+"
+                f"Score  : {s.get('score',0)}
+"
+                f"Pattern: {s.get('pattern','N/A')}"
+            )
+        except Exception as e:
+            msg = f"⚠️ Setup error: {e}"
+        send_telegram(msg, chat_id)
     elif t in ("/help","/?"):
-        send_telegram("/status /price /health /context", chat_id)
+        send_telegram("/status /price /health /context /setup", chat_id)
 
 if __name__ == "__main__":
     print("🐃 ALPHA BUFFALO v5 started\n")
