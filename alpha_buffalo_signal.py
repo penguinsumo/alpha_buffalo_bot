@@ -181,41 +181,35 @@ def handle_cmd(text, chat_id):
         try:
             from context_engine import get_context_status
             s = get_context_status()
-            msg = (
-                f"🌍 Market Context
-"
-                f"News: {'✅' if s['news_safe'] else '🚫'} {s['news_reason']}
-"
-                f"F&G : {s['fear_greed']}
-"
-                f"DXY : {s['dxy_trend']}
-"
-                f"COT : {s['cot_rank']}
-"
-                f"⏰ {s['timestamp']}"
-            )
+            lines = [
+                "🌍 Market Context",
+                "News: " + ("✅" if s["news_safe"] else "🚫") + " " + s["news_reason"],
+                "F&G : " + s["fear_greed"],
+                "DXY : " + s["dxy_trend"],
+                "COT : " + s["cot_rank"],
+                "⏰ " + s["timestamp"],
+            ]
+            msg = "
+".join(lines)
         except Exception as e:
-            msg = f"⚠️ Context error: {e}"
+            msg = "⚠️ Context error: " + str(e)
         send_telegram(msg, chat_id)
     elif t == "/setup":
         try:
             from early_warning import get_warning_status
             s = get_warning_status("XAUUSD")
-            msg = (
-                f"⚡ Setup Status
-"
-                f"Symbol : {s['symbol']}
-"
-                f"Stage  : {s['stage']} ({s['status']})
-"
-                f"Dir    : {s.get('direction','N/A')}
-"
-                f"Score  : {s.get('score',0)}
-"
-                f"Pattern: {s.get('pattern','N/A')}"
-            )
+            lines = [
+                "⚡ Setup Status",
+                "Symbol : " + s["symbol"],
+                "Stage  : " + str(s["stage"]) + " (" + s["status"] + ")",
+                "Dir    : " + s.get("direction", "N/A"),
+                "Score  : " + str(s.get("score", 0)),
+                "Pattern: " + s.get("pattern", "N/A"),
+            ]
+            msg = "
+".join(lines)
         except Exception as e:
-            msg = f"⚠️ Setup error: {e}"
+            msg = "⚠️ Setup error: " + str(e)
         send_telegram(msg, chat_id)
     elif t in ("/help","/?"):
         send_telegram("/status /price /health /context /setup", chat_id)
