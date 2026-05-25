@@ -251,6 +251,16 @@ def handle_cmd(text, chat_id):
         except Exception as e:
             msg = "Quota error: " + str(e)
         send_telegram(msg, chat_id)
+    elif t == "/session":
+        try:
+            from session_weight import format_session_status, should_close_asia_positions
+            msg = format_session_status()
+            close = should_close_asia_positions()
+            if close["should_close"]:
+                msg += "\n" + ("URGENT" if close["urgent"] else "INFO") + ": " + close["reason"]
+        except Exception as e:
+            msg = "Session error: " + str(e)
+        send_telegram(msg, chat_id)
     elif t in ("/help", "/?"):
         send_telegram("/status /price /health /context /setup /quota", chat_id)
 
