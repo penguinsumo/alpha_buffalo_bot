@@ -191,6 +191,49 @@ def get_bb(df: pd.DataFrame) -> dict:
 
 
 # Pin Bar
+def detect_h1_spike_at_kivanc(
+    df_1h: pd.DataFrame,
+    direction: str,
+    fib_zone_high: float,
+    fib_zone_low: float,
+) -> dict:
+    """
+    H1 Spike ปลายไส้แตะ Kivanc Golden Zone
+    คืน {"found": bool, "sl": float, "tp1": float}
+    """
+    if df_1h is None or len(df_1h) < 2:
+        return {"found": False, "sl": 0, "tp1": 0}
+
+    c = df_1h.iloc[-1]
+    rng = c["high"] - c["low"]
+    if rng < 0.001:
+        return {"found": False, "sl": 0, "tp1": 0}
+
+    wick_up   = (c["high"] - max(c["close"], c["open"])) / rng
+    wick_down = (min(c["close"], c["open"]) - c["low"])   / rng
+
+    if direction == "BUY":
+        spike = wick_down > 0.60
+        at_kivanc = fib_zone_low <= c["low"] <= fib_zone_high
+        if spike and at_kivanc:
+            return {
+                "found": True,
+                "sl":    round(c["low"]  - 0.30, 2),
+                "tp1":   round(min(c["open"], c["close"]), 2),
+            }
+    else:
+        spike = wick_up > 0.60
+        at_kivanc = fib_zone_low <= c["high"] <= fib_zone_high
+        if spike and at_kivanc:
+            return {
+                "found": True,
+                "sl":    round(c["high"] + 0.30, 2),
+                "tp1":   round(max(c["open"], c["close"]), 2),
+            }
+
+    return {"found": False, "sl": 0, "tp1": 0}
+
+
 def detect_pinbar(df: pd.DataFrame, direction: str) -> bool:
     if len(df) < 2: return False
     c = df.iloc[-2]
@@ -364,6 +407,32 @@ def compute_signal(
             prz_match=prz; prz_name=prz["name"]; score+=(4-prz["priority"]); break
     for prz in prz_list:
         if prz["direction"]!=direction: prz_opposite=prz; break
+
+    # Step 7.5: H1 Spike at Kivanc
+    fib_zone = None
+    if prz_match:
+        fib_zone = prz_match
+    else:
+        # คำนวณ Kivanc zone จาก 1H swing
+        h1_high = float(df_1h["high"].tail(50).max())
+        h1_low  = float(df_1h["low"].tail(50).min())
+        h1_rng  = h1_high - h1_low
+        if direction == "BUY":
+            fib_lo = h1_low + h1_rng * 0.618
+            fib_hi = h1_low + h1_rng * 0.786
+        else:
+            fib_lo = h1_high - h1_rng * 0.786
+            fib_hi = h1_high - h1_rng * 0.618
+        fib_zone = {"prz_low": fib_lo, "prz_high": fib_hi}
+
+    spike = detect_h1_spike_at_kivanc(
+        df_1h, direction,
+        fib_zone["prz_high"], fib_zone["prz_low"]
+    )
+    if spike["found"]:
+        score += 4
+        print("🎯 H1 Spike at Kivanc: " + direction +
+              " SL=" + str(spike["sl"]) + " TP1=" + str(spike["tp1"]))
 
     # Step 8: Pin Bar
     if prz_match:
