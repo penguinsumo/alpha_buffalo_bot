@@ -72,6 +72,51 @@ def history(key:str="",limit:int=20):
     if not chk(key): raise HTTPException(403,"Invalid license")
     return signal_history[-limit:]
 
+@app.get("/signal/zone_check")
+def zone_check(key:str=""):
+    """EA ถาม: zone ยัง valid + reentry อนุญาตไหม"""
+    if not chk(key): raise HTTPException(403,"Invalid license")
+    sig = latest_signal
+    if not sig:
+        return {"zone_valid": False, "reentry_ok": False, "vsa_bias": "NEUTRAL"}
+    return {
+        "zone_valid":    sig.get("zone_valid", False),
+        "reentry_ok":    sig.get("reentry_ok", False),
+        "visual_sl":     sig.get("visual_sl",  0.0),
+        "vsa_bias":      sig.get("vsa_bias",   "NEUTRAL"),
+        "gps_confirmed": sig.get("gps_confirmed", False),
+        "direction":     sig.get("direction",  ""),
+        "signal_id":     sig.get("signal_id",  ""),
+    }
+
+class RP(BaseModel):
+    signal_id: str
+    license:   str
+    hit_sl:    bool
+    price:     float
+
+@app.post("/signal/reentry")
+async def reentry(p: RP):
+    """EA แจ้ง: ชน visual_sl ขอ re-entry — ตรวจ zone + VSA ก่อนอนุญาต"""
+    if not chk(p.license): raise HTTPException(403,"Invalid license")
+    sig = latest_signal
+    if not sig or sig.get("signal_id") != p.signal_id:
+        return {"allowed": False, "reason": "Signal mismatch"}
+    if not sig.get("zone_valid", False):
+        return {"allowed": False, "reason": "Zone no longer valid"}
+    if not sig.get("reentry_ok", False):
+        return {"allowed": False, "reason": "VSA bias: " + sig.get("vsa_bias","NEUTRAL")}
+    # อนุญาต re-entry — ส่ง visual_sl กลับเป็น SL ใหม่
+    return {
+        "allowed":   True,
+        "direction": sig.get("direction"),
+        "entry":     p.price,
+        "visual_sl": sig.get("visual_sl"),
+        "tp_final":  sig.get("tp_final"),
+        "partial":   sig.get("partial", []),
+        "reason":    "Zone valid + VSA " + sig.get("vsa_bias",""),
+    }
+
 # ── Config ────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID       = int(os.getenv("ADMIN_ID","0"))

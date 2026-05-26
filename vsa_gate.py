@@ -1,0 +1,71 @@
+"""
+vsa_gate.py — Alpha Buffalo v5.2
+VSA Buy vs Sell Pressure Gate
+ใช้เปรียบเทียบแรงซื้อ vs แรงขาย ก่อนอนุญาต Re-entry
+"""
+import pandas as pd
+import numpy as np
+
+VOL_WINDOW = 20
+VOL_MULT   = 1.5
+
+
+def _vsa_pressure(df: pd.DataFrame, window: int = VOL_WINDOW) -> dict:
+    if "volume" not in df.columns or len(df) < window + 2:
+        return {"buy": 0.0, "sell": 0.0, "bias": "NEUTRAL"}
+    avg_vol = float(df["volume"].iloc[-window-1:-1].mean())
+    if avg_vol == 0:
+        return {"buy": 0.0, "sell": 0.0, "bias": "NEUTRAL"}
+    recent = df.tail(3)
+    buy_vol  = float(recent[recent["close"] > recent["open"]]["volume"].sum())
+    sell_vol = float(recent[recent["close"] < recent["open"]]["volume"].sum())
+    buy_norm  = buy_vol  / avg_vol
+    sell_norm = sell_vol / avg_vol
+    if buy_norm > sell_norm * 1.3:
+        bias = "BUY"
+    elif sell_norm > buy_norm * 1.3:
+        bias = "SELL"
+    else:
+        bias = "NEUTRAL"
+    return {"buy": round(buy_norm, 2), "sell": round(sell_norm, 2), "bias": bias}
+
+
+def compare_vsa_pressure(df_1h: pd.DataFrame, df_15m: pd.DataFrame) -> dict:
+    """
+    เปรียบเทียบ VSA H1 vs M15
+    คืน {"bias": str, "h1_buy": float, "h1_sell": float,
+          "m15_buy": float, "m15_sell": float, "reentry_ok": bool}
+    """
+    h1  = _vsa_pressure(df_1h,  VOL_WINDOW)
+    m15 = _vsa_pressure(df_15m, VOL_WINDOW)
+
+    # ทั้ง 2 TF ต้องไม่ขัดแย้งกัน
+    biases = [h1["bias"], m15["bias"]]
+    if biases.count("BUY")  >= 1 and "SELL" not in biases:
+        bias = "BUY"
+    elif biases.count("SELL") >= 1 and "BUY" not in biases:
+        bias = "SELL"
+    else:
+        bias = "NEUTRAL"
+
+    return {
+        "bias":       bias,
+        "h1_buy":     h1["buy"],  "h1_sell":  h1["sell"],
+        "m15_buy":    m15["buy"], "m15_sell": m15["sell"],
+        "reentry_ok": bias != "NEUTRAL",
+    }
+
+
+def check_reentry_allowed(df_1h, df_15m, direction: str) -> dict:
+    """
+    Gate สุดท้ายก่อน Re-entry:
+    VSA bias ต้องตรงกับ direction ที่จะเข้า
+    """
+    vsa = compare_vsa_pressure(df_1h, df_15m)
+    allowed = (vsa["bias"] == direction) or (vsa["bias"] == "NEUTRAL" and vsa["reentry_ok"])
+    return {
+        "allowed": allowed,
+        "bias":    vsa["bias"],
+        "reason":  f"VSA {vsa['bias']} H1={vsa['h1_buy']:.1f}B/{vsa['h1_sell']:.1f}S "
+                   f"M15={vsa['m15_buy']:.1f}B/{vsa['m15_sell']:.1f}S",
+    }
