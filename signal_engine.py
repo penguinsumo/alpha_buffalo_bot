@@ -60,11 +60,6 @@ class CloudSignal:
     st_h4:          str = ""
     st_1h:          str = ""
     st_15m:         str = ""
-    visual_sl:      float = 0.0   # ปลายไส้ spike = SL จริงสำหรับ re-entry
-    zone_valid:     bool  = True  # ยังอยู่ใน Harmonic/Kivanc zone ไหม
-    reentry_ok:     bool  = False # VSA gate อนุญาต re-entry ไหม
-    vsa_bias:       str   = ""    # BUY / SELL / NEUTRAL
-    gps_confirmed:  bool  = False # Harmonic D ตรงกับ Session HL ไหม
 
 
 # Session
@@ -362,80 +357,6 @@ def scan_harmonic(df_1h, df_4h) -> list:
     return sorted(final, key=lambda x: x["priority"])
 
 
-# ── Reversal Zone Detection (Counter-trend) ──────────────
-def get_stoch(df, k_period=14, d_period=3):
-    """Stochastic %K/%D — ตรวจ Oversold/Overbought บน H1"""
-    if len(df) < k_period + d_period:
-        return {"k": 50.0, "d": 50.0, "cross_up": False, "cross_down": False}
-    low_min  = df["low"].rolling(k_period).min()
-    high_max = df["high"].rolling(k_period).max()
-    denom    = (high_max - low_min).replace(0, float("nan"))
-    k = ((df["close"] - low_min) / denom * 100).fillna(50)
-    d = k.rolling(d_period).mean().fillna(50)
-    k_cur, k_prev = float(k.iloc[-1]), float(k.iloc[-2])
-    d_cur, d_prev = float(d.iloc[-1]), float(d.iloc[-2])
-    return {
-        "k":          k_cur,
-        "d":          d_cur,
-        "cross_up":   k_prev < d_prev and k_cur > d_cur,
-        "cross_down": k_prev > d_prev and k_cur < d_cur,
-    }
-
-
-def check_bb_extreme(df, price, direction):
-    """ราคาแตะ BB Lower (BUY) หรือ BB Upper (SELL)"""
-    bb = get_bb(df)
-    return price <= bb["lower"] if direction == "BUY" else price >= bb["upper"]
-
-
-def check_reversal_zone(df_1h, df_15m, direction, price, fib_zone, spike_found, bos_confirmed):
-    """
-    Counter-trend Reversal Scenario:
-      Stage 1: BB Lower/Upper แตะ
-      Stage 2: เข้า Kivanc Zone + H1 Spike
-      Stage 3: M15 BOS ยืนยัน → เช็ค H1 Stoch → override cascade=0
-    คืน {"override": bool, "cascade_bonus": int, "stage": int, "reason": str}
-    """
-    result = {"override": False, "cascade_bonus": 0, "stage": 0, "reason": ""}
-
-    # Stage 1: BB Extreme
-    if not check_bb_extreme(df_15m, price, direction):
-        return result
-    result["stage"] = 1
-
-    # Stage 2: อยู่ใน Kivanc Zone + H1 Spike ยืนยัน
-    in_zone = fib_zone["prz_low"] <= price <= fib_zone["prz_high"]
-    if not (in_zone and spike_found):
-        result["reason"] = "Stage1 only: BB extreme — รอ Spike ใน Kivanc zone"
-        return result
-    result["stage"] = 2
-
-    # Stage 3: BOS M15 ยืนยัน
-    if not bos_confirmed:
-        result["reason"] = "Stage2: Spike+Zone — รอ M15 BOS"
-        return result
-    result["stage"] = 3
-
-    # ตรวจ H1 Stoch หลัง BOS
-    stoch = get_stoch(df_1h)
-    if direction == "BUY":
-        stoch_ok = stoch["k"] < 30 and stoch["cross_up"]
-    else:
-        stoch_ok = stoch["k"] > 70 and stoch["cross_down"]
-
-    if stoch_ok:
-        result["override"]      = True
-        result["cascade_bonus"] = 4
-        result["reason"]        = f"Reversal Full: BB+Zone+Spike+BOS+Stoch K={stoch['k']:.1f}"
-    else:
-        result["override"]      = True
-        result["cascade_bonus"] = 2
-        result["reason"]        = f"Reversal Partial: BB+Zone+Spike+BOS (Stoch K={stoch['k']:.1f} ยังไม่ cross)"
-
-    return result
-
-
-
 # Context
 def get_context_adj(direction: str, score: int) -> tuple:
     total_adj=0; reasons=[]
@@ -457,127 +378,6 @@ def get_context_adj(direction: str, score: int) -> tuple:
         except Exception as e:
             reasons.append(plugin + ": error")
     return total_adj, False, " | ".join(reasons)
-
-
-# ── [NEW 1] Harmonic D + Basket HL GPS Matching ──────────
-def match_harmonic_gps(prz_list: list, sess_high: float, sess_low: float,
-                        hl_buffer: float = 3.0) -> dict:
-    """
-    GPS: ตรวจว่า Harmonic Zone D ตรงกับ Session H/L (Liquidity Zone) ไหม
-    ถ้าใช่ = High-priority reversal zone — ราคามาถึงเพื่อกวาด SL แล้วกลับ
-    คืน {"gps_confirmed": bool, "direction": str, "prz": dict, "reason": str}
-    """
-    for prz in prz_list:
-        d_mid = prz["prz_mid"]
-        # Zone D ใกล้ Session Low = BUY reversal zone
-        if prz["direction"] == "BUY":
-            if abs(d_mid - sess_low) <= hl_buffer:
-                return {
-                    "gps_confirmed": True,
-                    "direction":     "BUY",
-                    "prz":           prz,
-                    "reason":        f"GPS: {prz['name']} Zone D ({d_mid:.1f}) ≈ Session Low ({sess_low:.1f})",
-                }
-        # Zone D ใกล้ Session High = SELL reversal zone
-        elif prz["direction"] == "SELL":
-            if abs(d_mid - sess_high) <= hl_buffer:
-                return {
-                    "gps_confirmed": True,
-                    "direction":     "SELL",
-                    "prz":           prz,
-                    "reason":        f"GPS: {prz['name']} Zone D ({d_mid:.1f}) ≈ Session High ({sess_high:.1f})",
-                }
-    return {"gps_confirmed": False, "direction": "", "prz": None, "reason": "No GPS match"}
-
-
-# ── [NEW 2] Pattern Failure Protocol ─────────────────────
-# State เก็บ reversal setup ที่กำลัง monitor อยู่
-_reversal_monitor: dict = {
-    "active":     False,
-    "direction":  "",
-    "price_zone": (0.0, 0.0),
-    "bars_waited": 0,
-    "max_bars":   8,          # M15 × 8 = 2 ชั่วโมง ถ้าไม่เกิด BOS = Pattern failed
-}
-
-def update_pattern_failure(price: float, bos_confirmed: bool, direction: str,
-                            fib_zone: dict) -> dict:
-    """
-    Monitor ว่า reversal setup ที่เปิดไว้ยัง valid ไหม
-    ถ้าเกิน max_bars แล้ว BOS ยังไม่เกิด → Pattern failed → invalidate
-    คืน {"valid": bool, "failed": bool, "reason": str}
-    """
-    global _reversal_monitor
-    in_zone = fib_zone["prz_low"] <= price <= fib_zone["prz_high"]
-
-    # เริ่ม monitor ใหม่
-    if in_zone and not _reversal_monitor["active"]:
-        _reversal_monitor.update({
-            "active":      True,
-            "direction":   direction,
-            "price_zone":  (fib_zone["prz_low"], fib_zone["prz_high"]),
-            "bars_waited": 0,
-        })
-        return {"valid": True, "failed": False, "reason": "Monitor started"}
-
-    # ถ้า active อยู่
-    if _reversal_monitor["active"]:
-        # BOS เกิดแล้ว = success → reset
-        if bos_confirmed:
-            _reversal_monitor["active"] = False
-            return {"valid": True, "failed": False, "reason": "BOS confirmed — Pattern valid"}
-
-        # ออกนอก zone → reset
-        if not in_zone:
-            _reversal_monitor["active"] = False
-            return {"valid": False, "failed": True, "reason": "Price left zone — Pattern invalidated"}
-
-        # นับ bars
-        _reversal_monitor["bars_waited"] += 1
-        waited = _reversal_monitor["bars_waited"]
-        max_b  = _reversal_monitor["max_bars"]
-
-        if waited >= max_b:
-            _reversal_monitor["active"] = False
-            return {
-                "valid":  False,
-                "failed": True,
-                "reason": f"Pattern Failure: {waited} bars in zone, no BOS → Extended D likely",
-            }
-        return {
-            "valid":  True,
-            "failed": False,
-            "reason": f"Waiting BOS: {waited}/{max_b} bars",
-        }
-
-    return {"valid": True, "failed": False, "reason": "Not monitoring"}
-
-
-# ── [NEW 3] Volume-Confirmed H1 Spike ────────────────────
-def score_spike_with_volume(spike: dict, df_1h: pd.DataFrame) -> dict:
-    """
-    ปรับ score ของ Spike ตาม Volume:
-    - Spike + Volume spike (>1.5x avg) = full score +4
-    - Spike + No volume              = half score +2
-    - No spike                       = 0
-    คืน {"score_add": int, "volume_confirmed": bool}
-    """
-    if not spike["found"]:
-        return {"score_add": 0, "volume_confirmed": False}
-
-    if "volume" not in df_1h.columns or len(df_1h) < 20:
-        # ไม่มีข้อมูล volume → ให้ full score ไปก่อน
-        return {"score_add": 4, "volume_confirmed": False}
-
-    # ใช้ iloc[-2] ตรงกับ confirmed candle ใน detect_h1_spike_at_kivanc
-    vol_cur = float(df_1h["volume"].iloc[-2])
-    vol_avg = float(df_1h["volume"].iloc[-16:-2].mean())  # avg 14 แท่งก่อนหน้า
-
-    if vol_avg > 0 and vol_cur >= vol_avg * 1.5:
-        return {"score_add": 4, "volume_confirmed": True}
-    else:
-        return {"score_add": 2, "volume_confirmed": False}
-
 
 
 # Scenario
@@ -610,32 +410,20 @@ def compute_signal(
     session = get_session(dt if hasattr(dt,"hour") else datetime.now(timezone.utc))
 
     # Step 1: Cascade Structure
-    cascade   = compute_cascade(df_4h, df_1h, df_15m)
+    cascade = compute_cascade(df_4h, df_1h, df_15m)
     direction = cascade["direction"]
     score     = cascade["score"]
-    cascade_neutral = direction == "NEUTRAL"
-    # ถ้า cascade NEUTRAL → ยังไม่ return ทันที รอตรวจ Reversal Zone ก่อน
-    if cascade_neutral:
-        direction = None   # จะกำหนดใหม่ใน reversal check
-    elif score < 2:
-        return None
+    if direction == "NEUTRAL" or score < 2: return None
 
     # Step 2: Early Warning Stage 1
-    if direction:
-        try:
-            from early_warning import check_vsa_forming
-            check_vsa_forming(df_15m, direction, SYMBOL, session)
-        except Exception: pass
+    try:
+        from early_warning import check_vsa_forming
+        check_vsa_forming(df_15m, direction, SYMBOL, session)
+    except Exception: pass
 
     # Step 3: BOS / MSS
-    bos_buy  = detect_bos(df_15m, "BUY")
-    bos_sell = detect_bos(df_15m, "SELL")
-    if direction == "BUY"  and bos_buy:  score += 2
-    if direction == "SELL" and bos_sell: score += 2
-    if direction and detect_mss(df_15m, direction): score += 1
-    # สำหรับ Reversal: ดูว่า BOS ฝั่งไหน confirm
-    bos_confirmed_buy  = bos_buy
-    bos_confirmed_sell = bos_sell
+    if detect_bos(df_15m, direction): score += 2
+    if detect_mss(df_15m, direction): score += 1
 
     # Step 4: Early Warning Stage 2
     try:
@@ -658,22 +446,11 @@ def compute_signal(
     if direction=="SELL" and curr_high > sess_high*1.0005 and price < sess_high: score += 3
     if direction=="BUY"  and curr_low  < sess_low*0.9995  and price > sess_low:  score += 3
 
-    # Step 7: Harmonic PRZ + GPS Matching
+    # Step 7: Harmonic PRZ
     prz_list     = scan_harmonic(df_1h, df_4h)
     prz_match    = None
     prz_name     = ""
     prz_opposite = None
-
-    # [NEW 1] GPS: ตรวจ Harmonic Zone D vs Session H/L ล่วงหน้า
-    gps = match_harmonic_gps(prz_list, sess_high, sess_low, hl_buffer=3.0)
-    if gps["gps_confirmed"]:
-        print("🗺️  " + gps["reason"])
-        # ถ้า cascade NEUTRAL แต่ GPS confirmed → กำหนด direction ล่วงหน้า
-        if cascade_neutral and direction is None:
-            direction = gps["direction"]
-            score    += 3   # GPS bonus: Harmonic D + HL confirmed
-
-    # หา PRZ ที่ราคาอยู่ใน zone ตอนนี้
     for prz in prz_list:
         if prz["direction"]==direction and prz["prz_low"]<=price<=prz["prz_high"]:
             prz_match=prz; prz_name=prz["name"]; score+=(4-prz["priority"]); break
@@ -710,58 +487,15 @@ def compute_signal(
                 fib_hi = h1_high - h1_rng * 0.618
             fib_zone = {"prz_low": fib_lo, "prz_high": fib_hi}
 
-    # ตรวจ Spike ทั้ง 2 ฝั่ง (รองรับ Reversal ที่ cascade=NEUTRAL)
-    spike_buy  = detect_h1_spike_at_kivanc(df_1h, "BUY",
-                     fib_zone["prz_high"], fib_zone["prz_low"], price)
-    spike_sell = detect_h1_spike_at_kivanc(df_1h, "SELL",
-                     fib_zone["prz_high"], fib_zone["prz_low"], price)
-    spike = spike_buy if direction == "BUY" else spike_sell if direction == "SELL" else {"found": False, "sl": 0, "tp1": 0}
-
-    # [NEW 3] Volume-Confirmed Spike Score
-    spike_vol = score_spike_with_volume(spike if direction else
-                (spike_buy if bos_confirmed_buy else spike_sell), df_1h)
-    if spike["found"] and direction:
-        score += spike_vol["score_add"]
-        vol_tag = "✅ Vol confirmed" if spike_vol["volume_confirmed"] else "⚠️ No vol"
-        print(f"🎯 H1 Spike at Kivanc: {direction} "
-              f"SL={spike['sl']} TP1={spike['tp1']} | {vol_tag} (+{spike_vol['score_add']})")
-
-    # ── Reversal Zone Check (Counter-trend) ──────────────
-    # ทำงานเมื่อ cascade=NEUTRAL หรือ cascade ขัดแย้งกับ Zone
-    reversal = {"override": False, "cascade_bonus": 0, "stage": 0, "reason": ""}
-
-    for rev_dir in (["BUY", "SELL"] if cascade_neutral else []):
-        sp = spike_buy if rev_dir == "BUY" else spike_sell
-        bos_ok = bos_confirmed_buy if rev_dir == "BUY" else bos_confirmed_sell
-        rev = check_reversal_zone(
-            df_1h, df_15m, rev_dir, price, fib_zone,
-            spike_found=sp["found"], bos_confirmed=bos_ok,
-        )
-        if rev["override"]:
-            direction = rev_dir
-            score    += rev["cascade_bonus"]
-            reversal  = rev
-            spike     = sp
-            print("🔄 " + rev["reason"])
-            break
-
-    if cascade_neutral and not reversal["override"]:
-        # Reversal ยังไม่ครบเงื่อนไข → รายงาน stage แล้ว return
-        if reversal["stage"] > 0:
-            print("⏳ Reversal " + reversal["reason"])
-        return None
-
-    # [NEW 2] Pattern Failure Protocol
-    # ตรวจว่า reversal setup ที่ monitor อยู่ยัง valid ไหม
-    if reversal["override"] or (prz_match and direction):
-        _bos_ok = bos_confirmed_buy if direction == "BUY" else bos_confirmed_sell
-        pf = update_pattern_failure(price, _bos_ok, direction, fib_zone)
-        if pf["failed"]:
-            print("❌ " + pf["reason"])
-            return None
-        if not pf["valid"]:
-            print("⏳ Pattern Monitor: " + pf["reason"])
-            return None
+    spike = detect_h1_spike_at_kivanc(
+        df_1h, direction,
+        fib_zone["prz_high"], fib_zone["prz_low"],
+        current_price=price,
+    )
+    if spike["found"]:
+        score += 4
+        print("🎯 H1 Spike at Kivanc: " + direction +
+              " SL=" + str(spike["sl"]) + " TP1=" + str(spike["tp1"]))
 
     # Step 8: Pin Bar
     if prz_match:
@@ -774,15 +508,13 @@ def compute_signal(
     if score < V4_MIN: return None
 
     # BB Direction Filter — ห้าม BUY ถ้า BB ชี้ลง
-    # ยกเว้น: Reversal mode (BB extreme คือ เงื่อนไขที่ 1 แล้ว)
     bb = get_bb(df_15m)
-    if not reversal["override"]:
-        if direction == "BUY"  and bb["upper"] < price:
-            print("BB Filter: BUY blocked — BB bearish")
-            return None
-        if direction == "SELL" and bb["lower"] > price:
-            print("BB Filter: SELL blocked — BB bullish")
-            return None
+    if direction == "BUY"  and bb["upper"] < price:
+        print("BB Filter: BUY blocked — BB bearish")
+        return None
+    if direction == "SELL" and bb["lower"] > price:
+        print("BB Filter: SELL blocked — BB bullish")
+        return None
 
     # Step 10: Context Engine
     ctx_adj, blocked, ctx_reason = get_context_adj(direction, score)
@@ -807,7 +539,7 @@ def compute_signal(
     atr = max(float((df_15m["high"]-df_15m["low"]).tail(14).mean()), 1.0)
 
     if direction=="BUY":
-        sl          = round(spike["sl"] if spike["found"] and reversal["override"] else price - atr*1.0, 2)
+        sl          = round(price - atr*1.0, 2)
         be_price    = round(price + 0.10, 2)
         tp_main     = prz_opposite["prz_mid"] if prz_opposite and prz_opposite["prz_mid"]>price else (pdh if pdh and pdh>price else price+atr*3.0)
         tp_final    = round(max(tp_main, price+atr*1.5), 2)
@@ -820,7 +552,7 @@ def compute_signal(
             {"pct":20,"price":tp_final, "reason":"PDH_PRZ"},
         ]
     else:
-        sl          = round(spike["sl"] if spike["found"] and reversal["override"] else price + atr*1.0, 2)
+        sl          = round(price + atr*1.0, 2)
         be_price    = round(price - 0.10, 2)
         tp_main     = prz_opposite["prz_mid"] if prz_opposite and 0<prz_opposite["prz_mid"]<price else (pdl if pdl and pdl<price else price-atr*3.0)
         tp_final    = round(min(tp_main, price-atr*1.5), 2)
@@ -842,19 +574,6 @@ def compute_signal(
                            price, sl, tp_final, prz_name, session)
     except Exception: pass
 
-    # VSA Gate
-    try:
-        from vsa_gate import check_reentry_allowed
-        vsa = check_reentry_allowed(df_1h, df_15m, direction)
-    except Exception:
-        vsa = {"allowed": True, "bias": "NEUTRAL", "reason": "vsa_gate N/A"}
-
-    # visual_sl = spike SL ถ้ามี spike, fallback ATR SL
-    visual_sl_val = spike["sl"] if spike["found"] else sl
-
-    # zone_valid = ราคายังอยู่ใน fib_zone ไหม
-    zone_valid_val = fib_zone["prz_low"] <= price <= fib_zone["prz_high"]
-
     return CloudSignal(
         action="OPEN", direction=direction, signal_type=sig_type,
         entry=round(price,2), sl=sl, be_price=be_price,
@@ -864,11 +583,6 @@ def compute_signal(
         layer=1, session=session, timestamp=now,
         fallback_sl=sl, fallback_tp=fallback_tp,
         st_h4=cascade["st_h4"], st_1h=cascade["st_1h"], st_15m=cascade["st_15m"],
-        visual_sl=round(visual_sl_val, 2),
-        zone_valid=zone_valid_val,
-        reentry_ok=vsa["allowed"],
-        vsa_bias=vsa["bias"],
-        gps_confirmed=gps.get("gps_confirmed", False),
     )
 
 
@@ -895,9 +609,4 @@ def signal_to_dict(sig: CloudSignal) -> dict:
         "st_h4":        sig.st_h4,
         "st_1h":        sig.st_1h,
         "st_15m":       sig.st_15m,
-        "visual_sl":    sig.visual_sl,
-        "zone_valid":   sig.zone_valid,
-        "reentry_ok":   sig.reentry_ok,
-        "vsa_bias":     sig.vsa_bias,
-        "gps_confirmed":sig.gps_confirmed,
     }
