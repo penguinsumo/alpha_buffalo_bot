@@ -154,8 +154,6 @@ def analyze_trend(
 def format_trend_message(tr: TrendResult) -> str:
     """Format Trend Update สำหรับ Telegram"""
 
-    delta_buy  = "🟢 Δ+"
-    delta_sell = "🔴 Δ-"
     lines = [
         "📊 " + tr.symbol + " TREND UPDATE",
         "━━━━━━━━━━━━━━━━━━━━━",
@@ -166,17 +164,9 @@ def format_trend_message(tr: TrendResult) -> str:
 
     # TF rows
     for tf in [tr.m15, tr.h1, tr.h4]:
-        if "Impulse Δ+" in tf.state:
-            tf_sym = "🟢 Δ+"
-        elif "Impulse Δ-" in tf.state:
-            tf_sym = "🔴 Δ-"
-        elif "Pullback" in tf.state:
-            tf_sym = "🔄 Pullback"
-        elif "SELLING" in tf.state:
-            tf_sym = "🔴 Sell Press"
-        else:
-            tf_sym = "⬜ Sideways"
-        line = tf.tf + " : " + tf_sym
+        tf_emoji = "📈" if "Δ+" in tf.state or "↗️" in tf.emoji else \
+                   "📉" if "Δ-" in tf.state or "↘️" in tf.emoji else "➡️"
+        line = tf_emoji + " " + tf.tf + "  : " + tf.state
         lines.append(line)
 
     # Pressure alerts
@@ -226,6 +216,18 @@ def format_signal_message(
     sl_zone_lo = round(sl - 2.0, 1)
     sl_zone_hi = round(sl, 1)
 
+    # [FIX] TP Sort: BUY → TP1 < TP2 (ใกล้→ไกล)
+    #               SELL → TP1 > TP2 (ใกล้→ไกล = ค่าน้อย→น้อยกว่า)
+    tp_near, tp_far = (min(tp1,tp2), max(tp1,tp2)) if direction=="BUY"                  else (max(tp1,tp2), min(tp1,tp2))
+
+    # Guard: TP ต้องไม่ขัดทิศทาง entry
+    if direction == "BUY":
+        tp_near = max(tp_near, entry + 0.1)
+        tp_far  = max(tp_far,  tp_near + 0.1)
+    else:
+        tp_near = min(tp_near, entry - 0.1)
+        tp_far  = min(tp_far,  tp_near - 0.1)
+
     lines = [
         ("🎯 " if sniper else "") + delta + " ALPHA BUFFALO V5",
         "━━━━━━━━━━━━━━━━━━━━━",
@@ -239,8 +241,8 @@ def format_signal_message(
     lines += [
         "🎯 Entry    : ~" + "{:,.2f}".format(entry),
         "🛡️ SL Zone  : " + str(sl_zone_lo) + " - " + str(sl_zone_hi),
-        "🎯 TP1      : " + "{:,.1f}".format(tp1) + "  (" + tp1_tf + ")",
-        "🎯 TP2      : " + "{:,.1f}".format(tp2) + "  (" + tp2_tf + ")",
+        "🎯 TP1      : " + "{:,.1f}".format(tp_near) + "  (" + tp1_tf + ")",
+        "🎯 TP2      : " + "{:,.1f}".format(tp_far)  + "  (" + tp2_tf + ")",
     ]
 
     if sniper:
