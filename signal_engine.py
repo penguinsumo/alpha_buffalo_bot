@@ -191,20 +191,59 @@ def get_bb(df: pd.DataFrame) -> dict:
 
 
 # Pin Bar
+# ── Kivanc Swing Zone (Stable) ───────────────────────────
+def get_kivanc_swing_zone(df_1h: pd.DataFrame, pivot_n: int = 10):
+    """
+    หา Swing High/Low ล่าสุดจาก Pivot Point จริงบน H1
+    [FIX 2] Stable กว่า tail(50).max/min() เพราะ zone ไม่ขยับทุกแท่ง
+    คืน (swing_high, swing_low) หรือ (None, None) ถ้าข้อมูลไม่พอ
+    """
+    if df_1h is None or len(df_1h) < pivot_n * 2 + 1:
+        return None, None
+
+    swing_high = None
+    swing_low  = None
+
+    highs = df_1h["high"].values
+    lows  = df_1h["low"].values
+    n     = len(df_1h)
+
+    # วนหาจาก pivot ล่าสุดย้อนไป (ข้าม pivot_n แท่งสุดท้าย เพราะยังไม่ confirm)
+    for i in range(n - pivot_n - 1, pivot_n - 1, -1):
+        # Pivot High: high[i] สูงกว่าทุก pivot_n แท่งรอบข้าง
+        if swing_high is None:
+            if all(highs[i] > highs[i-j] for j in range(1, pivot_n+1)) and \
+               all(highs[i] > highs[i+j] for j in range(1, pivot_n+1)):
+                swing_high = float(highs[i])
+        # Pivot Low: low[i] ต่ำกว่าทุก pivot_n แท่งรอบข้าง
+        if swing_low is None:
+            if all(lows[i] < lows[i-j] for j in range(1, pivot_n+1)) and \
+               all(lows[i] < lows[i+j] for j in range(1, pivot_n+1)):
+                swing_low = float(lows[i])
+        if swing_high is not None and swing_low is not None:
+            break
+
+    return swing_high, swing_low
+
+
 def detect_h1_spike_at_kivanc(
     df_1h: pd.DataFrame,
     direction: str,
     fib_zone_high: float,
     fib_zone_low: float,
+    current_price: float = 0.0,
 ) -> dict:
     """
     H1 Spike ปลายไส้แตะ Kivanc Golden Zone
+    [FIX 1] ใช้ iloc[-2] = แท่ง H1 ที่ปิดสมบูรณ์แล้ว (ไม่ใช่แท่งที่กำลังวิ่ง)
+    [FIX 3] TP Guard: ถ้า body เล็ก (Doji) fallback ใช้ ATR
     คืน {"found": bool, "sl": float, "tp1": float}
     """
-    if df_1h is None or len(df_1h) < 2:
+    if df_1h is None or len(df_1h) < 3:
         return {"found": False, "sl": 0, "tp1": 0}
 
-    c = df_1h.iloc[-1]
+    # [FIX 1] iloc[-2] = แท่งที่ปิดแล้ว (confirmed), ไม่ใช่ iloc[-1] ที่ยังวิ่งอยู่
+    c = df_1h.iloc[-2]
     rng = c["high"] - c["low"]
     if rng < 0.001:
         return {"found": False, "sl": 0, "tp1": 0}
@@ -212,23 +251,33 @@ def detect_h1_spike_at_kivanc(
     wick_up   = (c["high"] - max(c["close"], c["open"])) / rng
     wick_down = (min(c["close"], c["open"]) - c["low"])   / rng
 
+    # ATR fallback สำหรับ TP Guard (ใช้ 14 แท่งล่าสุด)
+    atr_h1 = float((df_1h["high"] - df_1h["low"]).tail(14).mean())
+    ref_price = current_price if current_price > 0 else float(df_1h["close"].iloc[-1])
+
     if direction == "BUY":
-        spike = wick_down > 0.60
+        spike     = wick_down > 0.60
         at_kivanc = fib_zone_low <= c["low"] <= fib_zone_high
         if spike and at_kivanc:
+            tp1_raw = round(min(c["open"], c["close"]), 2)
+            # [FIX 3] TP Guard: tp1 ต้องสูงกว่า entry จริง
+            tp1 = tp1_raw if tp1_raw > ref_price else round(ref_price + atr_h1 * 1.5, 2)
             return {
                 "found": True,
                 "sl":    round(c["low"]  - 0.30, 2),
-                "tp1":   round(min(c["open"], c["close"]), 2),
+                "tp1":   tp1,
             }
     else:
-        spike = wick_up > 0.60
+        spike     = wick_up > 0.60
         at_kivanc = fib_zone_low <= c["high"] <= fib_zone_high
         if spike and at_kivanc:
+            tp1_raw = round(max(c["open"], c["close"]), 2)
+            # [FIX 3] TP Guard: tp1 ต้องต่ำกว่า entry จริง
+            tp1 = tp1_raw if tp1_raw < ref_price else round(ref_price - atr_h1 * 1.5, 2)
             return {
                 "found": True,
                 "sl":    round(c["high"] + 0.30, 2),
-                "tp1":   round(max(c["open"], c["close"]), 2),
+                "tp1":   tp1,
             }
 
     return {"found": False, "sl": 0, "tp1": 0}
@@ -409,25 +458,39 @@ def compute_signal(
         if prz["direction"]!=direction: prz_opposite=prz; break
 
     # Step 7.5: H1 Spike at Kivanc
+    # [FIX 2] Kivanc Zone — ใช้ Swing Pivot จริง (Stable) แทน rolling tail(50)
     fib_zone = None
     if prz_match:
         fib_zone = prz_match
     else:
-        # คำนวณ Kivanc zone จาก 1H swing
-        h1_high = float(df_1h["high"].tail(50).max())
-        h1_low  = float(df_1h["low"].tail(50).min())
-        h1_rng  = h1_high - h1_low
-        if direction == "BUY":
-            fib_lo = h1_low + h1_rng * 0.618
-            fib_hi = h1_low + h1_rng * 0.786
+        # หา Swing High/Low จาก Pivot (lookback 10 แท่ง H1 แต่ละข้าง)
+        swing_high, swing_low = get_kivanc_swing_zone(df_1h, pivot_n=10)
+        if swing_high is not None and swing_low is not None:
+            h1_rng = swing_high - swing_low
+            if direction == "BUY":
+                fib_lo = swing_low  + h1_rng * 0.618
+                fib_hi = swing_low  + h1_rng * 0.786
+            else:
+                fib_lo = swing_high - h1_rng * 0.786
+                fib_hi = swing_high - h1_rng * 0.618
+            fib_zone = {"prz_low": fib_lo, "prz_high": fib_hi}
         else:
-            fib_lo = h1_high - h1_rng * 0.786
-            fib_hi = h1_high - h1_rng * 0.618
-        fib_zone = {"prz_low": fib_lo, "prz_high": fib_hi}
+            # fallback: ถ้าหา pivot ไม่เจอ (ข้อมูลน้อย) ใช้ tail(50)
+            h1_high = float(df_1h["high"].tail(50).max())
+            h1_low  = float(df_1h["low"].tail(50).min())
+            h1_rng  = h1_high - h1_low
+            if direction == "BUY":
+                fib_lo = h1_low + h1_rng * 0.618
+                fib_hi = h1_low + h1_rng * 0.786
+            else:
+                fib_lo = h1_high - h1_rng * 0.786
+                fib_hi = h1_high - h1_rng * 0.618
+            fib_zone = {"prz_low": fib_lo, "prz_high": fib_hi}
 
     spike = detect_h1_spike_at_kivanc(
         df_1h, direction,
-        fib_zone["prz_high"], fib_zone["prz_low"]
+        fib_zone["prz_high"], fib_zone["prz_low"],
+        current_price=price,
     )
     if spike["found"]:
         score += 4
