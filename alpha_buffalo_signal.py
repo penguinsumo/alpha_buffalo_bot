@@ -130,12 +130,15 @@ async def reentry(p: RP):
     }
 
 # ── Config ────────────────────────────────────────────────
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-ADMIN_ID       = int(os.getenv("ADMIN_ID","0"))
-TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-POLL_INTERVAL  = int(os.getenv("POLL_INTERVAL","1800"))
-TWELVE_KEY     = os.getenv("TWELVE_API_KEY","")
-SYMBOL         = os.getenv("TRADE_SYMBOL","XAUUSD")
+TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
+ADMIN_ID        = os.getenv("ADMIN_ID","0")
+# NOTIFY_IDS = "ADMIN_ID,-100xxx,-100yyy" คั่นด้วย comma
+_notify_raw     = os.getenv("NOTIFY_IDS", ADMIN_ID)
+NOTIFY_IDS      = [x.strip() for x in _notify_raw.split(",") if x.strip()]
+TELEGRAM_API    = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL","1800"))
+TWELVE_KEY      = os.getenv("TWELVE_API_KEY","")
+SYMBOL          = os.getenv("TRADE_SYMBOL","XAUUSD")
 
 last_update_id = 0
 last_signal_time = None
@@ -143,10 +146,14 @@ last_signal_time = None
 def log(msg): print(f"{datetime.now(BKK).strftime('%H:%M:%S')} | {msg}", flush=True)
 
 def send_telegram(msg, chat_id=None):
-    try:
-        requests.post(f"{TELEGRAM_API}/sendMessage",
-            json={"chat_id":chat_id or ADMIN_ID,"text":msg,"parse_mode":"HTML"},timeout=10)
-    except Exception as e: log(f"telegram error: {e}")
+    # ถ้ามี chat_id (reply ตรง) → ส่งแค่ห้องนั้น
+    # ถ้าไม่มี (auto signal) → broadcast ทุก NOTIFY_IDS
+    targets = [str(chat_id)] if chat_id else NOTIFY_IDS
+    for cid in targets:
+        try:
+            requests.post(f"{TELEGRAM_API}/sendMessage",
+                json={"chat_id":cid,"text":msg,"parse_mode":"HTML"},timeout=10)
+        except Exception as e: log(f"telegram error {cid}: {e}")
 
 def get_ohlcv(interval="1h", bars=200):
     try:
