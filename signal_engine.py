@@ -375,6 +375,15 @@ def compute_signal(
 
     if score < V4_MIN: return None
 
+    # BB Direction Filter — ห้าม BUY ถ้า BB ชี้ลง
+    bb = get_bb(df_15m)
+    if direction == "BUY"  and bb["upper"] < price:
+        print("BB Filter: BUY blocked — BB bearish")
+        return None
+    if direction == "SELL" and bb["lower"] > price:
+        print("BB Filter: SELL blocked — BB bullish")
+        return None
+
     # Step 10: Context Engine
     ctx_adj, blocked, ctx_reason = get_context_adj(direction, score)
     if blocked:
