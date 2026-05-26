@@ -398,27 +398,31 @@ def compute_signal(
     atr = max(float((df_15m["high"]-df_15m["low"]).tail(14).mean()), 1.0)
 
     if direction=="BUY":
-        sl       = round(price - atr*1.0, 2)
-        be_price = round(price + 0.10, 2)
-        tp_main  = prz_opposite["prz_mid"] if prz_opposite else (pdh if pdh and pdh>price else price+atr*3.0)
-        tp_final = round(tp_main, 2)
-        partial  = [
-            {"pct":50,"price":round(bb["upper"],2),"reason":"BB_Upper"},
-            {"pct":30,"price":round(bb["mid"],  2),"reason":"BB_Mid"},
-            {"pct":20,"price":round(tp_final,   2),"reason":"PDH_PRZ"},
-        ]
+        sl          = round(price - atr*1.0, 2)
+        be_price    = round(price + 0.10, 2)
+        tp_main     = prz_opposite["prz_mid"] if prz_opposite and prz_opposite["prz_mid"]>price else (pdh if pdh and pdh>price else price+atr*3.0)
+        tp_final    = round(max(tp_main, price+atr*1.5), 2)
+        tp1_price   = round(max(bb["upper"], price+atr*0.5), 2)
+        tp2_price   = round(max(bb["mid"],   price+atr*1.0), 2)
         fallback_tp = round(price+atr*4.0, 2)
-    else:
-        sl       = round(price + atr*1.0, 2)
-        be_price = round(price - 0.10, 2)
-        tp_main  = prz_opposite["prz_mid"] if prz_opposite else (pdl if pdl and pdl<price else price-atr*3.0)
-        tp_final = round(tp_main, 2)
         partial  = [
-            {"pct":50,"price":round(bb["lower"],2),"reason":"BB_Lower"},
-            {"pct":30,"price":round(bb["mid"],  2),"reason":"BB_Mid"},
-            {"pct":20,"price":round(tp_final,   2),"reason":"PDL_PRZ"},
+            {"pct":50,"price":tp1_price,"reason":"BB_Upper"},
+            {"pct":30,"price":tp2_price,"reason":"BB_Mid"},
+            {"pct":20,"price":tp_final, "reason":"PDH_PRZ"},
         ]
+    else:
+        sl          = round(price + atr*1.0, 2)
+        be_price    = round(price - 0.10, 2)
+        tp_main     = prz_opposite["prz_mid"] if prz_opposite and 0<prz_opposite["prz_mid"]<price else (pdl if pdl and pdl<price else price-atr*3.0)
+        tp_final    = round(min(tp_main, price-atr*1.5), 2)
+        tp1_price   = round(min(bb["lower"], price-atr*0.5), 2)
+        tp2_price   = round(min(bb["mid"],   price-atr*1.0), 2)
         fallback_tp = round(price-atr*4.0, 2)
+        partial  = [
+            {"pct":50,"price":tp1_price,"reason":"BB_Lower"},
+            {"pct":30,"price":tp2_price,"reason":"BB_Mid"},
+            {"pct":20,"price":tp_final, "reason":"PDL_PRZ"},
+        ]
 
     now = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
 
