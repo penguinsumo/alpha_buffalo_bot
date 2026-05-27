@@ -310,30 +310,12 @@ def handle_cmd(text, chat_id):
         except Exception as e:
             msg = "Setup error: " + str(e)
         send_telegram(msg, chat_id)
-    elif t == "/quota":
+    elif t in ("/quota", "/newlicense", "/newtrial", "/licenses") or          t.startswith("/newlicense ") or t.startswith("/newtrial ") or          t.startswith("/revoke ") or t.startswith("/extend ") or          t.startswith("/quota "):
         try:
-            from license_manager import format_quota_info
-            msg = format_quota_info("DEMO123")
-        except Exception as e:
-            msg = "Quota error: " + str(e)
-        send_telegram(msg, chat_id)
-    elif t.startswith("/newlicense"):
-        try:
-            parts = t.split(" ")
-            plan  = parts[1].upper() if len(parts) > 1 else "TRIAL"
-            name  = parts[2] if len(parts) > 2 else ""
-            from license_manager import create_license, format_license_info
-            lic = create_license(plan, name)
-            msg = format_license_info(lic)
+            from license_manager import handle_admin_command
+            msg = handle_admin_command(t)
         except Exception as e:
             msg = "License error: " + str(e)
-        send_telegram(msg, chat_id)
-    elif t == "/quota":
-        try:
-            from license_manager import format_quota_info
-            msg = format_quota_info("DEMO123")
-        except Exception as e:
-            msg = "Quota error: " + str(e)
         send_telegram(msg, chat_id)
     elif t == "/session":
         try:
@@ -346,7 +328,7 @@ def handle_cmd(text, chat_id):
             msg = "Session error: " + str(e)
         send_telegram(msg, chat_id)
     elif t in ("/help", "/?"):
-        send_telegram("/status /price /health /context /setup /quota", chat_id)
+        send_telegram("/status /price /health /context /setup\n/quota /newlicense /newtrial /revoke /extend /licenses", chat_id)
 
 
 if __name__ == "__main__":
