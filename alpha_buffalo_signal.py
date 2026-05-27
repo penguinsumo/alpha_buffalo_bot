@@ -84,6 +84,16 @@ def history(key:str="",limit:int=20):
     if not chk(key): raise HTTPException(403,"Invalid license")
     return signal_history[-limit:]
 
+@app.get("/signal/scenarios")
+def scenarios(key: str = ""):
+    """คืน active VSA zones สำหรับ EA / dashboard / Telegram"""
+    if not chk(key): raise HTTPException(403, "Invalid license")
+    try:
+        from scenario_scanner import scenario_scanner
+        return {"ok": True, "zones": scenario_scanner.get_summary()}
+    except Exception as e:
+        return {"ok": False, "zones": [], "error": str(e)}
+
 @app.get("/signal/zone_check")
 def zone_check(key:str=""):
     """EA ถาม: zone ยัง valid + reentry อนุญาตไหม"""
@@ -220,6 +230,16 @@ def signal_loop():
                 log("Signal: " + sig.direction + " " + sig.signal_type + " Score:" + str(sig.score))
             else:
                 log(f"⏳ No signal | {price:,.2f}")
+
+            # ── Scenario Scanner (Mode B — Telegram alert) ──
+            try:
+                from scenario_scanner import run_scenario_scan
+                zones = run_scenario_scan(df_15m)
+                if zones:
+                    log(f"🔍 Scenarios active: {len(zones)}")
+            except Exception as e:
+                log(f"⚠️ scenario_scanner error: {e}")
+
         except Exception as e: log(f"signal_loop error: {e}")
         time.sleep(POLL_INTERVAL)
 
