@@ -6,3 +6,4 @@ python-dotenv
 fastapi
 uvicorn[standard]
 pydantic
+yfinance>=0.2.0
