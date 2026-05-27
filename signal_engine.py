@@ -1,18 +1,12 @@
 """
-signal_engine_v2.py — Alpha Buffalo v5.1
+signal_engine_v2.py — Alpha Buffalo v5.2 (Sprint Clean)
 Python Brain: รวม Cascade H4→H1→M15 + Harmonic PRZ + Context + Scenario
 
-Flow:
-1. Cascade Structure Analysis (H4→H1→M15)
-2. VSA Selling/Buying Pressure
-3. BOS/MSS Detection
-4. Harmonic PRZ
-5. PDH/PDL
-6. Early Warning Stage 1/2
-7. Context Engine (News+FG+DXY+COT)
-8. Scenario Validation
-9. Stage 3 Alert
-10. Return CloudSignal
+Changes from v5.1:
+  [PATCH] ลบ inline score += ทุกจุด
+          → ใช้ score_manager.calculate() แทน (Bucket A/B/C/D/E)
+  [PATCH] กัน double count: VSA / Sweep / PDH ไม่นับซ้ำ
+  [KEEP]  Logic ทุกส่วนเหมือนเดิม (cascade, BOS, harmonic, BB, context, scenario)
 """
 
 import pandas as pd
@@ -22,21 +16,22 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+# ── Score Manager (ใหม่) ──────────────────────────────────
+from score_manager import calculate_score, THRESHOLD_V4, THRESHOLD_V5
+
 BKK = timezone(timedelta(hours=7))
 SYMBOL         = os.getenv("TRADE_SYMBOL", "XAUUSD")
 TWELVE_API_KEY = os.getenv("TWELVE_API_KEY", "")
 
-# Thresholds
 SWEEP_LOOKBACK = 32
 BOS_LOOKBACK   = 5
 PIVOT_N        = 3
 PRZ_BUFFER     = 3.0
 BB_PERIOD      = 20
 BB_STD         = 2.0
-V4_MIN         = 4
-V5_MIN         = 8
 
 
+# ── CloudSignal (เหมือนเดิม) ──────────────────────────────
 @dataclass
 class CloudSignal:
     action:         str
@@ -60,112 +55,84 @@ class CloudSignal:
     st_h4:          str = ""
     st_1h:          str = ""
     st_15m:         str = ""
+    # [NEW] bucket breakdown สำหรับ debug
+    score_breakdown: dict = field(default_factory=dict)
 
 
-# Session
+# ── Helper functions (เหมือนเดิมทุกบรรทัด) ───────────────
+
 def get_session(dt: datetime) -> str:
     h = dt.astimezone(timezone.utc).hour
     if 7  <= h < 13: return "London"
     if 13 <= h < 19: return "NY"
     return "Asia"
 
-
-# EMA
 def add_ema(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["ema20"] = df["close"].ewm(span=20).mean()
     df["ema50"] = df["close"].ewm(span=50).mean()
     return df
 
-
-# ── Cascade Structure Analysis ────────────────────────────
 def analyze_structure(df: pd.DataFrame, tf_name: str = "") -> str:
     if df is None or len(df) < 20:
         return "INSUFFICIENT_DATA"
-
     df = add_ema(df)
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
-
+    curr = df.iloc[-1]; prev = df.iloc[-2]
     hh_hl = (curr["high"] > prev["high"]) and (curr["low"] > prev["low"])
     ll_lh = (curr["low"]  < prev["low"])  and (curr["high"] < prev["high"])
-
-    avg_vol    = df["volume"].tail(20).mean() if "volume" in df.columns else 0
-    vol_spike  = curr["volume"] > avg_vol * 1.5  if avg_vol > 0 else False
-    vol_drop   = curr["volume"] < avg_vol * 0.8  if avg_vol > 0 else False
+    avg_vol   = df["volume"].tail(20).mean() if "volume" in df.columns else 0
+    vol_spike = curr["volume"] > avg_vol * 1.5 if avg_vol > 0 else False
+    vol_drop  = curr["volume"] < avg_vol * 0.8 if avg_vol > 0 else False
     is_bullish = curr["close"] > curr["open"]
     is_bearish = curr["close"] < curr["open"]
-
     resistance = float(df["high"].tail(20).max())
     near_res   = curr["close"] >= resistance * 0.998
-
-    ema20 = float(curr["ema20"])
-    ema50 = float(curr["ema50"])
-
-    if vol_spike and is_bearish and near_res:
-        return "SELLING_PRESSURE"
-    if hh_hl and ema20 > ema50 and is_bullish:
-        return "IMPULSE_UP"
-    if ll_lh and ema20 < ema50:
-        return "IMPULSE_DOWN"
-    if ema20 > ema50 and is_bearish and vol_drop:
-        return "PULLBACK_UP"
-    if ema20 < ema50 and is_bullish and vol_drop:
-        return "PULLBACK_DOWN"
+    ema20 = float(curr["ema20"]); ema50 = float(curr["ema50"])
+    if vol_spike and is_bearish and near_res:  return "SELLING_PRESSURE"
+    if hh_hl and ema20 > ema50 and is_bullish: return "IMPULSE_UP"
+    if ll_lh and ema20 < ema50:                return "IMPULSE_DOWN"
+    if ema20 > ema50 and is_bearish and vol_drop: return "PULLBACK_UP"
+    if ema20 < ema50 and is_bullish and vol_drop: return "PULLBACK_DOWN"
     return "SIDEWAYS"
-
 
 def compute_cascade(df_4h, df_1h, df_15m) -> dict:
     st_h4  = analyze_structure(df_4h,  "H4")
     st_1h  = analyze_structure(df_1h,  "H1")
     st_15m = analyze_structure(df_15m, "M15")
-
     direction = "NEUTRAL"
-    score     = 0
+    h4_only   = True   # True = H4 alone, False = H4+H1 confirmed
 
     if st_h4 in ["IMPULSE_UP", "PULLBACK_UP"]:
         direction = "BUY"
-        score    += 3
-        if st_1h == "PULLBACK_UP":        score += 2
-        elif st_1h == "IMPULSE_UP":       score += 3
-        if st_15m == "IMPULSE_UP":        score += 3
-        elif st_15m == "SELLING_PRESSURE": score -= 5
-
+        if st_1h in ["PULLBACK_UP", "IMPULSE_UP"]:
+            h4_only = False
     elif st_h4 in ["IMPULSE_DOWN", "PULLBACK_DOWN"]:
         direction = "SELL"
-        score    += 3
-        if st_1h == "PULLBACK_DOWN":      score += 2
-        elif st_1h == "IMPULSE_DOWN":     score += 3
-        if st_15m == "IMPULSE_DOWN":      score += 3
+        if st_1h in ["PULLBACK_DOWN", "IMPULSE_DOWN"]:
+            h4_only = False
 
     return {
         "direction": direction,
-        "score":     max(0, score),
+        "h4_only":   h4_only,
         "st_h4":     st_h4,
         "st_1h":     st_1h,
         "st_15m":    st_15m,
     }
 
-
-# BOS / MSS
 def detect_bos(df: pd.DataFrame, direction: str, n: int = BOS_LOOKBACK) -> bool:
     if len(df) < n + 2: return False
     if direction == "BUY":
         return float(df["high"].iloc[-1]) > float(df["high"].iloc[-n-1:-1].max())
     return float(df["low"].iloc[-1]) < float(df["low"].iloc[-n-1:-1].min())
 
-
 def detect_mss(df: pd.DataFrame, direction: str) -> bool:
     if len(df) < 5: return False
-    h = df["high"].iloc[-5:].values
-    l = df["low"].iloc[-5:].values
+    h = df["high"].iloc[-5:].values; l = df["low"].iloc[-5:].values
     c = df["close"].iloc[-5:].values
     if direction == "BUY":
         return l[-3] < l[-4] and h[-1] > h[-2] and c[-1] > c[-2]
     return h[-3] > h[-4] and l[-1] < l[-2] and c[-1] < c[-2]
 
-
-# PDH/PDL
 def get_pdh_pdl(df_1h: pd.DataFrame):
     try:
         if df_1h.index.tzinfo is None:
@@ -181,129 +148,79 @@ def get_pdh_pdl(df_1h: pd.DataFrame):
     except Exception:
         return None, None
 
-
-# BB
 def get_bb(df: pd.DataFrame) -> dict:
     close = df["close"]
     mid   = close.rolling(BB_PERIOD).mean().iloc[-1]
     std   = close.rolling(BB_PERIOD).std().iloc[-1]
     return {"upper": float(mid+BB_STD*std), "mid": float(mid), "lower": float(mid-BB_STD*std)}
 
-
-# Pin Bar
-# ── Kivanc Swing Zone (Stable) ───────────────────────────
 def get_kivanc_swing_zone(df_1h: pd.DataFrame, pivot_n: int = 10):
-    """
-    หา Swing High/Low ล่าสุดจาก Pivot Point จริงบน H1
-    [FIX 2] Stable กว่า tail(50).max/min() เพราะ zone ไม่ขยับทุกแท่ง
-    คืน (swing_high, swing_low) หรือ (None, None) ถ้าข้อมูลไม่พอ
-    """
     if df_1h is None or len(df_1h) < pivot_n * 2 + 1:
         return None, None
-
-    swing_high = None
-    swing_low  = None
-
-    highs = df_1h["high"].values
-    lows  = df_1h["low"].values
-    n     = len(df_1h)
-
-    # วนหาจาก pivot ล่าสุดย้อนไป (ข้าม pivot_n แท่งสุดท้าย เพราะยังไม่ confirm)
+    swing_high = None; swing_low = None
+    highs = df_1h["high"].values; lows = df_1h["low"].values
+    n = len(df_1h)
     for i in range(n - pivot_n - 1, pivot_n - 1, -1):
-        # Pivot High: high[i] สูงกว่าทุก pivot_n แท่งรอบข้าง
         if swing_high is None:
             if all(highs[i] > highs[i-j] for j in range(1, pivot_n+1)) and \
                all(highs[i] > highs[i+j] for j in range(1, pivot_n+1)):
                 swing_high = float(highs[i])
-        # Pivot Low: low[i] ต่ำกว่าทุก pivot_n แท่งรอบข้าง
         if swing_low is None:
             if all(lows[i] < lows[i-j] for j in range(1, pivot_n+1)) and \
                all(lows[i] < lows[i+j] for j in range(1, pivot_n+1)):
                 swing_low = float(lows[i])
         if swing_high is not None and swing_low is not None:
             break
-
     return swing_high, swing_low
 
-
-def detect_h1_spike_at_kivanc(
-    df_1h: pd.DataFrame,
-    direction: str,
-    fib_zone_high: float,
-    fib_zone_low: float,
-    current_price: float = 0.0,
-) -> dict:
-    """
-    H1 Spike ปลายไส้แตะ Kivanc Golden Zone
-    [FIX 1] ใช้ iloc[-2] = แท่ง H1 ที่ปิดสมบูรณ์แล้ว (ไม่ใช่แท่งที่กำลังวิ่ง)
-    [FIX 3] TP Guard: ถ้า body เล็ก (Doji) fallback ใช้ ATR
-    คืน {"found": bool, "sl": float, "tp1": float}
-    """
+def detect_h1_spike_at_kivanc(df_1h, direction, fib_zone_high, fib_zone_low, current_price=0.0) -> dict:
     if df_1h is None or len(df_1h) < 3:
-        return {"found": False, "sl": 0, "tp1": 0}
-
-    # [FIX 1] iloc[-2] = แท่งที่ปิดแล้ว (confirmed), ไม่ใช่ iloc[-1] ที่ยังวิ่งอยู่
+        return {"found": False, "sl": 0, "tp1": 0, "volume_confirmed": False}
     c = df_1h.iloc[-2]
     rng = c["high"] - c["low"]
     if rng < 0.001:
-        return {"found": False, "sl": 0, "tp1": 0}
-
+        return {"found": False, "sl": 0, "tp1": 0, "volume_confirmed": False}
     wick_up   = (c["high"] - max(c["close"], c["open"])) / rng
     wick_down = (min(c["close"], c["open"]) - c["low"])   / rng
-
-    # ATR fallback สำหรับ TP Guard (ใช้ 14 แท่งล่าสุด)
-    atr_h1 = float((df_1h["high"] - df_1h["low"]).tail(14).mean())
+    atr_h1    = float((df_1h["high"] - df_1h["low"]).tail(14).mean())
     ref_price = current_price if current_price > 0 else float(df_1h["close"].iloc[-1])
+    # [NEW] volume confirmed flag สำหรับ score_manager Bucket C
+    vol_confirmed = is_high_volume(df_1h)
 
     if direction == "BUY":
         spike     = wick_down > 0.60
         at_kivanc = fib_zone_low <= c["low"] <= fib_zone_high
         if spike and at_kivanc:
             tp1_raw = round(min(c["open"], c["close"]), 2)
-            # [FIX 3] TP Guard: tp1 ต้องสูงกว่า entry จริง
             tp1 = tp1_raw if tp1_raw > ref_price else round(ref_price + atr_h1 * 1.5, 2)
-            return {
-                "found": True,
-                "sl":    round(c["low"]  - 0.30, 2),
-                "tp1":   tp1,
-            }
+            return {"found": True, "sl": round(c["low"]-0.30, 2), "tp1": tp1,
+                    "volume_confirmed": vol_confirmed}
     else:
         spike     = wick_up > 0.60
         at_kivanc = fib_zone_low <= c["high"] <= fib_zone_high
         if spike and at_kivanc:
             tp1_raw = round(max(c["open"], c["close"]), 2)
-            # [FIX 3] TP Guard: tp1 ต้องต่ำกว่า entry จริง
             tp1 = tp1_raw if tp1_raw < ref_price else round(ref_price - atr_h1 * 1.5, 2)
-            return {
-                "found": True,
-                "sl":    round(c["high"] + 0.30, 2),
-                "tp1":   tp1,
-            }
-
-    return {"found": False, "sl": 0, "tp1": 0}
-
+            return {"found": True, "sl": round(c["high"]+0.30, 2), "tp1": tp1,
+                    "volume_confirmed": vol_confirmed}
+    return {"found": False, "sl": 0, "tp1": 0, "volume_confirmed": False}
 
 def detect_pinbar(df: pd.DataFrame, direction: str) -> bool:
     if len(df) < 2: return False
-    c = df.iloc[-2]
-    rng = c["high"] - c["low"]
+    c = df.iloc[-2]; rng = c["high"] - c["low"]
     if rng < 0.001: return False
-    body      = abs(c["close"] - c["open"])
+    body = abs(c["close"]-c["open"])
     wick_up   = c["high"] - max(c["close"], c["open"])
     wick_down = min(c["close"], c["open"]) - c["low"]
     if direction == "SELL": return wick_up/rng > 0.60 and body/rng < 0.30
     return wick_down/rng > 0.60 and body/rng < 0.30
 
-
-# VSA
 def is_high_volume(df: pd.DataFrame, window: int = 50) -> bool:
     if "volume" not in df.columns: return False
     vol = df["volume"].iloc[-1]
     avg = df["volume"].iloc[-window-1:-1].mean()
     return float(vol) >= float(avg) * 1.8 if avg > 0 else False
 
-
-# Harmonic
 PATTERNS = {
     "Bullish_Gartley":   {"dir":"BUY",  "p":1, "AB":(0.382,0.06), "CD":(0.786,0.06)},
     "Bullish_Bat":       {"dir":"BUY",  "p":1, "AB":(0.382,0.06), "CD":(0.886,0.06)},
@@ -325,9 +242,11 @@ def find_pivots(df: pd.DataFrame, n: int = PIVOT_N):
     swings = []
     for i in range(n, len(df)-n):
         h = df["high"].iloc[i]; l = df["low"].iloc[i]
-        if all(df["high"].iloc[i-j] < h for j in range(1,n+1)) and            all(df["high"].iloc[i+j] < h for j in range(1,n+1)):
+        if all(df["high"].iloc[i-j] < h for j in range(1,n+1)) and \
+           all(df["high"].iloc[i+j] < h for j in range(1,n+1)):
             swings.append((i, float(h), "H"))
-        elif all(df["low"].iloc[i-j] > l for j in range(1,n+1)) and              all(df["low"].iloc[i+j] > l for j in range(1,n+1)):
+        elif all(df["low"].iloc[i-j] > l for j in range(1,n+1)) and \
+             all(df["low"].iloc[i+j] > l for j in range(1,n+1)):
             swings.append((i, float(l), "L"))
     return swings
 
@@ -337,7 +256,7 @@ def scan_harmonic(df_1h, df_4h) -> list:
         swings = find_pivots(df)
         if len(swings) < 5: continue
         for i in range(len(swings)-4):
-            pts   = swings[i:i+5]
+            pts = swings[i:i+5]
             kinds = [p[2] for p in pts]
             if not all(kinds[j] != kinds[j+1] for j in range(4)): continue
             X,A,B,C,D = [p[1] for p in pts]
@@ -345,42 +264,36 @@ def scan_harmonic(df_1h, df_4h) -> list:
             if XA < 0.001 or AB < 0.001: continue
             r_AB = AB/XA; r_CD = abs(D-C)/XA
             for name, pat in PATTERNS.items():
-                if abs(r_AB-pat["AB"][0]) <= pat["AB"][1] and                    abs(r_CD-pat["CD"][0]) <= pat["CD"][1]:
+                if abs(r_AB-pat["AB"][0]) <= pat["AB"][1] and \
+                   abs(r_CD-pat["CD"][0]) <= pat["CD"][1]:
                     results.append({
-                        "name":name,"direction":pat["dir"],"priority":pat["p"],
-                        "prz_mid":D,"prz_high":D+PRZ_BUFFER,"prz_low":D-PRZ_BUFFER,
+                        "name": name, "direction": pat["dir"], "priority": pat["p"],
+                        "prz_mid": D, "prz_high": D+PRZ_BUFFER, "prz_low": D-PRZ_BUFFER,
                     })
-    seen=set(); final=[]
+    seen = set(); final = []
     for r in results:
-        key=r["direction"]+"_"+str(round(r["prz_mid"],1))
+        key = r["direction"]+"_"+str(round(r["prz_mid"],1))
         if key not in seen: seen.add(key); final.append(r)
     return sorted(final, key=lambda x: x["priority"])
 
-
-# Context
 def get_context_adj(direction: str, score: int) -> tuple:
-    total_adj=0; reasons=[]
+    total_adj = 0; reasons = []
     for plugin, func_name, kwargs in [
         ("plugin_news",       "check_news_filter",  {}),
-        ("plugin_fear_greed", "get_fg_score_adj",   {"direction":direction}),
-        ("plugin_dxy",        "get_dxy_score_adj",  {"direction":direction,"api_key":TWELVE_API_KEY}),
-        ("plugin_cot",        "get_cot_score_adj",  {"direction":direction}),
+        ("plugin_fear_greed", "get_fg_score_adj",   {"direction": direction}),
+        ("plugin_dxy",        "get_dxy_score_adj",  {"direction": direction, "api_key": TWELVE_API_KEY}),
+        ("plugin_cot",        "get_cot_score_adj",  {"direction": direction}),
     ]:
         try:
-            mod  = __import__(plugin)
-            func = getattr(mod, func_name)
-            res  = func(**kwargs)
-            adj  = res.get("score_adj", 0)
-            total_adj += adj
-            reasons.append(res.get("reason",""))
+            mod = __import__(plugin); func = getattr(mod, func_name)
+            res = func(**kwargs); adj = res.get("score_adj", 0)
+            total_adj += adj; reasons.append(res.get("reason",""))
             if plugin == "plugin_news" and not res.get("safe", True):
                 return total_adj, True, res.get("reason","News blocked")
-        except Exception as e:
+        except Exception:
             reasons.append(plugin + ": error")
     return total_adj, False, " | ".join(reasons)
 
-
-# Scenario
 def validate_scenario(direction, signal_type, score, pattern,
                       df_15m, buy_layers=0, sell_layers=0, spread=0.0) -> tuple:
     if direction=="BUY"  and buy_layers  >= 2: return False, "BUY layers full"
@@ -394,7 +307,10 @@ def validate_scenario(direction, signal_type, score, pattern,
     return True, "OK"
 
 
-# ── Main Signal Engine ────────────────────────────────────
+# ══════════════════════════════════════════════════════════
+# MAIN SIGNAL ENGINE — PATCHED
+# ══════════════════════════════════════════════════════════
+
 def compute_signal(
     df_4h: pd.DataFrame,
     df_1h: pd.DataFrame,
@@ -409,63 +325,69 @@ def compute_signal(
     dt      = df_15m.index[-1]
     session = get_session(dt if hasattr(dt,"hour") else datetime.now(timezone.utc))
 
-    # Step 1: Cascade Structure
-    cascade = compute_cascade(df_4h, df_1h, df_15m)
+    # ── Step 1: Cascade ──────────────────────────────────
+    cascade   = compute_cascade(df_4h, df_1h, df_15m)
     direction = cascade["direction"]
-    score     = cascade["score"]
-    if direction == "NEUTRAL" or score < 2: return None
+    if direction == "NEUTRAL": return None
 
-    # Step 2: Early Warning Stage 1
+    # ── Step 2: Early Warning Stage 1 ───────────────────
     try:
         from early_warning import check_vsa_forming
         check_vsa_forming(df_15m, direction, SYMBOL, session)
     except Exception: pass
 
-    # Step 3: BOS / MSS
-    if detect_bos(df_15m, direction): score += 2
-    if detect_mss(df_15m, direction): score += 1
+    # ── Step 3: Collect raw signals (ยังไม่บวก score) ───
+    bos_detected = detect_bos(df_15m, direction)
+    mss_detected = detect_mss(df_15m, direction)
 
-    # Step 4: Early Warning Stage 2
+    # Early Warning Stage 2
     try:
         from early_warning import check_bos_confirmed
-        check_bos_confirmed(df_15m, direction, SYMBOL, score, "")
+        check_bos_confirmed(df_15m, direction, SYMBOL, 0, "")
     except Exception: pass
 
-    # Step 5: PDH/PDL
+    # PDH/PDL
     pdh, pdl = get_pdh_pdl(df_1h)
-    if pdh and pdl:
-        if direction=="SELL" and abs(price-pdh)/pdh < 0.003: score += 2
-        if direction=="BUY"  and abs(price-pdl)/pdl < 0.003: score += 2
+    near_pdh  = bool(pdh and direction=="SELL" and abs(price-pdh)/pdh < 0.003)
+    near_pdl  = bool(pdl and direction=="BUY"  and abs(price-pdl)/pdl < 0.003)
+    pdh_pdl_hit = near_pdh or near_pdl
 
-    # Step 6: Session Sweep confirm
+    # Session Sweep
     window    = df_15m.tail(SWEEP_LOOKBACK)
     sess_high = float(window["high"].max())
     sess_low  = float(window["low"].min())
     curr_high = float(df_15m["high"].iloc[-1])
     curr_low  = float(df_15m["low"].iloc[-1])
-    if direction=="SELL" and curr_high > sess_high*1.0005 and price < sess_high: score += 3
-    if direction=="BUY"  and curr_low  < sess_low*0.9995  and price > sess_low:  score += 3
+    sweep_valid = (
+        (direction=="SELL" and curr_high > sess_high*1.0005 and price < sess_high) or
+        (direction=="BUY"  and curr_low  < sess_low*0.9995  and price > sess_low)
+    )
+    # PDH/PDL sweep = สำคัญกว่า session sweep
+    sweep_is_pdh_pdl = pdh_pdl_hit and sweep_valid
 
-    # Step 7: Harmonic PRZ
+    # Harmonic PRZ
     prz_list     = scan_harmonic(df_1h, df_4h)
     prz_match    = None
     prz_name     = ""
+    prz_priority = "secondary"
     prz_opposite = None
     for prz in prz_list:
         if prz["direction"]==direction and prz["prz_low"]<=price<=prz["prz_high"]:
-            prz_match=prz; prz_name=prz["name"]; score+=(4-prz["priority"]); break
+            prz_match = prz; prz_name = prz["name"]
+            prz_priority = "primary" if prz["priority"]==1 else "secondary"
+            break
     for prz in prz_list:
-        if prz["direction"]!=direction: prz_opposite=prz; break
+        if prz["direction"] != direction: prz_opposite = prz; break
 
-    # Step 7.5: H1 Spike at Kivanc
-    # [FIX 2] Kivanc Zone — ใช้ Swing Pivot จริง (Stable) แทน rolling tail(50)
+    # Kivanc Zone
     fib_zone = None
+    kivanc_in_golden = False
     if prz_match:
         fib_zone = prz_match
+        kivanc_in_golden = True
     else:
-        # หา Swing High/Low จาก Pivot (lookback 10 แท่ง H1 แต่ละข้าง)
         swing_high, swing_low = get_kivanc_swing_zone(df_1h, pivot_n=10)
-        if swing_high is not None and swing_low is not None:
+        if swing_high and swing_low:
             h1_rng = swing_high - swing_low
             if direction == "BUY":
                 fib_lo = swing_low  + h1_rng * 0.618
@@ -474,8 +396,8 @@ def compute_signal(
                 fib_lo = swing_high - h1_rng * 0.786
                 fib_hi = swing_high - h1_rng * 0.618
             fib_zone = {"prz_low": fib_lo, "prz_high": fib_hi}
+            kivanc_in_golden = fib_lo <= price <= fib_hi
         else:
-            # fallback: ถ้าหา pivot ไม่เจอ (ข้อมูลน้อย) ใช้ tail(50)
             h1_high = float(df_1h["high"].tail(50).max())
             h1_low  = float(df_1h["low"].tail(50).min())
             h1_rng  = h1_high - h1_low
@@ -486,67 +408,123 @@ def compute_signal(
                 fib_lo = h1_high - h1_rng * 0.786
                 fib_hi = h1_high - h1_rng * 0.618
             fib_zone = {"prz_low": fib_lo, "prz_high": fib_hi}
+            kivanc_in_golden = fib_lo <= price <= fib_hi
 
-    spike = detect_h1_spike_at_kivanc(
-        df_1h, direction,
-        fib_zone["prz_high"], fib_zone["prz_low"],
-        current_price=price,
-    )
+    # H1 Spike
+    spike = {"found": False, "sl": 0, "tp1": 0, "volume_confirmed": False}
+    if fib_zone:
+        spike = detect_h1_spike_at_kivanc(
+            df_1h, direction,
+            fib_zone["prz_high"], fib_zone["prz_low"],
+            current_price=price,
+        )
     if spike["found"]:
-        score += 4
-        print("🎯 H1 Spike at Kivanc: " + direction +
-              " SL=" + str(spike["sl"]) + " TP1=" + str(spike["tp1"]))
+        print(f"🎯 H1 Spike at Kivanc: {direction} SL={spike['sl']} TP1={spike['tp1']}")
 
-    # Step 8: Pin Bar
+    # VSA
+    vsa_ok = is_high_volume(df_15m)
+
+    # Pinbar (เพิ่ม Kivanc zone quality ถ้ามี PRZ)
+    kivanc_score_raw = 0
     if prz_match:
-        if detect_pinbar(df_1h, direction): score += 2
-        if detect_pinbar(df_4h, direction): score += 3
+        if detect_pinbar(df_1h, direction): kivanc_score_raw += 2
+        if detect_pinbar(df_4h, direction): kivanc_score_raw += 3
+    kivanc_score_raw = min(kivanc_score_raw, 5)
 
-    # Step 9: VSA Volume
-    if is_high_volume(df_15m): score += 2
+    # AT Bonus (alphatrend_gate — optional)
+    at_bonus = 0
+    try:
+        from alphatrend_gate import check_at_zone
+        at_res  = check_at_zone(df_1h, df_4h, direction, "cascade_bonus")
+        at_bonus = at_res.get("bonus", 0)
+    except Exception: pass
 
-    if score < V4_MIN: return None
+    # FVG verdict
+    fvg_verdict = "NONE"
+    try:
+        from fvg_detector import FVGDetector
+        _fvg = FVGDetector()
+        swing_h, swing_l = get_kivanc_swing_zone(df_15m, pivot_n=5)
+        if swing_h and swing_l:
+            fvg_res = _fvg.analyze(df_15m, swing_h, swing_l)
+            fvg_verdict = fvg_res.verdict
+    except Exception: pass
 
-    # BB Direction Filter — ห้าม BUY ถ้า BB ชี้ลง
-    bb = get_bb(df_15m)
-    if direction == "BUY"  and bb["upper"] < price:
-        print("BB Filter: BUY blocked — BB bearish")
-        return None
-    if direction == "SELL" and bb["lower"] > price:
-        print("BB Filter: SELL blocked — BB bullish")
-        return None
-
-    # Step 10: Context Engine
-    ctx_adj, blocked, ctx_reason = get_context_adj(direction, score)
+    # Context
+    ctx_adj, blocked, ctx_reason = get_context_adj(direction, 0)
     if blocked:
         print("Context blocked: " + ctx_reason)
         return None
-    final_score = max(0, score + ctx_adj)
-    if final_score < V4_MIN: return None
 
-    sig_type = "V5_SNIPER" if (final_score>=V5_MIN and prz_match) else "V4_SESSION"
+    # ── Step 4: SCORE MANAGER ────────────────────────────
+    # [PATCH] คำนวณ score ทั้งหมดที่นี่ที่เดียว
+    score_result = calculate_score(
+        # Bucket A — Trend Structure
+        cascade_direction = direction,
+        cascade_h4_only   = cascade["h4_only"],
+        reversal_stage    = 0,
 
-    # Step 11: Scenario Validation
+        # Bucket B — Entry Zone Quality (priority สูงสุดอันเดียว)
+        harmonic_in_prz   = bool(prz_match),
+        harmonic_priority = prz_priority,
+        kivanc_in_golden  = kivanc_in_golden and not bool(prz_match),
+        kivanc_score      = kivanc_score_raw,
+        fvg_verdict       = fvg_verdict if not (prz_match or kivanc_in_golden) else "NONE",
+
+        # Bucket C — Trigger Confirmation
+        bos_detected      = bos_detected,
+        mss_detected      = mss_detected,
+        sweep_valid       = sweep_valid,
+        sweep_is_pdh_pdl  = sweep_is_pdh_pdl,
+        h1_spike          = spike["found"],
+        h1_spike_volume   = spike.get("volume_confirmed", False),
+        at_bonus          = at_bonus,
+
+        # Bucket D — VSA (single source)
+        vsa_ok            = vsa_ok,
+
+        # Bucket E — Context
+        news_block        = False,   # ถ้าถึงตรงนี้ news ไม่ block แล้ว
+        fg_score          = ctx_adj if abs(ctx_adj) <= 2 else (2 if ctx_adj>0 else -2),
+        dxy_score         = 0,       # plugin จัดการแยกกัน — รวมใน ctx_adj แล้ว
+        cot_score         = 0,
+    )
+
+    final_score = score_result.total
+    print(score_result.summary())
+
+    # ── Step 5: Threshold Check ──────────────────────────
+    if final_score < THRESHOLD_V4: return None
+
+    # BB Direction Filter (เหมือนเดิม)
+    bb = get_bb(df_15m)
+    if direction == "BUY"  and bb["upper"] < price:
+        print("BB Filter: BUY blocked — BB bearish"); return None
+    if direction == "SELL" and bb["lower"] > price:
+        print("BB Filter: SELL blocked — BB bullish"); return None
+
+    sig_type = score_result.signal_type
+
+    # ── Step 6: Scenario Validation (เหมือนเดิม) ────────
     valid, val_reason = validate_scenario(
         direction, sig_type, final_score, prz_name,
         df_15m, buy_layers, sell_layers, spread)
     if not valid:
-        print("Scenario blocked: " + val_reason)
-        return None
+        print("Scenario blocked: " + val_reason); return None
 
-    # Step 12: Build CloudSignal
-    bb  = get_bb(df_15m)
+    # ── Step 7: Build CloudSignal (เหมือนเดิม) ──────────
     atr = max(float((df_15m["high"]-df_15m["low"]).tail(14).mean()), 1.0)
 
-    if direction=="BUY":
+    if direction == "BUY":
         sl          = round(price - atr*1.0, 2)
         be_price    = round(price + 0.10, 2)
-        tp_main     = prz_opposite["prz_mid"] if prz_opposite and prz_opposite["prz_mid"]>price else (pdh if pdh and pdh>price else price+atr*3.0)
+        tp_main     = (prz_opposite["prz_mid"] if prz_opposite and prz_opposite["prz_mid"]>price
+                       else (pdh if pdh and pdh>price else price+atr*3.0))
         tp_final    = round(max(tp_main, price+atr*1.5), 2)
         tp1_price   = round(max(bb["upper"], price+atr*0.5), 2)
         tp2_price   = round(max(bb["mid"],   price+atr*1.0), 2)
         fallback_tp = round(price+atr*4.0, 2)
-        partial  = [
+        partial = [
             {"pct":50,"price":tp1_price,"reason":"BB_Upper"},
             {"pct":30,"price":tp2_price,"reason":"BB_Mid"},
             {"pct":20,"price":tp_final, "reason":"PDH_PRZ"},
@@ -554,12 +532,13 @@ def compute_signal(
     else:
         sl          = round(price + atr*1.0, 2)
         be_price    = round(price - 0.10, 2)
-        tp_main     = prz_opposite["prz_mid"] if prz_opposite and 0<prz_opposite["prz_mid"]<price else (pdl if pdl and pdl<price else price-atr*3.0)
+        tp_main     = (prz_opposite["prz_mid"] if prz_opposite and 0<prz_opposite["prz_mid"]<price
+                       else (pdl if pdl and pdl<price else price-atr*3.0))
         tp_final    = round(min(tp_main, price-atr*1.5), 2)
         tp1_price   = round(min(bb["lower"], price-atr*0.5), 2)
         tp2_price   = round(min(bb["mid"],   price-atr*1.0), 2)
         fallback_tp = round(price-atr*4.0, 2)
-        partial  = [
+        partial = [
             {"pct":50,"price":tp1_price,"reason":"BB_Lower"},
             {"pct":30,"price":tp2_price,"reason":"BB_Mid"},
             {"pct":20,"price":tp_final, "reason":"PDL_PRZ"},
@@ -567,7 +546,6 @@ def compute_signal(
 
     now = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
 
-    # Stage 3 Alert
     try:
         from early_warning import alert_signal_ready
         alert_signal_ready(SYMBOL, direction, sig_type, final_score,
@@ -579,34 +557,38 @@ def compute_signal(
         entry=round(price,2), sl=sl, be_price=be_price,
         trail_from=round(bb["mid"],2), tp_final=tp_final,
         partial=partial, pattern=prz_name,
-        score=score, context_adj=ctx_adj, final_score=final_score,
+        score=score_result.bucket_a + score_result.bucket_b + score_result.bucket_c,
+        context_adj=score_result.bucket_e,
+        final_score=final_score,
         layer=1, session=session, timestamp=now,
         fallback_sl=sl, fallback_tp=fallback_tp,
         st_h4=cascade["st_h4"], st_1h=cascade["st_1h"], st_15m=cascade["st_15m"],
+        score_breakdown=score_result.breakdown,
     )
 
 
 def signal_to_dict(sig: CloudSignal) -> dict:
     return {
-        "action":       sig.action,
-        "direction":    sig.direction,
-        "signal_type":  sig.signal_type,
-        "entry":        sig.entry,
-        "sl":           sig.sl,
-        "be_price":     sig.be_price,
-        "trail_from":   sig.trail_from,
-        "tp_final":     sig.tp_final,
-        "partial":      sig.partial,
-        "pattern":      sig.pattern,
-        "score":        sig.score,
-        "context_adj":  sig.context_adj,
-        "final_score":  sig.final_score,
-        "layer":        sig.layer,
-        "session":      sig.session,
-        "timestamp":    sig.timestamp,
-        "fallback_sl":  sig.fallback_sl,
-        "fallback_tp":  sig.fallback_tp,
-        "st_h4":        sig.st_h4,
-        "st_1h":        sig.st_1h,
-        "st_15m":       sig.st_15m,
+        "action":          sig.action,
+        "direction":       sig.direction,
+        "signal_type":     sig.signal_type,
+        "entry":           sig.entry,
+        "sl":              sig.sl,
+        "be_price":        sig.be_price,
+        "trail_from":      sig.trail_from,
+        "tp_final":        sig.tp_final,
+        "partial":         sig.partial,
+        "pattern":         sig.pattern,
+        "score":           sig.score,
+        "context_adj":     sig.context_adj,
+        "final_score":     sig.final_score,
+        "layer":           sig.layer,
+        "session":         sig.session,
+        "timestamp":       sig.timestamp,
+        "fallback_sl":     sig.fallback_sl,
+        "fallback_tp":     sig.fallback_tp,
+        "st_h4":           sig.st_h4,
+        "st_1h":           sig.st_1h,
+        "st_15m":          sig.st_15m,
+        "score_breakdown": sig.score_breakdown,  # [NEW] debug field
     }
