@@ -313,19 +313,19 @@ class ScenarioScanner:
             if zone.is_invalidated(price):
                 if not zone.invalidated:
                     zone.invalidated = True
-                    _alert_invalidated(zone, price)
+                    pass  # Mode B disabled — admin only
                 to_remove.append(zone)
                 continue
 
             # Alert zone found (ครั้งแรก)
             if not zone.alerted:
                 zone.alerted = True
-                _alert_zone_found(zone)
+                pass  # Mode B disabled — admin only
 
             # Alert price at zone
             if zone.is_price_in_zone(price) and not zone.at_zone_alerted:
                 zone.at_zone_alerted = True
-                _alert_price_at_zone(zone, price)
+                pass  # Mode B disabled — admin only
 
         # ลบ zones ที่หมดอายุ/invalid
         self.active_zones = [z for z in self.active_zones if z not in to_remove]
