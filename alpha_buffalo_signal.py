@@ -75,11 +75,8 @@ async def recv(p: SP):
             pattern=p.pattern, score=p.score, session=p.session,
         )
         
-        # --- เช็คว่าเป็นราคาจริงหรือ Test ---
         if p.signal_type.upper() == "TEST":
-            msg = "🟡 <b>[TEST SIGNAL]</b> 🟡
-
-" + msg
+            msg = "🟡 <b>[TEST SIGNAL]</b> 🟡" + chr(10) + chr(10) + msg
             
         send_telegram(msg)
     except Exception as e:
