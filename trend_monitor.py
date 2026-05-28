@@ -10,10 +10,14 @@ Output:
 - Wait and See
 """
 
+import logging
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
+
+# ── Logging Setup ──────────────────────────────────────────
+logger = logging.getLogger(__name__)
 
 BKK = timezone(timedelta(hours=7))
 
@@ -89,20 +93,27 @@ def calc_tf_trend(df: pd.DataFrame, tf_name: str) -> TFTrend:
 
     # ── Pressure ──────────────────────────────────────────
     pressure = ""
-    if vol_spike and bearish_candle: pressure = PRESSURE_SELL
-    elif vol_spike and bullish_candle: pressure = PRESSURE_BUY
+    if vol_spike and bearish_candle:
+        pressure = PRESSURE_SELL
+    elif vol_spike and bullish_candle:
+        pressure = PRESSURE_BUY
 
     # ── State ─────────────────────────────────────────────
     if ema_up and hh and hl:
-        state = IMPULSE_UP;   emoji = "⬆️"
+        state = IMPULSE_UP
+        emoji = "⬆️"
     elif ema_down and ll and lh:
-        state = IMPULSE_DOWN; emoji = "⬇️"
+        state = IMPULSE_DOWN
+        emoji = "⬇️"
     elif ema_up and (lh or ll):
-        state = PULLBACK_UP;  emoji = "↘️"
+        state = PULLBACK_UP
+        emoji = "↘️"
     elif ema_down and (hh or hl):
-        state = PULLBACK_DOWN;emoji = "↗️"
+        state = PULLBACK_DOWN
+        emoji = "↗️"
     else:
-        state = SIDEWAYS;     emoji = "➡️"
+        state = SIDEWAYS
+        emoji = "➡️"
 
     return TFTrend(
         tf=tf_name, state=state, emoji=emoji,
@@ -130,9 +141,12 @@ def analyze_trend(
     buy_count  = sum(1 for t in [m15, h1, h4] if "Δ+" in t.state or "↗️" in t.emoji)
     sell_count = sum(1 for t in [m15, h1, h4] if "Δ-" in t.state or "↘️" in t.emoji)
 
-    if buy_count >= 2:   bias = "BUY"
-    elif sell_count >= 2: bias = "SELL"
-    else:                bias = "NEUTRAL"
+    if buy_count >= 2:
+        bias = "BUY"
+    elif sell_count >= 2:
+        bias = "SELL"
+    else:
+        bias = "NEUTRAL"
 
     # ── Action ────────────────────────────────────────────
     pressures = [t.pressure for t in [m15, h1, h4] if t.pressure]
@@ -155,25 +169,25 @@ def format_trend_message(tr: TrendResult) -> str:
     """Format Trend Update สำหรับ Telegram"""
 
     lines = [
-        "📊 " + tr.symbol + " TREND UPDATE",
+        f"📊 {tr.symbol} TREND UPDATE",
         "━━━━━━━━━━━━━━━━━━━━━",
-        "🕐 Session : " + tr.session,
-        "💰 Price   : " + "{:,.2f}".format(tr.price),
+        f"🕐 Session : {tr.session}",
+        f"💰 Price   : {tr.price:,.2f}",
         "",
     ]
 
     # TF rows
     for tf in [tr.m15, tr.h1, tr.h4]:
-        tf_emoji = "📈" if "Δ+" in tf.state or "↗️" in tf.emoji else \
-                   "📉" if "Δ-" in tf.state or "↘️" in tf.emoji else "➡️"
-        line = tf_emoji + " " + tf.tf + "  : " + tf.state
+        tf_emoji = ("📈" if "Δ+" in tf.state or "↗️" in tf.emoji else
+                    "📉" if "Δ-" in tf.state or "↘️" in tf.emoji else "➡️")
+        line = f"{tf_emoji} {tf.tf}  : {tf.state}"
         lines.append(line)
 
     # Pressure alerts
     pressures = []
     for tf in [tr.m15, tr.h1, tr.h4]:
         if tf.pressure:
-            pressures.append("⚡ " + tf.pressure + " " + tf.tf)
+            pressures.append(f"⚡ {tf.pressure} {tf.tf}")
     if pressures:
         lines.append("")
         lines.extend(pressures)
@@ -184,8 +198,8 @@ def format_trend_message(tr: TrendResult) -> str:
     if tr.action == "WAIT_AND_SEE":
         lines.append("⏳ Wait and See...")
     elif tr.action == "WATCH_SETUP":
-        bias_sym = "Δ+" if tr.bias == "BUY" else "Δ-" if tr.bias == "SELL" else "~"
-        lines.append("👀 Watch for " + bias_sym + " Setup...")
+        bias_sym = "Δ+" if tr.bias == "BUY" else ("Δ-" if tr.bias == "SELL" else "~")
+        lines.append(f"👀 Watch for {bias_sym} Setup...")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━")
     lines.append("⚠️ Not financial advice. Trade at your own risk.")
@@ -218,7 +232,8 @@ def format_signal_message(
 
     # [FIX] TP Sort: BUY → TP1 < TP2 (ใกล้→ไกล)
     #               SELL → TP1 > TP2 (ใกล้→ไกล = ค่าน้อย→น้อยกว่า)
-    tp_near, tp_far = (min(tp1,tp2), max(tp1,tp2)) if direction=="BUY"                  else (max(tp1,tp2), min(tp1,tp2))
+    tp_near, tp_far = ((min(tp1,tp2), max(tp1,tp2)) if direction=="BUY"
+                       else (max(tp1,tp2), min(tp1,tp2)))
 
     # Guard: TP ต้องไม่ขัดทิศทาง entry
     if direction == "BUY":
@@ -228,28 +243,29 @@ def format_signal_message(
         tp_near = min(tp_near, entry - 0.1)
         tp_far  = min(tp_far,  tp_near - 0.1)
 
+    emoji_prefix = "🎯 " if sniper else ""
     lines = [
-        ("🎯 " if sniper else "") + delta + " ALPHA BUFFALO V5",
+        f"{emoji_prefix}{delta} ALPHA BUFFALO V5",
         "━━━━━━━━━━━━━━━━━━━━━",
         "📌 Asset    : XAUUSD",
-        "📊 Type     : " + signal_type,
+        f"📊 Type     : {signal_type}",
     ]
 
     if sniper and pattern:
-        lines.append("🦋 Pattern  : " + pattern)
+        lines.append(f"🦋 Pattern  : {pattern}")
 
     lines += [
-        "🎯 Entry    : ~" + "{:,.2f}".format(entry),
-        "🛡️ SL Zone  : " + str(sl_zone_lo) + " - " + str(sl_zone_hi),
-        "🎯 TP1      : " + "{:,.1f}".format(tp_near) + "  (" + tp1_tf + ")",
-        "🎯 TP2      : " + "{:,.1f}".format(tp_far)  + "  (" + tp2_tf + ")",
+        f"🎯 Entry    : ~{entry:,.2f}",
+        f"🛡️ SL Zone  : {sl_zone_lo} - {sl_zone_hi}",
+        f"🎯 TP1      : {tp_near:,.1f}  ({tp1_tf})",
+        f"🎯 TP2      : {tp_far:,.1f}  ({tp2_tf})",
     ]
 
     if sniper:
-        lines.append("📈 Score    : " + str(score) + "/10")
+        lines.append(f"📈 Score    : {score}/10")
 
     lines += [
-        "⏰ " + now,
+        f"⏰ {now}",
         "━━━━━━━━━━━━━━━━━━━━━",
         "✅ EA Executing",
         "⚠️ Not financial advice. Trade at your own risk.",
@@ -297,5 +313,6 @@ def should_send_trend_alert(session: str) -> bool:
     global _last_session_alert
     if session != _last_session_alert:
         _last_session_alert = session
+        logger.debug(f"Session alert triggered: {session}")
         return True
     return False
