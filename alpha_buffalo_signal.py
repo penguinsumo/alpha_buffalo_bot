@@ -66,7 +66,6 @@ async def recv(p: SP):
     signal_history.append(latest_signal.copy())
     if len(signal_history)>100: signal_history.pop(0)
 
-    # ── ส่วนที่เขียนเพิ่มเพื่อให้ Telegram เด้ง ──
     try:
         tp1 = p.partial[0]["price"] if p.partial else p.tp_final
         tp2 = p.partial[1]["price"] if len(p.partial) > 1 else p.tp_final
@@ -75,10 +74,16 @@ async def recv(p: SP):
             entry=p.entry, sl=p.sl, tp1=tp1, tp2=tp2,
             pattern=p.pattern, score=p.score, session=p.session,
         )
+        
+        # --- เช็คว่าเป็นราคาจริงหรือ Test ---
+        if p.signal_type.upper() == "TEST":
+            msg = "🟡 <b>[TEST SIGNAL]</b> 🟡
+
+" + msg
+            
         send_telegram(msg)
     except Exception as e:
         log(f"Webhook notification error: {e}")
-    # ────────────────────────────────────
 
     return {"ok":True,"signal_id":sid}
 
