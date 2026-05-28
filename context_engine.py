@@ -9,14 +9,19 @@ context_engine คำนวณ Fundamental Score
 รวมกัน → Final Score → ส่งให้ EA
 """
 
+import logging
 import os
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
+from typing import Tuple
 
 from plugin_news       import check_news_filter
 from plugin_fear_greed import get_fg_score_adj
 from plugin_dxy        import get_dxy_score_adj
 from plugin_cot        import get_cot_score_adj
+
+# ── Logging Setup ──────────────────────────────────────────
+logger = logging.getLogger(__name__)
 
 BKK = timezone(timedelta(hours=7))
 
@@ -59,36 +64,52 @@ def compute_context(
     total_adj = 0
 
     # ── 1. News Filter ─────────────────────────────────────
-    news = check_news_filter(news_buffer, news_buffer)
-    total_adj += news["score_adj"]
-    reasons.append(news["reason"])
+    try:
+        news = check_news_filter(news_buffer, news_buffer)
+        total_adj += news["score_adj"]
+        reasons.append(news["reason"])
 
-    # ถ้า news บล็อก → หยุดทันที
-    if not news["safe"]:
-        return ContextResult(
-            safe         = False,
-            total_adj    = news["score_adj"],
-            final_score  = 0,
-            signal_type  = "BLOCKED",
-            reasons      = reasons,
-            news         = news,
-            summary      = f"🚫 BLOCKED: {news['reason']}",
-        )
+        # ถ้า news บล็อก → หยุดทันที
+        if not news["safe"]:
+            return ContextResult(
+                safe         = False,
+                total_adj    = news["score_adj"],
+                final_score  = 0,
+                signal_type  = "BLOCKED",
+                reasons      = reasons,
+                news         = news,
+                summary      = f"🚫 BLOCKED: {news['reason']}",
+            )
+    except Exception as e:
+        logger.warning(f"News filter error: {e}")
+        news = {"score_adj": 0, "reason": "News check failed"}
 
     # ── 2. Fear & Greed ────────────────────────────────────
-    fg = get_fg_score_adj(direction)
-    total_adj += fg["score_adj"]
-    reasons.append(fg["reason"])
+    try:
+        fg = get_fg_score_adj(direction)
+        total_adj += fg["score_adj"]
+        reasons.append(fg["reason"])
+    except Exception as e:
+        logger.warning(f"Fear & Greed error: {e}")
+        fg = {"score_adj": 0, "reason": "F&G check failed"}
 
     # ── 3. DXY ────────────────────────────────────────────
-    dxy = get_dxy_score_adj(direction, TWELVE_API_KEY)
-    total_adj += dxy["score_adj"]
-    reasons.append(dxy["reason"])
+    try:
+        dxy = get_dxy_score_adj(direction, TWELVE_API_KEY)
+        total_adj += dxy["score_adj"]
+        reasons.append(dxy["reason"])
+    except Exception as e:
+        logger.warning(f"DXY error: {e}")
+        dxy = {"score_adj": 0, "reason": "DXY check failed"}
 
     # ── 4. COT ────────────────────────────────────────────
-    cot = get_cot_score_adj(direction)
-    total_adj += cot["score_adj"]
-    reasons.append(cot["reason"])
+    try:
+        cot = get_cot_score_adj(direction)
+        total_adj += cot["score_adj"]
+        reasons.append(cot["reason"])
+    except Exception as e:
+        logger.warning(f"COT error: {e}")
+        cot = {"score_adj": 0, "reason": "COT check failed"}
 
     # ── Final Score ────────────────────────────────────────
     final_score = technical_score + total_adj
@@ -137,10 +158,30 @@ def format_context_log(ctx: ContextResult) -> str:
 def get_context_status() -> dict:
     """เช็คสถานะ context ทั้งหมด (สำหรับ /context command)"""
     now = datetime.now(BKK).strftime("%H:%M:%S")
-    news = check_news_filter()
-    fg   = get_fg_score_adj("BUY")
-    dxy  = get_dxy_score_adj("BUY", TWELVE_API_KEY)
-    cot  = get_cot_score_adj("BUY")
+    
+    try:
+        news = check_news_filter()
+    except Exception as e:
+        logger.warning(f"News status error: {e}")
+        news = {"safe": False, "reason": "Check failed"}
+    
+    try:
+        fg   = get_fg_score_adj("BUY")
+    except Exception as e:
+        logger.warning(f"F&G status error: {e}")
+        fg = {"emoji": "?", "value": "N/A", "label": "Error"}
+    
+    try:
+        dxy  = get_dxy_score_adj("BUY", TWELVE_API_KEY)
+    except Exception as e:
+        logger.warning(f"DXY status error: {e}")
+        dxy = {"emoji": "?", "trend": "N/A"}
+    
+    try:
+        cot  = get_cot_score_adj("BUY")
+    except Exception as e:
+        logger.warning(f"COT status error: {e}")
+        cot = {"emoji": "?", "pct_rank": "N/A", "bias": "N/A"}
 
     return {
         "timestamp":   now,
