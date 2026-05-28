@@ -1,9 +1,13 @@
 """
 alpha_buffalo_signal.py — Alpha Buffalo v5 Cloud-Driven
 """
-import os, requests, time, threading, uuid
+import os
+import requests
+import time
+import threading
+import uuid
+import pandas as pd
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -151,7 +155,6 @@ TWELVE_KEY      = os.getenv("TWELVE_API_KEY","")
 SYMBOL          = os.getenv("TRADE_SYMBOL","XAUUSD")
 
 last_update_id = 0
-last_signal_time = None
 
 def log(msg): print(f"{datetime.now(BKK).strftime('%H:%M:%S')} | {msg}", flush=True)
 
@@ -174,7 +177,6 @@ def get_ohlcv(interval="1h", bars=200):
                     "apikey":TWELVE_KEY,"format":"JSON"},timeout=15)
         data = r.json()
         if "values" not in data: return None
-        import pandas as pd
         df = pd.DataFrame(data["values"])
         df["datetime"] = pd.to_datetime(df["datetime"])
         df = df.sort_values("datetime").reset_index(drop=True)
@@ -209,7 +211,7 @@ def signal_loop():
             trend = analyze_trend(df_4h, df_1h, df_15m, SYMBOL)
             if should_send_trend_alert(trend.session):
                 send_telegram(format_trend_message(trend))
-                log("📊 Trend: " + trend.session + " " + trend.bias)
+                log(f"📊 Trend: {trend.session} {trend.bias}")
 
             sig = compute_signal(df_4h, df_1h, df_15m)
             if sig:
@@ -218,7 +220,8 @@ def signal_loop():
                 try:
                     requests.post(f"http://localhost:{port}/webhook/signal",
                                   json=sig_dict, timeout=3)
-                except: pass
+                except requests.RequestException as e:
+                    log(f"webhook post error: {e}")
                 tp1 = sig.partial[0]["price"] if sig.partial else sig.tp_final
                 tp2 = sig.partial[1]["price"] if len(sig.partial) > 1 else sig.tp_final
                 msg = format_signal_message(
@@ -227,7 +230,7 @@ def signal_loop():
                     pattern=sig.pattern, score=sig.score, session=trend.session,
                 )
                 send_telegram(msg)
-                log("Signal: " + sig.direction + " " + sig.signal_type + " Score:" + str(sig.score))
+                log(f"Signal: {sig.direction} {sig.signal_type} Score:{sig.score}")
             else:
                 log(f"⏳ No signal | {price:,.2f}")
 
@@ -271,25 +274,28 @@ def handle_cmd(text, chat_id):
     if t == "/start":
         send_telegram(format_welcome_message(), chat_id)
     elif t == "/status":
-        send_telegram("v5 Market:" + ("Open" if is_market_open() else "Closed"), chat_id)
+        market_status = "Open" if is_market_open() else "Closed"
+        send_telegram(f"v5 Market:{market_status}", chat_id)
     elif t == "/price":
         df = get_ohlcv("15min", 1)
         p = float(df["close"].iloc[-1]) if df is not None else 0
-        send_telegram("XAUUSD: " + "{:,.2f}".format(p), chat_id)
+        send_telegram(f"XAUUSD: {p:,.2f}", chat_id)
     elif t == "/health":
-        send_telegram("Bot running | Latest: " + latest_signal.get("direction", "none"), chat_id)
+        latest_dir = latest_signal.get("direction", "none")
+        send_telegram(f"Bot running | Latest: {latest_dir}", chat_id)
     elif t == "/context":
         try:
             from context_engine import get_context_status
             s = get_context_status()
+            news_status = "OK" if s["news_safe"] else "BLOCK"
             msg = "Market Context"
-            msg += "\nNews : " + ("OK" if s["news_safe"] else "BLOCK") + " " + str(s["news_reason"])
-            msg += "\nF&G  : " + str(s["fear_greed"])
-            msg += "\nDXY  : " + str(s["dxy_trend"])
-            msg += "\nCOT  : " + str(s["cot_rank"])
-            msg += "\nTime : " + str(s["timestamp"])
+            msg += f"\nNews : {news_status} {s['news_reason']}"
+            msg += f"\nF&G  : {s['fear_greed']}"
+            msg += f"\nDXY  : {s['dxy_trend']}"
+            msg += f"\nCOT  : {s['cot_rank']}"
+            msg += f"\nTime : {s['timestamp']}"
         except Exception as e:
-            msg = "Context error: " + str(e)
+            msg = f"Context error: {e}"
         send_telegram(msg, chat_id)
     elif t == "/setup":
         try:
@@ -299,23 +305,27 @@ def handle_cmd(text, chat_id):
                 msg = "⚡ Setup Status\n⏳ No active setup"
             else:
                 stage_emoji = {1: "👀", 2: "🎯", 3: "🚀"}
+                emoji = stage_emoji.get(s["stage"], "")
                 msg = "⚡ Setup Status"
-                msg += "\n" + stage_emoji.get(s["stage"], "") + " Stage: " + str(s["status"])
-                msg += "\nDir    : " + str(s.get("direction", "N/A"))
-                msg += "\nScore  : " + str(s.get("score", 0))
+                msg += f"\n{emoji} Stage: {s['status']}"
+                msg += f"\nDir    : {s.get('direction', 'N/A')}"
+                msg += f"\nScore  : {s.get('score', 0)}"
                 if s.get("pattern"):
-                    msg += "\nPattern: " + str(s["pattern"])
+                    msg += f"\nPattern: {s['pattern']}"
                 if s.get("setup_price"):
-                    msg += "\nPrice  : " + "{:,.2f}".format(s["setup_price"])
+                    msg += f"\nPrice  : {s['setup_price']:,.2f}"
         except Exception as e:
-            msg = "Setup error: " + str(e)
+            msg = f"Setup error: {e}"
         send_telegram(msg, chat_id)
-    elif t in ("/quota", "/newlicense", "/newtrial", "/licenses") or          t.startswith("/newlicense ") or t.startswith("/newtrial ") or          t.startswith("/revoke ") or t.startswith("/extend ") or          t.startswith("/quota "):
+    elif (t in ("/quota", "/newlicense", "/newtrial", "/licenses") or
+          t.startswith("/newlicense ") or t.startswith("/newtrial ") or
+          t.startswith("/revoke ") or t.startswith("/extend ") or
+          t.startswith("/quota ")):
         try:
             from license_manager import handle_admin_command
             msg = handle_admin_command(t)
         except Exception as e:
-            msg = "License error: " + str(e)
+            msg = f"License error: {e}"
         send_telegram(msg, chat_id)
     elif t == "/session":
         try:
@@ -323,12 +333,14 @@ def handle_cmd(text, chat_id):
             msg = format_session_status()
             close = should_close_asia_positions()
             if close["should_close"]:
-                msg += "\n" + ("URGENT" if close["urgent"] else "INFO") + ": " + close["reason"]
+                urgency = "URGENT" if close["urgent"] else "INFO"
+                msg += f"\n{urgency}: {close['reason']}"
         except Exception as e:
-            msg = "Session error: " + str(e)
+            msg = f"Session error: {e}"
         send_telegram(msg, chat_id)
     elif t in ("/help", "/?"):
-        send_telegram("/status /price /health /context /setup\n/quota /newlicense /newtrial /revoke /extend /licenses", chat_id)
+        help_msg = "/status /price /health /context /setup\n/quota /newlicense /newtrial /revoke /extend /licenses"
+        send_telegram(help_msg, chat_id)
 
 
 if __name__ == "__main__":
