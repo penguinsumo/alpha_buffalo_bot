@@ -1,6 +1,6 @@
 """
-alpha_buffalo_signal.py — Alpha Buffalo v5 Cloud-Driven
-(อัปเดตรองรับระบบ Sniper Trap & Dynamic SL)
+alpha_buffalo_signal_v5.py — Alpha Buffalo v5 Cloud-Driven
+(อัปเดตรองรับระบบ Sniper Trap, Dynamic SL และระบบแจ้งเตือน Telegram สมบูรณ์)
 """
 import os, requests, time, threading, uuid
 from datetime import datetime, timezone, timedelta
@@ -17,6 +17,8 @@ from trend_monitor import (analyze_trend, format_trend_message,
                             should_send_trend_alert)
 
 BKK = timezone(timedelta(hours=7))
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+NOTIFY_IDS = os.getenv("NOTIFY_IDS", "")
 
 # ── FastAPI ───────────────────────────────────────────────
 app = FastAPI(title="Alpha Buffalo v5")
@@ -40,13 +42,24 @@ class SP(BaseModel):
     vsa_bias:      str   = ""
     gps_confirmed: bool  = False
 
+class StatusPayload(BaseModel):
+    status: str
+    message: str
+    signal_id: str = ""
+
+def send_telegram(msg, chat_id):
+    if not TELEGRAM_TOKEN or not chat_id: return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try: requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=5)
+    except: pass
+
 @app.get("/")
 def root(): return "OK"
 
 @app.get("/health")
 def health(): return {"status": "ok", "time": datetime.now(BKK).isoformat()}
 
-# === 🚀 [NEW] Endpoint ลับสำหรับส่งแผนที่ให้ Sniper EA ===
+# === 🚀 Endpoint ลับสำหรับส่งแผนที่ให้ Sniper EA ===
 @app.get("/signal/sniper")
 def get_sniper_trap(key: str = ""):
     """EA ขอรับข้อมูลกับดัก (Sniper Payload แบบแบน)"""
@@ -81,16 +94,28 @@ def receive_signal(sp: SP, key: str = ""):
     latest_signal = sp.model_dump()
     signal_history.append(latest_signal)
     if len(signal_history) > 100: signal_history.pop(0)
+    
+    # --- [แก้ไขจุดที่ 1] สั่งให้ยิงเข้า Telegram เมื่อได้ Signal ---
+    if NOTIFY_IDS:
+        msg = f"🔔 <b>[Alpha Buffalo] New Signal</b>\nDir: {sp.direction}\nEntry: {sp.entry}\nSL: {sp.sl}\nTP: {sp.tp_final}"
+        for chat_id in NOTIFY_IDS.split(","):
+            send_telegram(msg, chat_id.strip())
+            
     return {"ok": True, "signal_id": sp.signal_id}
 
-# ── Telegram Bot (โค้ดเดิม) ──────────────────────────────────
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-def send_telegram(msg, chat_id):
-    if not TELEGRAM_TOKEN or not chat_id: return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try: requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=5)
-    except: pass
+@app.post("/webhook/status")
+def receive_status(payload: StatusPayload, key: str = ""):
+    if not chk(key): raise HTTPException(403, "Invalid license")
+    
+    # --- [แก้ไขจุดที่ 2] เมื่อ EA ทำงาน จะส่งแจ้งเตือนนี้เข้า Telegram ---
+    if NOTIFY_IDS:
+        msg = f"🤖 <b>[MT5 Execution] {payload.status}</b>\n{payload.message}"
+        for chat_id in NOTIFY_IDS.split(","):
+            send_telegram(msg, chat_id.strip())
+            
+    return {"ok": True}
 
+# ── Telegram Bot ──────────────────────────────────
 def command_loop():
     if not TELEGRAM_TOKEN: return
     offset = 0
