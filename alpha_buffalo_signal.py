@@ -1,3 +1,4 @@
+import traceback
 """
 alpha_buffalo_signal.py — Alpha Buffalo v5 Cloud-Driven
 """
@@ -147,7 +148,7 @@ _notify_raw     = os.getenv("NOTIFY_IDS", ADMIN_ID)
 NOTIFY_IDS      = [x.strip() for x in _notify_raw.split(",") if x.strip()]
 TELEGRAM_API    = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL","1800"))
-TWELVE_KEY      = os.getenv("TWELVE_API_KEY","")
+TWELVE_KEY      = "4b75c8729e36412295fca37a0731efde"
 SYMBOL          = os.getenv("TRADE_SYMBOL","XAUUSD")
 
 last_update_id = 0
@@ -184,7 +185,7 @@ def get_ohlcv(interval="1h", bars=200):
             df[c] = df[c].astype(float)
         if "volume" in df.columns: df["volume"] = df["volume"].astype(float)
         return df
-    except Exception as e: log(f"ohlcv error: {e}"); return None
+    except Exception as e: print(f"DEBUG_ERROR: {e}"); log(f"ohlcv error: {e}"); return None
 
 def is_market_open():
     now = datetime.now(timezone.utc)
@@ -326,6 +327,9 @@ def handle_cmd(text, chat_id):
                 msg += "\n" + ("URGENT" if close["urgent"] else "INFO") + ": " + close["reason"]
         except Exception as e:
             msg = "Session error: " + str(e)
+        send_telegram(msg, chat_id)
+    elif t == "/test_sniper":
+        msg = "🎯 <b>[SNIPER TEST MODE]</b>\nStatus: <b>ARMED</b>\nDirection: BUY\nTrap Price: 2350.00\nTP Target: 2356.00 (6 points)\nSL Level: 2347.00\n\nสถานะ: รอราคากระชากแตะพิกัด..."
         send_telegram(msg, chat_id)
     elif t in ("/help", "/?"):
         send_telegram("/status /price /health /context /setup\n/quota /newlicense /newtrial /revoke /extend /licenses", chat_id)
