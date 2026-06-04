@@ -1,10 +1,12 @@
+import traceback
 """
-alpha_buffalo_signal.py — Alpha Buffalo v5 Cloud-Driven
+alpha_buffalo_signal.py — Alpha Buffalo v5 Cloud-Driven (v5.4.0-Sniper)
+Architecture: Pre-Load Trap & Tick-Speed Execution
 """
 import os, requests, time, threading, uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 import uvicorn
@@ -20,9 +22,27 @@ app = FastAPI(title="Alpha Buffalo v5")
 latest_signal: dict = {}
 signal_history: list = []
 
+# --- STATE MANAGEMENT (SNIPER AMBUSH PROTOCOL) ---
+current_trap_state = {
+    "status": "INACTIVE",           # INACTIVE, PRE_LOAD, ACTIVE, DONE
+    "trap_id": "NONE", 
+    "strategy": "VSA_WALL_PRELOAD", 
+    "direction": "",
+    "zone_type": "MANUAL", 
+    "trap_price": 0.0, 
+    "sl": 0.0, 
+    "tp": 0.0,
+    "max_slippage_points": 50, 
+    "be_trigger": True, 
+    "active_from_unix": 0,          # จุดเริ่มต้นเวลาที่ EA อนุญาตให้ยิง (เช่น 19:29)
+    "active_to_unix": 0,            # หมดเวลาดักยิง (เช่น 19:31)
+    "ticket": 0                     # EA จะส่งกลับมาใส่เมื่อยิงสำเร็จ
+}
+
 VALID_LICENSES = set(os.getenv("VALID_LICENSES", "DEMO123").split(","))
 def chk(key): return key in VALID_LICENSES
 
+# --- API CONTRACTS (MODELS) ---
 class SP(BaseModel):
     direction: str; signal_type: str
     entry: float; sl: float; be_price: float
@@ -31,7 +51,6 @@ class SP(BaseModel):
     score: int; layer: int; session: str
     fallback_sl: float; fallback_tp: float
     signal_id: str = ""; action: str = "OPEN"
-    # V5 + Reversal fields
     visual_sl:     float = 0.0
     zone_valid:    bool  = False
     reentry_ok:    bool  = False
@@ -47,6 +66,13 @@ class SP(BaseModel):
 class CP(BaseModel):
     signal_id: str; executed: bool; license: str
 
+class RP(BaseModel):
+    signal_id: str
+    license:   str
+    hit_sl:    bool
+    price:     float
+
+# --- API ROUTES ---
 @app.get("/")
 def root(): return "OK"
 
@@ -55,7 +81,58 @@ def head(): return Response(status_code=200)
 
 @app.get("/health")
 def health():
-    return {"status":"ok","version":"v5","latest_signal":latest_signal.get("direction","none")}
+    return {"status":"ok","version":"v5.4.0-Sniper","latest_signal":latest_signal.get("direction","none")}
+
+# [อัปเดต] เลิกใช้ JSON เพื่อแก้ 422 รับค่าผ่าน URL ตรงๆ
+@app.api_route("/webhook/mt5", methods=["GET", "POST"])
+async def mt5_webhook(action: str = "", price: float = 0.0, lead_minutes: int = 1, duration_minutes: int = 2):
+    global current_trap_state
+    
+    action = action.upper().replace("TEST_", "")
+    if action not in ["BUY", "SELL"] or price <= 0:
+        return {"status": "IGNORED", "message": "Invalid parameters"}
+        
+    now = int(time.time())
+    # กำหนดเวลานัดหมายล่วงหน้า
+    active_from = now + (lead_minutes * 60)
+    active_to = active_from + (duration_minutes * 60)
+    
+    current_trap_state.update({
+        "status": "PRE_LOAD",
+        "trap_id": f"TRAP_{now}",
+        "strategy": "VSA_WALL_PRELOAD",
+        "direction": action,
+        "trap_price": price,
+        "sl": price - 3.0 if action == "BUY" else price + 3.0,
+        "tp": price + 6.0 if action == "BUY" else price - 6.0,
+        "active_from_unix": active_from,
+        "active_to_unix": active_to,
+        "ticket": 0
+    })
+    
+    print(f"🎯 [PRE-LOAD TRAP SET] {action} @ {price} | Active: {lead_minutes}m from now")
+    return {"status": "SUCCESS", "message": "Trap pre-loaded successfully", "data": current_trap_state}
+
+@app.get("/trap")
+def get_trap():
+    global current_trap_state
+    import time
+    if isinstance(current_trap_state, dict) and current_trap_state.get("active_to_unix"):
+        if int(time.time()) > current_trap_state.get("active_to_unix", 0):
+            print("[Server] Trap expired. Cleared automatically.")
+            current_trap_state = {}
+    return current_trap_state
+
+# [ใหม่] Endpoint ให้ EA โยนงานกลับมาให้ Python หลังยิงออเดอร์เสร็จ
+@app.api_route("/report_trade", methods=["GET", "POST"])
+async def report_trade(trap_id: str = "", ticket: int = 0, exec_price: float = 0.0):
+    global current_trap_state
+    if current_trap_state["trap_id"] == trap_id:
+        current_trap_state["status"] = "DONE"
+        current_trap_state["ticket"] = ticket
+        print(f"✅ [SNIPER EXECUTED] Trap {trap_id} | Ticket: {ticket} | Price: {exec_price}")
+        return {"status": "SUCCESS", "message": "Trade handover complete"}
+    return {"status": "ERROR", "message": "Trap ID mismatch or expired"}
 
 @app.post("/webhook/signal")
 async def recv(p: SP):
@@ -86,7 +163,6 @@ def history(key:str="",limit:int=20):
 
 @app.get("/signal/scenarios")
 def scenarios(key: str = ""):
-    """คืน active VSA zones สำหรับ EA / dashboard / Telegram"""
     if not chk(key): raise HTTPException(403, "Invalid license")
     try:
         from scenario_scanner import scenario_scanner
@@ -96,7 +172,6 @@ def scenarios(key: str = ""):
 
 @app.get("/signal/zone_check")
 def zone_check(key:str=""):
-    """EA ถาม: zone ยัง valid + reentry อนุญาตไหม"""
     if not chk(key): raise HTTPException(403,"Invalid license")
     sig = latest_signal
     if not sig:
@@ -111,15 +186,8 @@ def zone_check(key:str=""):
         "signal_id":     sig.get("signal_id",  ""),
     }
 
-class RP(BaseModel):
-    signal_id: str
-    license:   str
-    hit_sl:    bool
-    price:     float
-
 @app.post("/signal/reentry")
 async def reentry(p: RP):
-    """EA แจ้ง: ชน visual_sl ขอ re-entry — ตรวจ zone + VSA ก่อนอนุญาต"""
     if not chk(p.license): raise HTTPException(403,"Invalid license")
     sig = latest_signal
     if not sig or sig.get("signal_id") != p.signal_id:
@@ -128,7 +196,6 @@ async def reentry(p: RP):
         return {"allowed": False, "reason": "Zone no longer valid"}
     if not sig.get("reentry_ok", False):
         return {"allowed": False, "reason": "VSA bias: " + sig.get("vsa_bias","NEUTRAL")}
-    # อนุญาต re-entry — ส่ง visual_sl กลับเป็น SL ใหม่
     return {
         "allowed":   True,
         "direction": sig.get("direction"),
@@ -139,15 +206,14 @@ async def reentry(p: RP):
         "reason":    "Zone valid + VSA " + sig.get("vsa_bias",""),
     }
 
-# ── Config ────────────────────────────────────────────────
+# ── Config & Main Loop ────────────────────────────────────
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID        = os.getenv("ADMIN_ID","0")
-# NOTIFY_IDS = "ADMIN_ID,-100xxx,-100yyy" คั่นด้วย comma
 _notify_raw     = os.getenv("NOTIFY_IDS", ADMIN_ID)
 NOTIFY_IDS      = [x.strip() for x in _notify_raw.split(",") if x.strip()]
 TELEGRAM_API    = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL","1800"))
-TWELVE_KEY      = os.getenv("TWELVE_API_KEY","")
+TWELVE_KEY      = "4b75c8729e36412295fca37a0731efde"
 SYMBOL          = os.getenv("TRADE_SYMBOL","XAUUSD")
 
 last_update_id = 0
@@ -156,8 +222,6 @@ last_signal_time = None
 def log(msg): print(f"{datetime.now(BKK).strftime('%H:%M:%S')} | {msg}", flush=True)
 
 def send_telegram(msg, chat_id=None):
-    # ถ้ามี chat_id (reply ตรง) → ส่งแค่ห้องนั้น
-    # ถ้าไม่มี (auto signal) → broadcast ทุก NOTIFY_IDS
     targets = [str(chat_id)] if chat_id else NOTIFY_IDS
     for cid in targets:
         try:
@@ -184,7 +248,7 @@ def get_ohlcv(interval="1h", bars=200):
             df[c] = df[c].astype(float)
         if "volume" in df.columns: df["volume"] = df["volume"].astype(float)
         return df
-    except Exception as e: log(f"ohlcv error: {e}"); return None
+    except Exception as e: print(f"DEBUG_ERROR: {e}"); log(f"ohlcv error: {e}"); return None
 
 def is_market_open():
     now = datetime.now(timezone.utc)
@@ -231,7 +295,6 @@ def signal_loop():
             else:
                 log(f"⏳ No signal | {price:,.2f}")
 
-            # ── Scenario Scanner (Mode B — Telegram alert) ──
             try:
                 from scenario_scanner import run_scenario_scan
                 zones = run_scenario_scan(df_15m)
@@ -310,7 +373,10 @@ def handle_cmd(text, chat_id):
         except Exception as e:
             msg = "Setup error: " + str(e)
         send_telegram(msg, chat_id)
-    elif t in ("/quota", "/newlicense", "/newtrial", "/licenses") or          t.startswith("/newlicense ") or t.startswith("/newtrial ") or          t.startswith("/revoke ") or t.startswith("/extend ") or          t.startswith("/quota "):
+    elif t in ("/quota", "/newlicense", "/newtrial", "/licenses") or \
+         t.startswith("/newlicense ") or t.startswith("/newtrial ") or \
+         t.startswith("/revoke ") or t.startswith("/extend ") or \
+         t.startswith("/quota "):
         try:
             from license_manager import handle_admin_command
             msg = handle_admin_command(t)
@@ -327,12 +393,14 @@ def handle_cmd(text, chat_id):
         except Exception as e:
             msg = "Session error: " + str(e)
         send_telegram(msg, chat_id)
+    elif t == "/test_sniper":
+        msg = "🎯 <b>[SNIPER TEST MODE]</b>\nStatus: <b>ARMED</b>\nDirection: BUY\nTrap Price: 2350.00\nTP Target: 2356.00 (6 points)\nSL Level: 2347.00\n\nสถานะ: รอราคากระชากแตะพิกัด..."
+        send_telegram(msg, chat_id)
     elif t in ("/help", "/?"):
         send_telegram("/status /price /health /context /setup\n/quota /newlicense /newtrial /revoke /extend /licenses", chat_id)
 
-
 if __name__ == "__main__":
-    print("🐃 ALPHA BUFFALO v5 started\n")
+    print("🐃 ALPHA BUFFALO v5 (Sniper Ambush) started\n")
     threading.Thread(target=command_loop, daemon=True).start()
     threading.Thread(target=signal_loop,  daemon=True).start()
     port = int(os.getenv("PORT",8080))
