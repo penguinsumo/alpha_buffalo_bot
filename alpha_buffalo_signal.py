@@ -115,7 +115,12 @@ async def mt5_webhook(action: str = "", price: float = 0.0, lead_minutes: int = 
 
 @app.get("/trap")
 def get_trap():
-    # ฝั่ง EA จะเดินมาอ่านป้ายหน้านี้ทุกๆ 1-5 นาที
+    global current_trap_state
+    import time
+    if isinstance(current_trap_state, dict) and current_trap_state.get("active_to_unix"):
+        if int(time.time()) > current_trap_state.get("active_to_unix", 0):
+            print("[Server] Trap expired. Cleared automatically.")
+            current_trap_state = {}
     return current_trap_state
 
 # [ใหม่] Endpoint ให้ EA โยนงานกลับมาให้ Python หลังยิงออเดอร์เสร็จ
