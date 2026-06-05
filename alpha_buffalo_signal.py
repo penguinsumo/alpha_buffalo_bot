@@ -394,7 +394,7 @@ def handle_cmd(text, chat_id):
             msg = "Session error: " + str(e)
         send_telegram(msg, chat_id)
     elif t == "/test_sniper":
-        msg = "🎯 <b>[SNIPER TEST MODE]</b>\nStatus: <b>ARMED</b>\nDirection: BUY\nTrap Price: 2350.00\nTP Target: 2356.00 (6 points)\nSL Level: 2347.00\n\nสถานะ: รอราคา��[...]
+        msg = "🎯 <b>[SNIPER TEST MODE]</b>\nStatus: <b>ARMED</b>\nDirection: BUY\nTrap Price: 2350.00\nTP Target: 2356.00 (6 points)\nSL Level: 2347.00\n\nWaiting for price entry..."
         send_telegram(msg, chat_id)
     elif t in ("/help", "/?"):
         send_telegram("/status /price /health /context /setup\n/quota /newlicense /newtrial /revoke /extend /licenses", chat_id)
