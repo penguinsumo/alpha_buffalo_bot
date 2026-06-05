@@ -276,7 +276,7 @@ def signal_loop():
                 log("📊 Trend: " + trend.session + " " + trend.bias)
 
             sig = compute_signal(df_4h, df_1h, df_15m)
-            if sig:
+            if sig is not None and not sig.empty:
                 sig_dict = signal_to_dict(sig)
                 port = int(os.getenv("PORT",8080))
                 try:
@@ -394,7 +394,7 @@ def handle_cmd(text, chat_id):
             msg = "Session error: " + str(e)
         send_telegram(msg, chat_id)
     elif t == "/test_sniper":
-        msg = "🎯 <b>[SNIPER TEST MODE]</b>\nStatus: <b>ARMED</b>\nDirection: BUY\nTrap Price: 2350.00\nTP Target: 2356.00 (6 points)\nSL Level: 2347.00\n\nสถานะ: รอราคากระชากแตะพิกัด..."
+        msg = "🎯 <b>[SNIPER TEST MODE]</b>\nStatus: <b>ARMED</b>\nDirection: BUY\nTrap Price: 2350.00\nTP Target: 2356.00 (6 points)\nSL Level: 2347.00\n\nสถานะ: รอราคา��[...]
         send_telegram(msg, chat_id)
     elif t in ("/help", "/?"):
         send_telegram("/status /price /health /context /setup\n/quota /newlicense /newtrial /revoke /extend /licenses", chat_id)
