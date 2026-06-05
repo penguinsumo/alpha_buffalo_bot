@@ -9,7 +9,7 @@ from session_clock import get_market_session_info
 ENTRY_ZONE_V4_LOW  = 0.618      # Unified V4 entry: 0.618–1.000
 ENTRY_ZONE_V4_HIGH = 1.000
 
-ENTRY_ZONE_V5_LOW  = 0.728      # V5 harmonic PRZ: 0.728–1.000
+ENTRY_ZONE_V5_LOW  = 0.728      # V5 harmonic PRZ: 0.726–1.000
 ENTRY_ZONE_V5_HIGH = 1.000
 
 V4_SCORE_THRESHOLD = 4
