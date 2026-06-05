@@ -275,23 +275,26 @@ def signal_loop():
                 send_telegram(format_trend_message(trend))
                 log("📊 Trend: " + trend.session + " " + trend.bias)
 
-            sig = compute_signal(df_4h, df_1h, df_15m)
-            if sig is not None and not sig.empty:
+            # FIX: Call with corrected signature (df_m15, df_h1, context_score)
+            sig = compute_signal(df_15m, df_1h, context_score=0)
+            # FIX: sig is now a dict or None, not a DataFrame
+            if sig is not None:
                 sig_dict = signal_to_dict(sig)
                 port = int(os.getenv("PORT",8080))
                 try:
                     requests.post(f"http://localhost:{port}/webhook/signal",
                                   json=sig_dict, timeout=3)
                 except: pass
-                tp1 = sig.partial[0]["price"] if sig.partial else sig.tp_final
-                tp2 = sig.partial[1]["price"] if len(sig.partial) > 1 else sig.tp_final
+                # FIX: Access dict keys directly, not object attributes
+                tp1 = sig.get("partial", [{}])[0].get("price") if sig.get("partial") else sig.get("tp_final")
+                tp2 = sig.get("partial", [{}, {}])[1].get("price") if len(sig.get("partial", [])) > 1 else sig.get("tp_final")
                 msg = format_signal_message(
-                    direction=sig.direction, signal_type=sig.signal_type,
-                    entry=sig.entry, sl=sig.sl, tp1=tp1, tp2=tp2,
-                    pattern=sig.pattern, score=sig.score, session=trend.session,
+                    direction=sig.get("direction"), signal_type=sig.get("signal_type"),
+                    entry=sig.get("entry"), sl=sig.get("sl"), tp1=tp1, tp2=tp2,
+                    pattern=sig.get("pattern"), score=sig.get("score"), session=trend.session,
                 )
                 send_telegram(msg)
-                log("Signal: " + sig.direction + " " + sig.signal_type + " Score:" + str(sig.score))
+                log("Signal: " + sig.get("direction", "") + " " + sig.get("signal_type", "") + " Score:" + str(sig.get("score", 0)))
             else:
                 log(f"⏳ No signal | {price:,.2f}")
 
