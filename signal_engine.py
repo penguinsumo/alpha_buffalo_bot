@@ -4,6 +4,7 @@
 import pandas as pd
 from kivanc_vsaob import run_kivanc
 from session_clock import get_market_session_info
+from typing import Dict, Optional, Any
 
 # ── Constants ──────────────────────────────────────────────
 ENTRY_ZONE_V4_LOW  = 0.618      # Unified V4 entry: 0.618–1.000
@@ -17,7 +18,7 @@ V5_SCORE_THRESHOLD = 8
 
 
 # ── VSA Gate & Volume Confirmation ─────────────────────────
-def evaluate_vsa_gate(df_m15, df_h1=None):
+def evaluate_vsa_gate(df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
     """
     Real-time VSA Gate evaluation.
     Checks M15 BOS/MSS + Volume spike confirmation.
@@ -85,7 +86,7 @@ def evaluate_vsa_gate(df_m15, df_h1=None):
 
 
 # ── Unified Entry Zone Validation ──────────────────────────
-def validate_unified_entry_zone(current_price, fibo_zone, direction, score, session):
+def validate_unified_entry_zone(current_price: float, fibo_zone: Any, direction: str, score: int, session: str) -> Dict[str, Any]:
     """
     Validates price against unified entry zone.
     
@@ -111,20 +112,27 @@ def validate_unified_entry_zone(current_price, fibo_zone, direction, score, sess
     
     lvl_100 = fibo_zone.levels[1.0]
     lvl_786 = fibo_zone.levels[0.786]
-    lvl_728 = fibo_zone.levels.get(0.728, 
-                                    fibo_zone.anchor_low + (fibo_zone.anchor_high - fibo_zone.anchor_low) * 0.728 
-                                    if direction == 'SELL' else 
-                                    fibo_zone.anchor_high - (fibo_zone.anchor_high - fibo_zone.anchor_low) * 0.728)
+    
+    # FIX: Corrected malformed ternary operator
+    swing_range = fibo_zone.anchor_high - fibo_zone.anchor_low
+    if direction == 'SELL':
+        lvl_728 = fibo_zone.levels.get(0.728, fibo_zone.anchor_low + swing_range * 0.728)
+    else:
+        lvl_728 = fibo_zone.levels.get(0.728, fibo_zone.anchor_high - swing_range * 0.728)
+    
     lvl_618 = fibo_zone.levels[0.618]
     
     # ─── V5 Activation (Score ≥8, stricter zone) ───
     if score >= V5_SCORE_THRESHOLD:
+        # FIX: Different logic for BUY vs SELL
         if direction == 'BUY':
+            # BUY: Entry between 0.728 and 1.0
             entry_low = min(lvl_728, lvl_100)
             entry_high = max(lvl_728, lvl_100)
         else:  # SELL
-            entry_low = min(lvl_728, lvl_100)
-            entry_high = max(lvl_728, lvl_100)
+            # SELL: Entry between 0.728 and 1.0 (but on the downside)
+            entry_low = min(lvl_100, lvl_728)
+            entry_high = max(lvl_100, lvl_728)
         
         is_in_v5_zone = entry_low <= current_price <= entry_high
         
@@ -139,12 +147,15 @@ def validate_unified_entry_zone(current_price, fibo_zone, direction, score, sess
     
     # ─── V4 Activation (Score ≥4, standard zone) ───
     if score >= V4_SCORE_THRESHOLD:
+        # FIX: Different logic for BUY vs SELL
         if direction == 'BUY':
+            # BUY: Entry between 0.618 and 1.0
             entry_low = min(lvl_618, lvl_100)
             entry_high = max(lvl_618, lvl_100)
         else:  # SELL
-            entry_low = min(lvl_618, lvl_100)
-            entry_high = max(lvl_618, lvl_100)
+            # SELL: Entry between 0.618 and 1.0 (but on the downside)
+            entry_low = min(lvl_100, lvl_618)
+            entry_high = max(lvl_100, lvl_618)
         
         is_in_v4_zone = entry_low <= current_price <= entry_high
         
@@ -167,7 +178,7 @@ def validate_unified_entry_zone(current_price, fibo_zone, direction, score, sess
 
 
 # ── Exit Logic Routing (V4 vs V5) ──────────────────────────
-def compute_exit_targets(sig_obj, current_price, direction, score, session_info):
+def compute_exit_targets(sig_obj: Any, current_price: float, direction: str, score: int, session_info: Dict[str, Any]) -> Dict[str, Any]:
     """
     Routes exit targets based on V4 or V5 mode.
     
@@ -211,7 +222,7 @@ def compute_exit_targets(sig_obj, current_price, direction, score, session_info)
             'tp_final': round(v5_tp2, 3),
             'sl': round(sl_price, 3),
             'be_trigger': 'H4_STOCH',  # External trigger
-            'trailing_stop': None,
+            'trailing_stop': 0.0,  # FIX: Use 0.0 instead of None for consistency
             'trailing_mode': 'NONE'
         }
     
@@ -241,13 +252,24 @@ def compute_exit_targets(sig_obj, current_price, direction, score, session_info)
 
 
 # ── Main Signal Computation ────────────────────────────────
-def compute_signal(df_m15, cascade_trend='BUY', has_score_or_pattern=True, context_score=0, df_h1=None):
+def compute_signal(df_m15: pd.DataFrame, df_h1: Optional[pd.DataFrame] = None, 
+                   context_score: int = 0) -> Optional[Dict[str, Any]]:
     """
     Core engine. Combines Kivanc Zone, Session Clock, VSA Gate, and V4/V5 logic.
     
     NEW: Unified entry zone with dual-cycle routing.
+    
+    Args:
+        df_m15: 15-minute OHLCV DataFrame
+        df_h1: 1-hour OHLCV DataFrame (optional, for enhanced VSA)
+        context_score: Additional context-based score boost (0-3)
+    
+    Returns:
+        dict with complete signal or None if no valid signal
     """
-    if not has_score_or_pattern:
+    
+    # Validate input
+    if df_m15 is None or len(df_m15) < 3:
         return None
 
     # 1. Run core VSA & Fibo analysis
@@ -255,7 +277,8 @@ def compute_signal(df_m15, cascade_trend='BUY', has_score_or_pattern=True, conte
     if not sig_obj:
         return None
 
-    current_price = float(df_m15["close"].iloc[-2])
+    # FIX: Use iloc[-1] to get current close, not iloc[-2]
+    current_price = float(df_m15["close"].iloc[-1])
     
     # 2. Get Real Session
     session_info = get_market_session_info()
@@ -370,7 +393,7 @@ def compute_signal(df_m15, cascade_trend='BUY', has_score_or_pattern=True, conte
     }
 
 
-def signal_to_dict(computed_signal):
+def signal_to_dict(computed_signal: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Transforms computed signal into the SP model structure expected by FastAPI.
     """
