@@ -405,3 +405,27 @@ if __name__ == "__main__":
     threading.Thread(target=signal_loop,  daemon=True).start()
     port = int(os.getenv("PORT",8080))
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+
+def compute_dynamic_lot(signal, df_1h, account_balance=10000, risk_percent=0.01):
+    tr = pd.concat([df_1h['high']-df_1h['low'],
+                    (df_1h['high']-df_1h['close'].shift(1)).abs(),
+                    (df_1h['low']-df_1h['close'].shift(1)).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean().iloc[-1]
+    if signal.direction == "BUY":
+        sl_distance = abs(signal.entry_price - signal.sl_price)
+    else:
+        sl_distance = abs(signal.sl_price - signal.entry_price)
+    risk_amount = account_balance * risk_percent
+    if sl_distance > 0:
+        base_lot = risk_amount / sl_distance
+    else:
+        base_lot = 0
+    atr_normal = atr / signal.entry_price
+    if atr_normal > 0.02:
+        base_lot *= 0.7
+    elif atr_normal < 0.005:
+        base_lot *= 1.3
+    if hasattr(signal, 'position_multiplier'):
+        base_lot *= signal.position_multiplier
+    max_lot = account_balance * 0.1 / signal.entry_price
+    return min(base_lot, max_lot)
