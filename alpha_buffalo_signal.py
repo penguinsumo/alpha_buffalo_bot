@@ -239,6 +239,8 @@ def get_ohlcv(interval="1h", bars=200):
         data = r.json()
         if "values" not in data: return None
         import pandas as pd
+from vsa_gate import check_vsa_signal
+import os
         df = pd.DataFrame(data["values"])
         df["datetime"] = pd.to_datetime(df["datetime"])
         df = df.sort_values("datetime").reset_index(drop=True)
