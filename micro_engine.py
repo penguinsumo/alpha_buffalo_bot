@@ -314,3 +314,20 @@ def run_micro(df_15m: pd.DataFrame) -> list[MicroSignal]:
 
 def get_micro_summary() -> str:
     return micro_engine.summary()
+
+def detect_spike_15m(df, atr_mult=1.5):
+    if len(df) < 2:
+        return False, None
+    tr = pd.concat([df['high']-df['low'],
+                    (df['high']-df['close'].shift(1)).abs(),
+                    (df['low']-df['close'].shift(1)).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean().iloc[-1]
+    last = df.iloc[-1]
+    body = abs(last['close'] - last['open'])
+    range_ = last['high'] - last['low']
+    if range_ > atr * atr_mult and body > range_ * 0.6:
+        if last['close'] > last['open']:
+            return True, 'bullish'
+        else:
+            return True, 'bearish'
+    return False, None
