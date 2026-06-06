@@ -20,7 +20,7 @@ import pandas as pd
 import numpy as np
 
 # Import components
-from signal_composer import SignalComposer, Signal, SignalStrength, create_signal
+from signal_composer import compose_signal, format_composed, ComposedSignal
 from alphatrend_gate import check_at_zone, get_at_confluence
 from vsa_gate import check_vsa_signal, check_vsa_mtf
 
