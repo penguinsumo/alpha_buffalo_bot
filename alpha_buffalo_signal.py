@@ -1,375 +1,425 @@
-#!/usr/bin/env python3
+import traceback
 """
-alpha_buffalo_signal.py — Alpha Buffalo v5.2 Signal Generator
-Production-ready signal generator ที่รวมทุก component
-
-Supported assets:
-    - Forex: EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, NZDUSD
-    - Indices: JPN225 (Nikkei 225), US100 (NASDAQ 100)
+alpha_buffalo_signal.py — Alpha Buffalo v5 Cloud-Driven (v5.4.0-Sniper)
+Architecture: Pre-Load Trap & Tick-Speed Execution
 """
+import os, requests, time, threading, uuid
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import Response
+from pydantic import BaseModel
+import uvicorn
+from signal_engine import compute_signal, signal_to_dict
+from trend_monitor import (analyze_trend, format_trend_message,
+                            format_signal_message, format_welcome_message,
+                            should_send_trend_alert)
 
-import argparse
-import json
-import sys
-import logging
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional
+BKK = timezone(timedelta(hours=7))
 
-import pandas as pd
-import numpy as np
+# ── FastAPI ───────────────────────────────────────────────
+app = FastAPI(title="Alpha Buffalo v5")
+latest_signal: dict = {}
+signal_history: list = []
 
-# Import components
-from signal_composer import compose_signal, format_composed, ComposedSignal
-from alphatrend_gate import check_at_zone, get_at_confluence
-from vsa_gate import check_vsa_signal, check_vsa_mtf
+# --- STATE MANAGEMENT (SNIPER AMBUSH PROTOCOL) ---
+current_trap_state = {
+    "status": "INACTIVE",           # INACTIVE, PRE_LOAD, ACTIVE, DONE
+    "trap_id": "NONE", 
+    "strategy": "VSA_WALL_PRELOAD", 
+    "direction": "",
+    "zone_type": "MANUAL", 
+    "trap_price": 0.0, 
+    "sl": 0.0, 
+    "tp": 0.0,
+    "max_slippage_points": 50, 
+    "be_trigger": True, 
+    "active_from_unix": 0,          # จุดเริ่มต้นเวลาที่ EA อนุญาตให้ยิง (เช่น 19:29)
+    "active_to_unix": 0,            # หมดเวลาดักยิง (เช่น 19:31)
+    "ticket": 0                     # EA จะส่งกลับมาใส่เมื่อยิงสำเร็จ
+}
 
-# ─────────────────────────────────────────────
-# Configuration
-# ─────────────────────────────────────────────
+VALID_LICENSES = set(os.getenv("VALID_LICENSES", "DEMO123").split(","))
+def chk(key): return key in VALID_LICENSES
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# --- API CONTRACTS (MODELS) ---
+class SP(BaseModel):
+    direction: str; signal_type: str
+    entry: float; sl: float; be_price: float
+    trail_from: float; tp_final: float
+    partial: list; pattern: str = ""
+    score: int; layer: int; session: str
+    fallback_sl: float; fallback_tp: float
+    signal_id: str = ""; action: str = "OPEN"
+    visual_sl:     float = 0.0
+    zone_valid:    bool  = False
+    reentry_ok:    bool  = False
+    vsa_bias:      str   = ""
+    gps_confirmed: bool  = False
+    is_v5:         bool  = False
+    v5_tp1:        float = 0.0
+    v5_tp2:        float = 0.0
+    next_pattern:  str   = ""
+    d_point:       float = 0.0
+    prz_low_zone:  float = 0.0
 
-class AlphaBuffaloSignalGenerator:
-    """Main signal generator orchestrator"""
+class CP(BaseModel):
+    signal_id: str; executed: bool; license: str
+
+class RP(BaseModel):
+    signal_id: str
+    license:   str
+    hit_sl:    bool
+    price:     float
+
+# --- API ROUTES ---
+@app.get("/")
+def root(): return "OK"
+
+@app.head("/")
+def head(): return Response(status_code=200)
+
+@app.get("/health")
+def health():
+    return {"status":"ok","version":"v5.4.0-Sniper","latest_signal":latest_signal.get("direction","none")}
+
+# [อัปเดต] เลิกใช้ JSON เพื่อแก้ 422 รับค่าผ่าน URL ตรงๆ
+@app.api_route("/webhook/mt5", methods=["GET", "POST"])
+async def mt5_webhook(action: str = "", price: float = 0.0, lead_minutes: int = 1, duration_minutes: int = 2):
+    global current_trap_state
     
-    def __init__(
-        self,
-        data_dir: str = "./data",
-        min_confidence: float = 60.0,
-        risk_per_trade: float = 0.01,
-    ):
-        self.data_dir = Path(data_dir)
-        self.min_confidence = min_confidence
-        self.risk_per_trade = risk_per_trade
-        self.composer = SignalComposer(
-            use_vsa=True,
-            use_alphatrend=True,
-            min_confidence=min_confidence,
-            risk_per_trade=risk_per_trade,
-        )
+    action = action.upper().replace("TEST_", "")
+    if action not in ["BUY", "SELL"] or price <= 0:
+        return {"status": "IGNORED", "message": "Invalid parameters"}
+        
+    now = int(time.time())
+    # กำหนดเวลานัดหมายล่วงหน้า
+    active_from = now + (lead_minutes * 60)
+    active_to = active_from + (duration_minutes * 60)
     
-    def load_data(
-        self,
-        pair: str,
-        timeframe: str = "H1",
-        bars: int = 200
-    ) -> Optional[pd.DataFrame]:
-        """Load OHLCV data for a pair/asset"""
-        
-        # รองรับชื่อ asset แบบต่างๆ
-        asset_variations = self._get_asset_variations(pair)
-        
-        for variation in asset_variations:
-            # Try multiple file name patterns
-            patterns = [
-                self.data_dir / f"{variation}_{timeframe}.csv",
-                self.data_dir / f"{variation}.csv",
-                self.data_dir / f"{variation.lower()}_{timeframe.lower()}.csv",
-                self.data_dir / f"{variation.upper()}_{timeframe}.csv",
-                self.data_dir / f"{timeframe}_{variation}.csv",
-            ]
-            
-            for filepath in patterns:
-                if filepath.exists():
-                    logger.info(f"Loading data from {filepath}")
-                    df = pd.read_csv(filepath)
-                    
-                    # Standardize columns
-                    df.columns = [c.lower().strip() for c in df.columns]
-                    
-                    # Convert time column if exists
-                    if 'time' in df.columns:
-                        df['time'] = pd.to_datetime(df['time'])
-                        df.set_index('time', inplace=True)
-                    elif 'date' in df.columns:
-                        df['date'] = pd.to_datetime(df['date'])
-                        df.set_index('date', inplace=True)
-                    elif 'timestamp' in df.columns:
-                        df['timestamp'] = pd.to_datetime(df['timestamp'])
-                        df.set_index('timestamp', inplace=True)
-                    
-                    # Ensure required columns
-                    required = ['open', 'high', 'low', 'close']
-                    missing = [c for c in required if c not in df.columns]
-                    if missing:
-                        logger.error(f"Missing columns: {missing}")
-                        continue
-                    
-                    # Add volume if not exists
-                    if 'volume' not in df.columns:
-                        # สำหรับ indices บางครั้งไม่มี volume data
-                        df['volume'] = 1000000
-                    
-                    return df.tail(bars)
-        
-        logger.error(f"No data file found for {pair} {timeframe}")
-        logger.info(f"Tried variations: {asset_variations}")
-        return None
+    current_trap_state.update({
+        "status": "PRE_LOAD",
+        "trap_id": f"TRAP_{now}",
+        "strategy": "VSA_WALL_PRELOAD",
+        "direction": action,
+        "trap_price": price,
+        "sl": price - 3.0 if action == "BUY" else price + 3.0,
+        "tp": price + 6.0 if action == "BUY" else price - 6.0,
+        "active_from_unix": active_from,
+        "active_to_unix": active_to,
+        "ticket": 0
+    })
     
-    def _get_asset_variations(self, asset: str) -> List[str]:
-        """Get possible variations of asset name for file lookup"""
-        
-        asset_upper = asset.upper()
-        variations = [asset_upper]
-        
-        # Forex pairs
-        if asset_upper in ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD"]:
-            variations.extend([
-                asset_upper.replace("/", ""),
-                f"{asset_upper[:3]}/{asset_upper[3:]}",
-                asset_upper.lower(),
-            ])
-        
-        # JPN225 (Nikkei 225)
-        elif asset_upper == "JPN225":
-            variations.extend([
-                "NIKKEI", "NIKKEI225", "JP225", 
-                "NK225", "NKD", "NI225",
-                "JPN225_IDX", "JPX",
-            ])
-        
-        # US100 (NASDAQ 100)
-        elif asset_upper == "US100":
-            variations.extend([
-                "NAS100", "NASDAQ100", "NDX", 
-                "USTEC", "US100_IDX", "NAS",
-                "QQQ", "NDX100",
-            ])
-        
-        # Gold/Silver
-        elif asset_upper == "XAUUSD":
-            variations.extend(["GOLD", "XAU", "GOLDUSD"])
-        
-        elif asset_upper == "XAGUSD":
-            variations.extend(["SILVER", "XAG"])
-        
-        # Oil
-        elif asset_upper == "WTI":
-            variations.extend(["USOIL", "CL", "WTIUSD"])
-        
-        elif asset_upper == "BRENT":
-            variations.extend(["UKOIL", "BRN", "BZ"])
-        
-        return variations
-    
-    def get_atr_multiplier(self, asset: str) -> float:
-        """Get ATR multiplier based on asset volatility"""
-        
-        asset_upper = asset.upper()
-        
-        # Indices (more volatile)
-        if asset_upper in ["JPN225", "US100", "NAS100", "NDX"]:
-            return 1.5  # Wider stop for indices
-        
-        # Forex majors (less volatile)
-        elif asset_upper in ["EURUSD", "GBPUSD", "USDJPY"]:
-            return 1.0
-        
-        # Forex minors (medium volatility)
-        elif asset_upper in ["AUDUSD", "USDCAD", "NZDUSD"]:
-            return 1.2
-        
-        # Commodities
-        elif asset_upper in ["XAUUSD", "XAGUSD", "WTI", "BRENT"]:
-            return 1.3
-        
-        return 1.0
-    
-    def generate_signal(
-        self,
-        pair: str,
-        account_balance: float = 10000.0,
-    ) -> Dict:
-        """Generate complete signal for a pair/asset"""
-        
-        result = {
-            "timestamp": datetime.now().isoformat(),
-            "asset": pair,
-            "signal": None,
-            "error": None,
-        }
-        
+    print(f"🎯 [PRE-LOAD TRAP SET] {action} @ {price} | Active: {lead_minutes}m from now")
+    return {"status": "SUCCESS", "message": "Trap pre-loaded successfully", "data": current_trap_state}
+
+@app.get("/trap")
+def get_trap():
+    global current_trap_state
+    import time
+    if isinstance(current_trap_state, dict) and current_trap_state.get("active_to_unix"):
+        if int(time.time()) > current_trap_state.get("active_to_unix", 0):
+            print("[Server] Trap expired. Cleared automatically.")
+            current_trap_state = {}
+    return current_trap_state
+
+# [ใหม่] Endpoint ให้ EA โยนงานกลับมาให้ Python หลังยิงออเดอร์เสร็จ
+@app.api_route("/report_trade", methods=["GET", "POST"])
+async def report_trade(trap_id: str = "", ticket: int = 0, exec_price: float = 0.0):
+    global current_trap_state
+    if current_trap_state["trap_id"] == trap_id:
+        current_trap_state["status"] = "DONE"
+        current_trap_state["ticket"] = ticket
+        print(f"✅ [SNIPER EXECUTED] Trap {trap_id} | Ticket: {ticket} | Price: {exec_price}")
+        return {"status": "SUCCESS", "message": "Trade handover complete"}
+    return {"status": "ERROR", "message": "Trap ID mismatch or expired"}
+
+@app.post("/webhook/signal")
+async def recv(p: SP):
+    global latest_signal
+    sid = p.signal_id or str(uuid.uuid4())[:8]
+    latest_signal = {**p.model_dump(), "signal_id":sid, "confirmed":False,
+                     "created_at":datetime.now(BKK).isoformat()}
+    signal_history.append(latest_signal.copy())
+    if len(signal_history)>100: signal_history.pop(0)
+    return {"ok":True,"signal_id":sid}
+
+@app.get("/signal/latest")
+def latest(key:str=""):
+    if not chk(key): raise HTTPException(403,"Invalid license")
+    return latest_signal or {"direction":"","signal_id":""}
+
+@app.post("/signal/confirm")
+async def confirm(p: CP):
+    if not chk(p.license): raise HTTPException(403,"Invalid license")
+    if latest_signal.get("signal_id")==p.signal_id:
+        latest_signal["confirmed"]=p.executed
+    return {"ok":True}
+
+@app.get("/signal/history")
+def history(key:str="",limit:int=20):
+    if not chk(key): raise HTTPException(403,"Invalid license")
+    return signal_history[-limit:]
+
+@app.get("/signal/scenarios")
+def scenarios(key: str = ""):
+    if not chk(key): raise HTTPException(403, "Invalid license")
+    try:
+        from scenario_scanner import scenario_scanner
+        return {"ok": True, "zones": scenario_scanner.get_summary()}
+    except Exception as e:
+        return {"ok": False, "zones": [], "error": str(e)}
+
+@app.get("/signal/zone_check")
+def zone_check(key:str=""):
+    if not chk(key): raise HTTPException(403,"Invalid license")
+    sig = latest_signal
+    if not sig:
+        return {"zone_valid": False, "reentry_ok": False, "vsa_bias": "NEUTRAL"}
+    return {
+        "zone_valid":    sig.get("zone_valid", False),
+        "reentry_ok":    sig.get("reentry_ok", False),
+        "visual_sl":     sig.get("visual_sl",  0.0),
+        "vsa_bias":      sig.get("vsa_bias",   "NEUTRAL"),
+        "gps_confirmed": sig.get("gps_confirmed", False),
+        "direction":     sig.get("direction",  ""),
+        "signal_id":     sig.get("signal_id",  ""),
+    }
+
+@app.post("/signal/reentry")
+async def reentry(p: RP):
+    if not chk(p.license): raise HTTPException(403,"Invalid license")
+    sig = latest_signal
+    if not sig or sig.get("signal_id") != p.signal_id:
+        return {"allowed": False, "reason": "Signal mismatch"}
+    if not sig.get("zone_valid", False):
+        return {"allowed": False, "reason": "Zone no longer valid"}
+    if not sig.get("reentry_ok", False):
+        return {"allowed": False, "reason": "VSA bias: " + sig.get("vsa_bias","NEUTRAL")}
+    return {
+        "allowed":   True,
+        "direction": sig.get("direction"),
+        "entry":     p.price,
+        "visual_sl": sig.get("visual_sl"),
+        "tp_final":  sig.get("tp_final"),
+        "partial":   sig.get("partial", []),
+        "reason":    "Zone valid + VSA " + sig.get("vsa_bias",""),
+    }
+
+# ── Config & Main Loop ────────────────────────────────────
+TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
+ADMIN_ID        = os.getenv("ADMIN_ID","0")
+_notify_raw     = os.getenv("NOTIFY_IDS", ADMIN_ID)
+NOTIFY_IDS      = [x.strip() for x in _notify_raw.split(",") if x.strip()]
+TELEGRAM_API    = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL","1800"))
+TWELVE_KEY      = "4b75c8729e36412295fca37a0731efde"
+SYMBOL          = os.getenv("TRADE_SYMBOL","XAUUSD")
+
+last_update_id = 0
+last_signal_time = None
+
+def log(msg): print(f"{datetime.now(BKK).strftime('%H:%M:%S')} | {msg}", flush=True)
+
+def send_telegram(msg, chat_id=None):
+    targets = [str(chat_id)] if chat_id else NOTIFY_IDS
+    for cid in targets:
         try:
-            # Load timeframes
-            df_h1 = self.load_data(pair, "H1", 200)
-            df_h4 = self.load_data(pair, "H4", 100)
-            
-            if df_h1 is None or df_h4 is None:
-                result["error"] = f"Failed to load data for {pair}"
-                return result
-            
-            # Adjust composer parameters based on asset
-            atr_mult = self.get_atr_multiplier(pair)
-            
-            # Generate signal with adjusted parameters
-            signal = self.composer.compose(
-                df_h1=df_h1,
-                df_h4=df_h4,
-                account_balance=account_balance,
-            )
-            
-            # Adjust stop loss based on asset volatility
-            if signal.direction != "HOLD" and atr_mult != 1.0:
-                original_sl = signal.stop_loss
-                if signal.direction == "BUY":
-                    signal.stop_loss = signal.entry_price - (signal.entry_price - original_sl) * atr_mult
-                else:
-                    signal.stop_loss = signal.entry_price + (original_sl - signal.entry_price) * atr_mult
-            
-            # Convert to dict
-            result["signal"] = {
-                "direction": signal.direction,
-                "strength": signal.strength.value,
-                "entry_price": round(signal.entry_price, 5),
-                "stop_loss": round(signal.stop_loss, 5),
-                "take_profit": [round(tp, 5) for tp in signal.take_profit],
-                "volume": round(signal.volume, 2),
-                "confidence": round(signal.confidence, 1),
-                "session": signal.session,
-                "reasons": signal.reasons,
-                "warnings": signal.warnings,
-                "bonus": signal.bonus,
-                "asset_type": self._classify_asset(pair),
-            }
-            
-            # Add VSA and AT details if requested
-            result["details"] = {
-                "vsa": check_vsa_signal(df_h1, signal.direction if signal.direction != "HOLD" else "BUY"),
-                "alphatrend": get_at_confluence(df_h1, df_h4, "BUY"),
-            }
-            
-            logger.info(f"Signal for {pair}: {signal.direction} (conf: {signal.confidence})")
-            
+            requests.post(f"{TELEGRAM_API}/sendMessage",
+                json={"chat_id":cid,"text":msg,"parse_mode":"HTML"},timeout=10)
+        except Exception as e: log(f"telegram error {cid}: {e}")
+
+def get_ohlcv(interval="1h", bars=200):
+    try:
+        sym_map = {"XAUUSD":"XAU/USD","EURUSD":"EUR/USD","BTCUSD":"BTC/USD"}
+        sym = sym_map.get(SYMBOL, SYMBOL)
+        r = requests.get("https://api.twelvedata.com/time_series",
+            params={"symbol":sym,"interval":interval,"outputsize":bars,
+                    "apikey":TWELVE_KEY,"format":"JSON"},timeout=15)
+        data = r.json()
+        if "values" not in data: return None
+        import pandas as pd
+        df = pd.DataFrame(data["values"])
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.sort_values("datetime").reset_index(drop=True)
+        df.set_index("datetime",inplace=True)
+        df.index = df.index.tz_localize("UTC")
+        for c in ["open","high","low","close"]:
+            df[c] = df[c].astype(float)
+        if "volume" in df.columns: df["volume"] = df["volume"].astype(float)
+        return df
+    except Exception as e: print(f"DEBUG_ERROR: {e}"); log(f"ohlcv error: {e}"); return None
+
+def is_market_open():
+    now = datetime.now(timezone.utc)
+    if now.weekday()==5: return now.hour<22
+    if now.weekday()==6: return now.hour>=22
+    return True
+
+def signal_loop():
+    log("📡 Signal loop started")
+    while True:
+        try:
+            if not is_market_open():
+                log("🔴 ตลาดปิด"); time.sleep(POLL_INTERVAL); continue
+            log("⏳ Fetching 4H/1H/15M...")
+            df_4h  = get_ohlcv("4h",  100)
+            df_1h  = get_ohlcv("1h",  200)
+            df_15m = get_ohlcv("15min",96)
+            if df_4h is None or df_1h is None or df_15m is None:
+                log("⚠️ ดึงข้อมูลไม่ครบ"); time.sleep(POLL_INTERVAL); continue
+            price = float(df_15m["close"].iloc[-1])
+            log(f"💰 {SYMBOL}: {price:,.2f}")
+            trend = analyze_trend(df_4h, df_1h, df_15m, SYMBOL)
+            if should_send_trend_alert(trend.session):
+                send_telegram(format_trend_message(trend))
+                log("📊 Trend: " + trend.session + " " + trend.bias)
+
+            sig = compute_signal(df_4h, df_1h, df_15m)
+            if sig:
+                sig_dict = signal_to_dict(sig)
+                port = int(os.getenv("PORT",8080))
+                try:
+                    requests.post(f"http://localhost:{port}/webhook/signal",
+                                  json=sig_dict, timeout=3)
+                except: pass
+                tp1 = sig.partial[0]["price"] if sig.partial else sig.tp_final
+                tp2 = sig.partial[1]["price"] if len(sig.partial) > 1 else sig.tp_final
+                msg = format_signal_message(
+                    direction=sig.direction, signal_type=sig.signal_type,
+                    entry=sig.entry, sl=sig.sl, tp1=tp1, tp2=tp2,
+                    pattern=sig.pattern, score=sig.score, session=trend.session,
+                )
+                send_telegram(msg)
+                log("Signal: " + sig.direction + " " + sig.signal_type + " Score:" + str(sig.score))
+            else:
+                log(f"⏳ No signal | {price:,.2f}")
+
+            try:
+                from scenario_scanner import run_scenario_scan
+                zones = run_scenario_scan(df_15m)
+                if zones:
+                    log(f"🔍 Scenarios active: {len(zones)}")
+            except Exception as e:
+                log(f"⚠️ scenario_scanner error: {e}")
+
+        except Exception as e: log(f"signal_loop error: {e}")
+        time.sleep(POLL_INTERVAL)
+
+def command_loop():
+    global last_update_id
+    log("🤖 Command loop started")
+    while True:
+        try:
+            r = requests.get(f"{TELEGRAM_API}/getUpdates",
+                params={"offset":last_update_id+1,"timeout":2,"allowed_updates":["message"]},
+                timeout=10)
+            data = r.json()
+            if not data.get("ok"):
+                last_update_id=0; time.sleep(5); continue
+            updates = data.get("result",[])
+            if updates:
+                last_update_id = updates[-1]["update_id"]
+                for upd in updates:
+                    msg  = upd.get("message",{})
+                    text = msg.get("text","").strip()
+                    cid  = msg.get("chat",{}).get("id")
+                    if text and cid: handle_cmd(text, cid)
+        except requests.exceptions.Timeout: pass
+        except Exception as e: log(f"cmd error: {e}"); time.sleep(10)
+        time.sleep(3)
+
+def handle_cmd(text, chat_id):
+    t = text.lower()
+    if t == "/start":
+        send_telegram(format_welcome_message(), chat_id)
+    elif t == "/status":
+        send_telegram("v5 Market:" + ("Open" if is_market_open() else "Closed"), chat_id)
+    elif t == "/price":
+        df = get_ohlcv("15min", 1)
+        p = float(df["close"].iloc[-1]) if df is not None else 0
+        send_telegram("XAUUSD: " + "{:,.2f}".format(p), chat_id)
+    elif t == "/health":
+        send_telegram("Bot running | Latest: " + latest_signal.get("direction", "none"), chat_id)
+    elif t == "/context":
+        try:
+            from context_engine import get_context_status
+            s = get_context_status()
+            msg = "Market Context"
+            msg += "\nNews : " + ("OK" if s["news_safe"] else "BLOCK") + " " + str(s["news_reason"])
+            msg += "\nF&G  : " + str(s["fear_greed"])
+            msg += "\nDXY  : " + str(s["dxy_trend"])
+            msg += "\nCOT  : " + str(s["cot_rank"])
+            msg += "\nTime : " + str(s["timestamp"])
         except Exception as e:
-            logger.error(f"Error generating signal for {pair}: {e}")
-            result["error"] = str(e)
-        
-        return result
-    
-    def _classify_asset(self, asset: str) -> str:
-        """Classify asset type"""
-        asset_upper = asset.upper()
-        
-        if asset_upper in ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD"]:
-            return "forex_major"
-        elif asset_upper in ["JPN225", "US100", "NAS100", "NDX", "NI225"]:
-            return "index"
-        elif asset_upper in ["XAUUSD", "XAGUSD"]:
-            return "metal"
-        elif asset_upper in ["WTI", "BRENT", "CL", "USOIL", "UKOIL"]:
-            return "oil"
-        else:
-            return "unknown"
-    
-    def scan_all_pairs(
-        self,
-        assets: List[str],
-        min_confidence: float = 70.0,
-    ) -> List[Dict]:
-        """Scan multiple assets and return only strong signals"""
-        
-        signals = []
-        
-        for asset in assets:
-            logger.info(f"Scanning {asset}...")
-            result = self.generate_signal(asset)
-            
-            if result["signal"]:
-                signal = result["signal"]
-                if signal["direction"] != "HOLD" and signal["confidence"] >= min_confidence:
-                    signals.append(result)
-        
-        # Sort by confidence
-        signals.sort(key=lambda x: x["signal"]["confidence"], reverse=True)
-        
-        return signals
+            msg = "Context error: " + str(e)
+        send_telegram(msg, chat_id)
+    elif t == "/setup":
+        try:
+            from early_warning import get_warning_status
+            s = get_warning_status("XAUUSD")
+            if s["stage"] == 0:
+                msg = "⚡ Setup Status\n⏳ No active setup"
+            else:
+                stage_emoji = {1: "👀", 2: "🎯", 3: "🚀"}
+                msg = "⚡ Setup Status"
+                msg += "\n" + stage_emoji.get(s["stage"], "") + " Stage: " + str(s["status"])
+                msg += "\nDir    : " + str(s.get("direction", "N/A"))
+                msg += "\nScore  : " + str(s.get("score", 0))
+                if s.get("pattern"):
+                    msg += "\nPattern: " + str(s["pattern"])
+                if s.get("setup_price"):
+                    msg += "\nPrice  : " + "{:,.2f}".format(s["setup_price"])
+        except Exception as e:
+            msg = "Setup error: " + str(e)
+        send_telegram(msg, chat_id)
+    elif t in ("/quota", "/newlicense", "/newtrial", "/licenses") or \
+         t.startswith("/newlicense ") or t.startswith("/newtrial ") or \
+         t.startswith("/revoke ") or t.startswith("/extend ") or \
+         t.startswith("/quota "):
+        try:
+            from license_manager import handle_admin_command
+            msg = handle_admin_command(t)
+        except Exception as e:
+            msg = "License error: " + str(e)
+        send_telegram(msg, chat_id)
+    elif t == "/session":
+        try:
+            from session_weight import format_session_status, should_close_asia_positions
+            msg = format_session_status()
+            close = should_close_asia_positions()
+            if close["should_close"]:
+                msg += "\n" + ("URGENT" if close["urgent"] else "INFO") + ": " + close["reason"]
+        except Exception as e:
+            msg = "Session error: " + str(e)
+        send_telegram(msg, chat_id)
+    elif t == "/test_sniper":
+        msg = "🎯 <b>[SNIPER TEST MODE]</b>\nStatus: <b>ARMED</b>\nDirection: BUY\nTrap Price: 2350.00\nTP Target: 2356.00 (6 points)\nSL Level: 2347.00\n\nสถานะ: รอราคากระชากแตะพิกัด..."
+        send_telegram(msg, chat_id)
+    elif t in ("/help", "/?"):
+        send_telegram("/status /price /health /context /setup\n/quota /newlicense /newtrial /revoke /extend /licenses", chat_id)
 
-# ─────────────────────────────────────────────
-# CLI Interface
-# ─────────────────────────────────────────────
+if __name__ == "__main__":
+    print("🐃 ALPHA BUFFALO v5 (Sniper Ambush) started\n")
+    threading.Thread(target=command_loop, daemon=True).start()
+    threading.Thread(target=signal_loop,  daemon=True).start()
+    port = int(os.getenv("PORT",8080))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Alpha Buffalo v5.2 Signal Generator"
-    )
-    
-    parser.add_argument(
-        "--asset",
-        type=str,
-        help="Asset to analyze (EURUSD, JPN225, US100, etc.)"
-    )
-    
-    parser.add_argument(
-        "--all-assets",
-        action="store_true",
-        help="Scan all configured assets"
-    )
-    
-    parser.add_argument(
-        "--assets",
-        type=str,
-        help="Comma-separated list of assets"
-    )
-    
-    parser.add_argument(
-        "--data-dir",
-        type=str,
-        default="./data",
-        help="Data directory"
-    )
-    
-    parser.add_argument(
-        "--min-confidence",
-        type=float,
-        default=60.0,
-        help="Minimum confidence for signal (0-100)"
-    )
-    
-    parser.add_argument(
-        "--output",
-        type=str,
-        choices=["console", "json", "csv"],
-        default="console",
-        help="Output format"
-    )
-    
-    parser.add_argument(
-        "--balance",
-        type=float,
-        default=10000.0,
-        help="Account balance for position sizing"
-    )
-    
-    args = parser.parse_args()
-    
-    # Initialize generator
-    generator = AlphaBuffaloSignalGenerator(
-        data_dir=args.data_dir,
-        min_confidence=args.min_confidence,
-    )
-    
-    # Determine which assets to scan
-    default_assets = ["EURUSD", "JPN225", "US100"]
-    
-    if args.all_assets:
-        assets = default_assets
-    elif args.assets:
-        assets = [a.strip().upper() for a in args.assets.split(",")]
-    elif args.asset:
-        assets = [args.asset.upper()]
+def compute_dynamic_lot(signal, df_1h, account_balance=10000, risk_percent=0.01):
+    tr = pd.concat([df_1h['high']-df_1h['low'],
+                    (df_1h['high']-df_1h['close'].shift(1)).abs(),
+                    (df_1h['low']-df_1h['close'].shift(1)).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean().iloc[-1]
+    if signal.direction == "BUY":
+        sl_distance = abs(signal.entry_price - signal.sl_price)
     else:
-        assets = default_assets
-    
-    # Generate signals
-    if len(assets) == 1:
-        result = generator.generate_signal(assets[0], args.balance)
-        signals = [result] if result["signal"] else []
+        sl_distance = abs(signal.sl_price - signal.entry_price)
+    risk_amount = account_balance * risk_percent
+    if sl_distance > 0:
+        base_lot = risk_amount / sl_distance
     else:
+beta-sniper
         signals = generator.scan_all_pairs(assets, args.min_confidence)
     
     # Output results
@@ -482,6 +532,7 @@ def compute_dynamic_lot(signal, df_1h, account_balance=10000, risk_percent=0.01)
     if sl_distance > 0:
         base_lot = risk_amount / sl_distance
     else:
+ main
         base_lot = 0
     atr_normal = atr / signal.entry_price
     if atr_normal > 0.02:
@@ -492,6 +543,9 @@ def compute_dynamic_lot(signal, df_1h, account_balance=10000, risk_percent=0.01)
         base_lot *= signal.position_multiplier
     max_lot = account_balance * 0.1 / signal.entry_price
     return min(base_lot, max_lot)
+beta-sniper
 
     main()
+ main
+
  main
