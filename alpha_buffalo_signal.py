@@ -21,6 +21,7 @@ from vsa_gate import check_vsa_signal
 from micro_engine import detect_spike_15m
 from harmonic_detector import run_harmonic, get_active_prz
 from kivanc_vsaob import run_kivanc
+from license_manager import get_license_manager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -97,6 +98,18 @@ def main():
     parser.add_argument("--data-dir", default="./data")
     parser.add_argument("--output", choices=["console", "json"], default="console")
     args = parser.parse_args()
+
+    
+    # --- License Validation ---
+    license_key = os.getenv("LICENSE_KEY", "")
+    if license_key:
+        lm = get_license_manager()
+        if not lm.validate_license(license_key):
+            print("❌ Invalid or expired license key. Exiting.")
+            return
+        print(f"✅ License valid: {license_key}")
+    else:
+        print("⚠️ No LICENSE_KEY set, running in demo mode (no quota check)")
 
     assets = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "JPN225", "US100"] if args.all_assets else [args.asset.upper()]
     use_vsa = os.getenv("USE_VSA", "TRUE").upper() == "TRUE"
