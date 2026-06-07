@@ -25,4 +25,4 @@ def calc_pdh_pdl(df):
     else:
         pdh = daily_high.iloc[-1]
         pdl = daily_low.iloc[-1]
-    return pdh, pdl
+    return pdh, pdl# force rebuild Sun Jun  7 16:17:00 +07 2026
