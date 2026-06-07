@@ -314,3 +314,27 @@ def run_micro(df_15m: pd.DataFrame) -> list[MicroSignal]:
 
 def get_micro_summary() -> str:
     return micro_engine.summary()
+
+def detect_spike_15m(df, atr_mult=1.5):
+    """
+    ตรวจจับ spike ใน 15M candle
+    คืนค่า (spike_detected: bool, spike_type: str or None)
+    """
+    if len(df) < 2:
+        return False, None
+    # คำนวณ ATR แบบง่าย
+    tr = pd.concat([
+        df['high'] - df['low'],
+        (df['high'] - df['close'].shift(1)).abs(),
+        (df['low'] - df['close'].shift(1)).abs()
+    ], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean().iloc[-1]
+    last = df.iloc[-1]
+    body = abs(last['close'] - last['open'])
+    candle_range = last['high'] - last['low']
+    if candle_range > atr * atr_mult and body > candle_range * 0.6:
+        if last['close'] > last['open']:
+            return True, 'bullish'
+        else:
+            return True, 'bearish'
+    return False, None
