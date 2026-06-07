@@ -8,3 +8,4 @@ uvicorn[standard]
 pydantic
 yfinance>=0.2.0
 requests
+aiohttp>=3.9.0
