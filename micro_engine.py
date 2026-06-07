@@ -46,3 +46,23 @@ def run_micro(df_15m):
     """ฟังก์ชันหลักที่ signal_composer เรียก"""
     engine = MicroEngine()
     return engine.update(df_15m)
+
+class MicroSignal:
+    """Signal from micro engine (sweep, session H/L, etc.)"""
+    def __init__(self, direction: str, trigger: str, confluence_score: int = 1):
+        self.direction = direction
+        self.trigger = trigger
+        self.confluence_score = confluence_score
+
+def get_micro_summary(signals):
+    """Return summary of micro signals"""
+    if not signals:
+        return {"has_signal": False, "buy_count": 0, "sell_count": 0, "bias": "NEUTRAL"}
+    buy_count = sum(1 for s in signals if s.direction == "BUY")
+    sell_count = sum(1 for s in signals if s.direction == "SELL")
+    return {
+        "has_signal": len(signals) > 0,
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "bias": "BUY" if buy_count > sell_count else ("SELL" if sell_count > buy_count else "NEUTRAL")
+    }
