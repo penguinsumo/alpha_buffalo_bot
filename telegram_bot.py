@@ -51,3 +51,9 @@ def root():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+@app.get("/verify_license")
+def verify_license(key: str):
+    from license_manager import get_license_manager
+    valid = get_license_manager().validate_license(key)
+    return {"valid": valid, "key": key}
