@@ -92,7 +92,7 @@ def get_current_session():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--asset", default="EURUSD")
+    parser.add_argument("--asset", default="XAUUSD", help="Asset(s), comma-separated e.g. XAUUSD,US100,JPN225")
     parser.add_argument("--all-assets", action="store_true")
     parser.add_argument("--data-dir", default="./data")
     parser.add_argument("--output", choices=["console", "json"], default="console")
