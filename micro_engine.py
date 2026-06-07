@@ -14,7 +14,7 @@ def calc_pdh_pdl(df):
         else:
             from datetime import timedelta
             start = datetime.now() - timedelta(hours=len(df))
-            df.index = pd.date_range(start=start, periods=len(df), freq='H')
+            df.index = pd.date_range(start=start, periods=len(df), freq='h')
     if df.index.tzinfo is None:
         df.index = df.index.tz_localize('UTC')
     df['date'] = df.index.date
