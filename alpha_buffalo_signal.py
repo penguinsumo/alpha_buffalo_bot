@@ -1,183 +1,219 @@
-#!/usr/bin/env python3
-"""
-Alpha Buffalo v5.2 - Signal Generator with VSA gate + Event-driven spike
-Auto-fetches from Twelve Data API when local CSV missing.
-"""
-
-import argparse
-import json
-import logging
+# alpha_buffalo_signal.py
 import os
-import requests
+import logging
+import json
 from datetime import datetime
-from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
+from contextlib import asynccontextmanager
 
-import pandas as pd
-import numpy as np
+from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+import aiohttp
+import uvicorn
 
-from signal_composer import compose_signal
-from vsa_gate import check_vsa_signal
-from micro_engine import detect_spike_15m
-from harmonic_detector import run_harmonic, get_active_prz
-from kivanc_vsaob import run_kivanc
-from license_manager import get_license_manager
+# โมดูลภายในระบบ
+from signal_engine import SignalEngine
+from score_manager import ScoreManager
+from vsa_gate import VSAGate
+from license_manager import LicenseManager
+from telegram_broadcaster import TelegramBroadcaster
 
+# ------------------------- Config -------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Environment variables
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+NOTIFY_IDS = os.getenv("NOTIFY_IDS", "").split(",")
+VALID_LICENSES = os.getenv("VALID_LICENSES", "").split(",")
+TWELVE_API_KEY = os.getenv("TWELVE_API_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+TRADE_SYMBOL = os.getenv("TRADE_SYMBOL", "XAUUSD")
+TV_WEBHOOK_PASSPHRASE = os.getenv("TV_WEBHOOK_PASSPHRASE", "TV_SECRET_2026")
 
-def fetch_from_twelvedata(asset, timeframe, bars=500):
-    """Fetch OHLCV from Twelve Data API"""
-    symbol_map = {'XAUUSD': 'XAU/USD', 'US100': 'NAS100', 'JPN225': 'N225'}
-    symbol = symbol_map.get(asset, asset.replace('USD', '/USD') if asset.endswith('USD') else asset)
-    interval_map = {'H1': '1h', 'H4': '4h', 'M15': '15min'}
-    interval = interval_map.get(timeframe, '1h')
-    api_key = os.getenv('TWELVE_API_KEY')
-    if not api_key:
-        print("   ❌ TWELVE_API_KEY not set")
-        return None
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize={bars}&apikey={api_key}"
-    try:
-        resp = requests.get(url, timeout=15).json()
-        if 'values' not in resp:
-            print(f"   ⚠️ Twelve Data error: {resp.get('message', 'No data')}")
-            return None
-        df = pd.DataFrame(resp['values'])
-        df['datetime'] = pd.to_datetime(df['datetime'])
-        df = df.rename(columns={'datetime': 'time', 'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close', 'volume': 'volume'})
-        df = df[['time', 'open', 'high', 'low', 'close', 'volume']].astype(float)
-        df.set_index('time', inplace=True)
-        df = df.iloc[::-1]  # oldest first
-        print(f"   📡 Fetched {len(df)} bars for {asset} {timeframe} from Twelve Data")
-        return df
-    except Exception as e:
-        print(f"   ❌ Twelve Data error: {e}")
-        return None
+# ------------------------- Global Instances -------------------------
+telegram_broadcaster = TelegramBroadcaster(TELEGRAM_TOKEN, NOTIFY_IDS)
+license_manager = LicenseManager(supabase_url=SUPABASE_URL, supabase_key=SUPABASE_KEY)
+signal_engine = SignalEngine()
+score_manager = ScoreManager()
+vsa_gate = VSAGate()
 
+# ------------------------- Pydantic Models -------------------------
+class CloudSignal(BaseModel):
+    timestamp: str
+    direction: str  # BUY / SELL / NO_SIGNAL
+    score: int
+    entry: float
+    tp1: float
+    tp2: float
+    sl: float
+    visual_sl: float
+    zone_valid: bool = True
+    vsa_bias: str = "NEUTRAL"
+    is_v5: bool = False
+    v5_tp1: Optional[float] = None
+    v5_tp2: Optional[float] = None
+    reentry_ok: bool = False
+    next_pattern: Optional[str] = None
+    d_point: Optional[float] = None
 
-def load_data(data_dir: str, asset: str, timeframe: str, bars: int = 500) -> Optional[pd.DataFrame]:
-    data_path = Path(data_dir)
-    fp = data_path / f"{asset}_{timeframe}.csv"
-    if fp.exists():
-        # Read from CSV
-        df = pd.read_csv(fp)
-        df.columns = [c.lower().strip() for c in df.columns]
-        if 'time' in df.columns:
-            df['time'] = pd.to_datetime(df['time'])
-            df.set_index('time', inplace=True)
-        elif 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'])
-            df.set_index('date', inplace=True)
-        required = ['open', 'high', 'low', 'close']
-        if all(c in df.columns for c in required):
-            if 'volume' not in df.columns:
-                df['volume'] = 1000000
-            return df.tail(bars)
-        else:
-            print(f"   ⚠️ CSV {fp} missing columns, falling back to API")
-            return fetch_from_twelvedata(asset, timeframe, bars)
-    else:
-        return fetch_from_twelvedata(asset, timeframe, bars)
+class TVWebhookPayload(BaseModel):
+    passphrase: str
+    direction: Optional[str] = None
+    price: Optional[float] = None
+    timestamp: Optional[str] = None
 
+class ReentryRequest(BaseModel):
+    key: str
+    order_ticket: int
+    symbol: str = TRADE_SYMBOL
 
-def get_current_session():
-    hour = datetime.now().hour
-    if 0 <= hour < 9:
-        return "ASIA"
-    elif 9 <= hour < 17:
-        return "LONDON"
-    else:
-        return "NY"
+# ------------------------- Helper Functions -------------------------
+def broadcast_signal(signal_text: str):
+    """ส่งข้อความไปยัง Telegram โดยใช้ TelegramBroadcaster (sync)"""
+    if not telegram_broadcaster:
+        logger.error("TelegramBroadcaster not initialized")
+        return
+    telegram_broadcaster.send_message_sync(signal_text)
 
+def format_signal_message(signal: CloudSignal) -> str:
+    """จัดรูปแบบข้อความให้เหมือนเดิม (ไม่ให้กระทบลูกค้า)"""
+    emoji = "🟢" if signal.direction == "BUY" else "🔴" if signal.direction == "SELL" else "⚪"
+    v5_tag = " [V5]" if signal.is_v5 else ""
+    msg = f"{emoji} Alpha Buffalo{v5_tag}\n"
+    msg += f"📊 {signal.direction}\n"
+    msg += f"🎯 Score: {signal.score}\n"
+    msg += f"💰 Entry: {signal.entry:.2f}\n"
+    msg += f"📈 TP1: {signal.tp1:.2f}  TP2: {signal.tp2:.2f}\n"
+    msg += f"🛡️ SL: {signal.sl:.2f} (Visual: {signal.visual_sl:.2f})\n"
+    if signal.vsa_bias != "NEUTRAL":
+        msg += f"💧 VSA: {signal.vsa_bias}\n"
+    if signal.is_v5 and signal.v5_tp1:
+        msg += f"🦋 V5 TP1: {signal.v5_tp1:.2f}  TP2: {signal.v5_tp2:.2f}\n"
+    msg += f"⏱️ {signal.timestamp}"
+    return msg
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--asset", default="XAUUSD", help="Asset(s), comma-separated e.g. XAUUSD,US100,JPN225")
-    parser.add_argument("--all-assets", action="store_true")
-    parser.add_argument("--data-dir", default="./data")
-    parser.add_argument("--output", choices=["console", "json"], default="console")
-    args = parser.parse_args()
+# ------------------------- FastAPI Lifespan -------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Alpha Buffalo v5.2 starting...")
+    # ตรวจสอบการเชื่อมต่อ APIs (optional)
+    yield
+    # Shutdown
+    logger.info("Shutting down...")
 
+app = FastAPI(title="Alpha Buffalo Signal Bot", version="5.2", lifespan=lifespan)
+
+# ------------------------- Endpoints -------------------------
+@app.get("/health")
+async def health_check():
+    return {"status": "alive", "version": "5.2", "timestamp": datetime.utcnow().isoformat()}
+
+@app.get("/signal/latest")
+async def get_latest_signal(key: str):
+    """EA เรียก endpoint นี้ทุก 2-3 วินาที เพื่อรับสัญญาณล่าสุด"""
+    # ตรวจสอบ license
+    if not license_manager.validate_key(key):
+        return JSONResponse(status_code=403, content={"error": "Invalid or expired license key"})
     
-    # --- License Validation ---
-    license_key = os.getenv("LICENSE_KEY", "")
-    if license_key:
-        lm = get_license_manager()
-        if not lm.validate_license(license_key):
-            print("❌ Invalid or expired license key. Exiting.")
-            return
-        print(f"✅ License valid: {license_key}")
-    else:
-        print("⚠️ No LICENSE_KEY set, running in demo mode (no quota check)")
+    # เช็ค quota (สำหรับ TRIAL/BASIC)
+    if not license_manager.check_quota(key):
+        return JSONResponse(status_code=429, content={"error": "Daily quota exceeded"})
+    
+    # ดึง OHLCV ล่าสุด (ใช้ TwelveData หรือ cache)
+    ohlcv = signal_engine.fetch_ohlcv(symbol=TRADE_SYMBOL)
+    if not ohlcv:
+        return JSONResponse(status_code=503, content={"error": "Cannot fetch market data"})
+    
+    # คำนวณสัญญาณ
+    signal = signal_engine.calculate_signal(ohlcv)
+    
+    # ถ้าเป็น NO_SIGNAL หรือ score ไม่ถึง threshold -> ไม่ส่ง signal
+    if signal.direction == "NO_SIGNAL" or signal.score < 4:
+        return {"status": "NO_SIGNAL", "score": signal.score}
+    
+    # บันทึกการใช้ quota
+    license_manager.increment_usage(key)
+    
+    # บันทึก signal ลงฐานข้อมูล (Supabase)
+    try:
+        # TODO: insert into signals table
+        pass
+    except Exception as e:
+        logger.error(f"Failed to save signal: {e}")
+    
+    # Broadcast ไปยัง Telegram (เฉพาะ signal ที่ผ่าน threshold)
+    if signal.score >= 4:
+        msg = format_signal_message(signal)
+        broadcast_signal(msg)
+    
+    # ส่งกลับไปยัง EA
+    return signal.dict()
 
-    assets = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "JPN225", "US100"] if args.all_assets else [args.asset.upper()]
-    use_vsa = os.getenv("USE_VSA", "TRUE").upper() == "TRUE"
+@app.get("/signal/history")
+async def get_signal_history(key: str, limit: int = 50):
+    """ดูประวัติสัญญาณ (สำหรับ debug)"""
+    if not license_manager.validate_key(key):
+        return JSONResponse(status_code=403, content={"error": "Invalid license"})
+    # TODO: ดึงจาก Supabase
+    return {"history": [], "message": "Not implemented yet"}
 
-    print("\n" + "=" * 70)
-    print(f"🐂 ALPHA BUFFALO v5.2 with VSA (Event-driven spike)")
-    print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | VSA: {'ON' if use_vsa else 'OFF'}")
-    print("=" * 70)
+@app.post("/signal/zone_check")
+async def check_zone_validity(key: str, order_ticket: int, symbol: str = TRADE_SYMBOL):
+    """EA เรียกเพื่อตรวจสอบว่า zone ยัง valid หรือไม่ (ใช้สำหรับ reentry)"""
+    if not license_manager.validate_key(key):
+        return JSONResponse(status_code=403, content={"error": "Invalid license"})
+    
+    # ดึงข้อมูล zone ปัจจุบัน (mock)
+    # จริง ๆ ต้องใช้ signal_engine หรือ cache
+    ohlcv = signal_engine.fetch_ohlcv(symbol)
+    zone_valid = signal_engine.is_zone_still_valid(ohlcv)
+    vsa_ok = vsa_gate.check_reentry_ok(ohlcv)
+    
+    return {"zone_valid": zone_valid, "vsa_ok": vsa_ok}
 
-    results = []
-    last_session = None
+@app.post("/signal/reentry")
+async def reentry_order(req: ReentryRequest):
+    """ให้ EA ขอเปิดออเดอร์ใหม่หลังจาก visual SL ถูก hit"""
+    if not license_manager.validate_key(req.key):
+        return JSONResponse(status_code=403, content={"error": "Invalid license"})
+    
+    # ตรวจสอบ zone + VSA อีกครั้ง
+    ohlcv = signal_engine.fetch_ohlcv(req.symbol)
+    if not signal_engine.is_zone_still_valid(ohlcv):
+        return {"allowed": False, "reason": "Zone invalid"}
+    if not vsa_gate.check_reentry_ok(ohlcv):
+        return {"allowed": False, "reason": "VSA not ok"}
+    
+    # สร้างสัญญาณใหม่ (อาจใช้ cached signal)
+    new_signal = signal_engine.calculate_signal(ohlcv)
+    if new_signal.direction == "NO_SIGNAL":
+        return {"allowed": False, "reason": "No signal"}
+    
+    # บันทึกการใช้ quota อีกครั้ง (optional)
+    license_manager.increment_usage(req.key)
+    
+    return {"allowed": True, "signal": new_signal.dict()}
 
-    for asset in assets:
-        print(f"\n📊 {asset}")
-        df_4h = load_data(args.data_dir, asset, "H4", 100)
-        df_1h = load_data(args.data_dir, asset, "H1", 200)
-        df_15m = load_data(args.data_dir, asset, "M15", 500)
+@app.post("/webhook/tv")
+async def tradingview_webhook(payload: TVWebhookPayload):
+    """รับสัญญาณจาก TradingView Alert (Forward Test)"""
+    if payload.passphrase != TV_WEBHOOK_PASSPHRASE:
+        raise HTTPException(status_code=401, detail="Invalid passphrase")
+    
+    # สร้างข้อความแจ้งเตือน
+    msg = f"📡 TradingView Alert\n"
+    msg += f"Direction: {payload.direction}\n"
+    msg += f"Price: {payload.price}\n"
+    msg += f"Time: {payload.timestamp or datetime.utcnow().isoformat()}"
+    broadcast_signal(msg)
+    
+    return {"status": "ok", "received": True}
 
-        if df_4h is None or df_1h is None or df_15m is None:
-            print("   ⚠️ Missing data for one or more timeframes")
-            continue
-
-        current_session = get_current_session()
-        spike_detected = False
-        if current_session != last_session:
-            print(f"   🔄 Session changed: {last_session} -> {current_session} | Checking spike...")
-            spike_detected, spike_type = detect_spike_15m(df_15m)
-            if spike_detected:
-                prz_list = run_harmonic(df_4h) + run_harmonic(df_1h)
-                price = df_1h['close'].iloc[-1]
-                active_prz = get_active_prz(prz_list, price, 0.002)
-                kivanc = run_kivanc(df_1h)
-                in_prz = len(active_prz) > 0
-                in_ob = (kivanc is not None and (
-                    (kivanc.direction == "BUY" and price <= kivanc.zone_high) or
-                    (kivanc.direction == "SELL" and price >= kivanc.zone_low)
-                ))
-                if not (in_prz or in_ob):
-                    print(f"   ⚠️ Spike ignored (no PRZ/OB)")
-                    spike_detected = False
-            last_session = current_session
-
-        signal = compose_signal(df_4h, df_1h, df_15m)
-        if signal:
-            if use_vsa:
-                vsa = check_vsa_signal(
-                    df=df_1h,
-                    direction=signal.direction,
-                    asia_mode=(current_session == "ASIA"),
-                    spike_detected=spike_detected,
-                    lookback=20
-                )
-                if not vsa["ok"]:
-                    print(f"   ❌ VSA REJECT: {vsa['reason']}")
-                    continue
-                else:
-                    print(f"   ✅ VSA OK: {vsa['reason']} (bonus={vsa['bonus']})")
-            emoji = "🟢" if signal.direction == "BUY" else "🔴"
-            print(f"   {emoji} {signal.direction} | {signal.signal_type} | Score: {signal.confluence_score}")
-            print(f"   Entry: {signal.entry_price:.5f}  SL: {signal.sl_price:.5f}  TP1: {signal.tp1_price:.5f}  TP2: {signal.tp2_price:.5f}")
-            results.append({"asset": asset, "direction": signal.direction, "entry": signal.entry_price})
-        else:
-            print("   ⚪ No signal")
-
-    if args.output == "json":
-        print(json.dumps(results, indent=2))
-    return results
-
-
+# ------------------------- Main -------------------------
 if __name__ == "__main__":
-    main()
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
