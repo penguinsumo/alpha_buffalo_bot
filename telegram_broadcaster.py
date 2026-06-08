@@ -13,6 +13,9 @@ class TelegramBroadcaster:
 
     async def send_message(self, text: str, chat_ids: Optional[List[str]] = None) -> List[bool]:
         targets = chat_ids if chat_ids is not None else self.default_chat_ids
+        if not targets:
+            logger.warning("No chat IDs to send")
+            return []
         results = []
         async with aiohttp.ClientSession() as session:
             for chat_id in targets:
@@ -37,11 +40,13 @@ class TelegramBroadcaster:
         return results
 
     def send_message_sync(self, text: str, chat_ids: Optional[List[str]] = None) -> List[bool]:
+        """Synchronous wrapper for use in FastAPI endpoints"""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
         if loop and loop.is_running():
+            # Running in async context, use thread pool
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(asyncio.run, self.send_message(text, chat_ids))
