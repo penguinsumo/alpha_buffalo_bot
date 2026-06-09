@@ -1,0 +1,4 @@
+  File "/Users/mac/alpha_buffalo_bot/alpha_buffalo_signal.py", line 4
+    alpha_buffalo_signal.py — Alpha Buffalo v5.3 (Mac Server Production)
+                            ^
+SyntaxError: invalid character '—' (U+2014)
