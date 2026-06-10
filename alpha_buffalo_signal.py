@@ -1,39 +1,32 @@
 """
-alpha_buffalo_signal.py - Alpha Buffalo v5.3 (Mac Server Production)
-- Uses signal_engine (Bridge) to connect real Composer
-- Supports .env for environment variables
-- Ready for health check, polling signal, and fallback
+alpha_buffalo_signal.py - Alpha Buffalo v5.3 (Twelve Data, XAU/USD)
+Hybrid SL, Trend Scheduler, Telegram
 """
-
-import os
-import sys
-import logging
-from datetime import datetime, timezone
+import os, json, pathlib, logging, datetime as dt
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
+from apscheduler.schedulers.background import BackgroundScheduler
+from zoneinfo import ZoneInfo
 
-# Load environment variables from .env (if exists)
 load_dotenv()
-
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Import Engine Bridge (v5.3)
 from signal_engine import get_trade_signal
+from session_clock import get_market_session_info
 
-# Environment Variables
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 NOTIFY_IDS = [x.strip() for x in os.getenv("NOTIFY_IDS", "").split(",") if x.strip()]
 SIGNAL_THRESHOLD = int(os.getenv("SIGNAL_THRESHOLD", "4"))
-TV_PASSPHRASE = os.getenv("TV_WEBHOOK_PASSPHRASE", "TV_SECRET_2026")
 VALID_LICENSES = os.getenv("VALID_LICENSES", "DEMO123")
+HARD_SL_RISK_MULTIPLIER = float(os.getenv("HARD_SL_RISK_MULTIPLIER", "2.0"))
 
-# Telegram Broadcaster (Optional)
+SIGNAL_FILE = pathlib.Path.home() / "Documents" / "AlphaSignal.json"
+
 telegram_broadcaster = None
 if TELEGRAM_TOKEN:
     try:
@@ -42,19 +35,10 @@ if TELEGRAM_TOKEN:
         logger.info("TelegramBroadcaster initialized")
     except Exception as e:
         logger.error(f"Failed to init Telegram: {e}")
-else:
-    logger.warning("TELEGRAM_TOKEN not set - Telegram disabled")
 
-# License Manager (Mock)
-class SimpleLicenseManager:
-    def validate_key(self, key: str) -> bool:
-        return key in VALID_LICENSES.split(",")
-    def check_and_increment_quota(self, key: str) -> bool:
-        return True
+from license_manager import get_license_manager
+license_manager = get_license_manager()
 
-license_manager = SimpleLicenseManager()
-
-# Data Models
 class CloudSignal(BaseModel):
     timestamp: str
     direction: str
@@ -63,14 +47,16 @@ class CloudSignal(BaseModel):
     tp1: float
     tp2: float
     sl: float
+    hard_sl: float
     visual_sl: float
     zone_valid: bool = True
     vsa_bias: str = "NEUTRAL"
     is_v5: bool = False
     v5_tp1: Optional[float] = None
     v5_tp2: Optional[float] = None
+    session: str = "UNKNOWN"
+    signal_type: str = "V4_SESSION"
 
-# Helper Functions
 def broadcast_signal(text: str) -> None:
     if telegram_broadcaster:
         try:
@@ -79,88 +65,146 @@ def broadcast_signal(text: str) -> None:
             logger.error(f"Broadcast failed: {e}")
 
 def format_signal_message(signal: CloudSignal) -> str:
-    emoji = "BUY" if signal.direction == "BUY" else ("SELL" if signal.direction == "SELL" else "NO")
-    v5_tag = " [V5]" if signal.is_v5 else ""
-    msg = (f"{emoji} Alpha Buffalo{v5_tag}\n"
-           f"Direction: {signal.direction}\nScore: {signal.score}\n"
-           f"Entry: {signal.entry:.2f}\nTP1: {signal.tp1:.2f}  TP2: {signal.tp2:.2f}\n"
-           f"SL: {signal.sl:.2f} (Visual: {signal.visual_sl:.2f})")
-    if signal.is_v5 and signal.v5_tp1:
-        msg += f"\nV5 TP1: {signal.v5_tp1:.2f}  TP2: {signal.v5_tp2:.2f}"
-    msg += f"\nTimestamp: {signal.timestamp}"
+    bkk_now = dt.datetime.now(ZoneInfo("Asia/Bangkok"))
+    date_str = bkk_now.strftime('%a %d %b %Y')
+    time_str = bkk_now.strftime('%H:%M')
+    sl_low = min(signal.sl, signal.hard_sl)
+    sl_high = max(signal.sl, signal.hard_sl)
+    sl_zone = f"{sl_low:.1f} - {sl_high:.1f}"
+    msg = (
+        "🐃 ALPHA BUFFALO V5\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 Asset    : XAUUSD\n"
+        f"📊 Type     : {signal.signal_type}\n"
+        f"🎯 Entry    : ~{signal.entry:,.2f}\n"
+        f"🛡️ SL Zone  : {sl_zone}\n"
+        f"🎯 TP1      : {signal.tp1:,.2f}  (M15 ~30min)\n"
+        f"🎯 TP2      : {signal.tp2:,.2f}  (H1  ~2hr)\n"
+        f"⏰ {date_str} | {time_str}\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "✅ EA Executing\n\n"
+        "⚠️ Not financial advice. Trade at your own risk."
+    )
     return msg
 
-# Market Data Fetcher (PLACEHOLDER)
+def write_signal_to_file(signal_dict: Dict[str, Any]) -> None:
+    try:
+        with open(SIGNAL_FILE, "w") as f:
+            json.dump(signal_dict, f, indent=2)
+        logger.info(f"Signal written to {SIGNAL_FILE}")
+    except Exception as e:
+        logger.error(f"Failed to write signal file: {e}")
+
+def compute_hard_sl(direction: str, entry: float, tight_sl: float) -> float:
+    risk = abs(entry - tight_sl)
+    if direction == "BUY":
+        return round(tight_sl - risk * (HARD_SL_RISK_MULTIPLIER - 1), 2)
+    else:
+        return round(tight_sl + risk * (HARD_SL_RISK_MULTIPLIER - 1), 2)
+
+# ── Twelve Data fetcher ──────────────────────────────────
 def fetch_market_data():
-    """
-    Fetch OHLCV data from Twelve Data (or other provider).
-    Returns tuple of DataFrames (df_15m, df_1h, df_4h) or None.
-    """
     try:
         from data_provider_twelvedata import fetch_market_data as td_fetch
-        return td_fetch("XAUUSD")
-    except ImportError:
-        logger.error("data_provider_twelvedata.py not found or TWELVEDATA_API_KEY missing")
+        return td_fetch("XAU/USD")
+    except Exception as e:
+        logger.error(f"Data fetch error: {e}")
         return None, None, None
 
-# FastAPI App
+# ── FastAPI ──────────────────────────────────────────────
 app = FastAPI(title="Alpha Buffalo Signal Bot", version="5.3")
 
 @app.get("/health")
 async def health():
-    return {"status": "alive", "version": "5.3", "timestamp": datetime.now(timezone.utc).isoformat()}
+    return {"status": "alive", "version": "5.3", "timestamp": dt.datetime.now(timezone.utc).isoformat()}
 
 @app.get("/signal/latest")
 async def latest_signal(key: str):
     if not license_manager.validate_key(key):
         return JSONResponse(status_code=403, content={"error": "Invalid license"})
 
-    # 1. Fetch market data
-    try:
-        df_15m, df_1h, df_4h = fetch_market_data()
-    except Exception as e:
-        logger.error(f"Data fetch error: {e}")
-        return JSONResponse(status_code=500, content={"error": "Market data fetch failed"})
+    df_15m, df_1h, df_4h = fetch_market_data()
+    if df_15m is None:
+        resp = {"status": "NO_SIGNAL", "score": 0}
+        write_signal_to_file(resp)
+        return resp
 
-    if df_15m is None or df_1h is None or df_4h is None:
-        return {"status": "NO_SIGNAL", "score": 0, "reason": "Data not available"}
+    trade_signal = get_trade_signal(df_15m, df_1h, df_4h)
+    if trade_signal is None or trade_signal.get("direction") is None:
+        resp = {"status": "NO_SIGNAL", "score": 0}
+        write_signal_to_file(resp)
+        return resp
 
-    # 2. Call Bridge (Composer v5.3)
-    try:
-        trade_signal = get_trade_signal(df_15m, df_1h, df_4h)
-    except Exception as e:
-        logger.error(f"Signal engine error: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"error": "Signal engine failure"})
-
-    if trade_signal is None:
-        return {"status": "NO_SIGNAL", "score": 0}
-
-    # 3. Optional threshold check
     if trade_signal["score"] < SIGNAL_THRESHOLD:
-        return {"status": "NO_SIGNAL", "score": trade_signal["score"]}
+        resp = {"status": "NO_SIGNAL", "score": trade_signal["score"]}
+        write_signal_to_file(resp)
+        return resp
 
-    # 4. Build signal object and broadcast
+    direction = trade_signal["direction"]
+    entry = trade_signal["entry"]
+    tight_sl = trade_signal["sl"]
+    hard_sl = compute_hard_sl(direction, entry, tight_sl)
+    session_info = get_market_session_info()
     is_v5 = trade_signal.get("signal_type") == "V5_SNIPER"
+
     signal = CloudSignal(
-        timestamp=datetime.now(timezone.utc).isoformat(),
-        direction=trade_signal["direction"],
+        timestamp=dt.datetime.now(timezone.utc).isoformat(),
+        direction=direction,
         score=trade_signal["score"],
-        entry=trade_signal["entry"],
+        entry=entry,
         tp1=trade_signal["tp1"],
         tp2=trade_signal["tp2"],
-        sl=trade_signal["sl"],
-        visual_sl=trade_signal["sl"],
+        sl=tight_sl,
+        hard_sl=hard_sl,
+        visual_sl=tight_sl,
         vsa_bias="BULLISH" if trade_signal["score"] > 5 else "NEUTRAL",
         is_v5=is_v5,
         v5_tp1=trade_signal["tp1"] if is_v5 else None,
         v5_tp2=trade_signal["tp2"] if is_v5 else None,
+        session=session_info['session'],
+        signal_type=trade_signal.get("signal_type", "V4_SESSION"),
     )
 
     broadcast_signal(format_signal_message(signal))
-    logger.info(f"Signal sent: {signal.direction} | Score: {signal.score}")
-    return signal.dict()
+    signal_dict = signal.dict()
+    write_signal_to_file(signal_dict)
+    return signal_dict
 
+# ── Main + Scheduler ─────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
+
+    scheduler = BackgroundScheduler()
+    def trend_update_job():
+        try:
+            df_15m, df_1h, df_4h = fetch_market_data()
+            if df_15m is None: return
+            session_info = get_market_session_info()
+            session = session_info['session']
+            price = float(df_15m["close"].iloc[-1])
+            def trend(df):
+                last = df["close"].iloc[-1]
+                ma20 = df["close"].iloc[-20:].mean() if len(df) >= 20 else df["close"].mean()
+                return "⬆️ Bullish" if last > ma20 else "⬇️ Bearish"
+            msg = (
+                "📊 XAUUSD TREND UPDATE\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🕐 Session : {session}\n"
+                f"💰 Price   : {price:,.2f}\n\n"
+                f"➡️ M15  : {trend(df_15m)}\n"
+                f"➡️ H1  : {trend(df_1h)}\n"
+                f"📈 H4  : {trend(df_4h)}\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "⏳ Wait and See...\n\n"
+                "⚠️ Not financial advice. Trade at your own risk."
+            )
+            broadcast_signal(msg)
+        except Exception as e:
+            logger.error(f"Trend update error: {e}")
+
+    scheduler.add_job(trend_update_job, 'interval', hours=1)
+    scheduler.start()
+    logger.info("📈 Trend update scheduler started (every 1 hour)")
+
     logger.info(f"Starting Alpha Buffalo v5.3 on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
