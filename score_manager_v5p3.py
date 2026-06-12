@@ -38,14 +38,16 @@ class DXYRegime(Enum):
     NEUTRAL = "neutral"           # DXY ranging
 
 
-THRESHOLD_V4 = 4
-THRESHOLD_V5 = 8
+THRESHOLD_V4 = 1
+THRESHOLD_V5 = 2
 
 # V5_SNIPER strict requirements
-V5_MIN_BUCKET_A = 3   # Trend must be solid (cascade or reversal)
-V5_MIN_BUCKET_B = 3   # Zone quality must be strong (harmonic/kivanc)
-V5_MIN_BUCKET_C = 2   # Trigger must be present
-V5_MIN_BUCKET_D = 2   # VSA wall required (true sniper DNA)
+
+THRESHOLD_V5_BUY = 1   # Buy ใช้ threshold ต่ำกว่า (scalp/reversal)
+V5_MIN_BUCKET_A = 1   # Trend must be solid (cascade or reversal)
+V5_MIN_BUCKET_B = 0   # Zone quality must be strong (harmonic/kivanc)
+V5_MIN_BUCKET_C = 0   # Trigger must be present
+V5_MIN_BUCKET_D = 0   # VSA wall required (true sniper DNA)
 
 
 # ════════════════════════════════════════════════════════
@@ -98,6 +100,18 @@ class ScoreResult:
     def is_v5(self) -> bool:
         return self.signal_type == "V5_SNIPER"
 
+
+    @property
+    def is_tradable(self) -> bool:
+        """Check if score meets minimum thresholds"""
+        if self.total >= THRESHOLD_V5:
+            return (self.bucket_a >= V5_MIN_BUCKET_A and 
+                    self.bucket_b >= V5_MIN_BUCKET_B and 
+                    self.bucket_c >= V5_MIN_BUCKET_C and 
+                    self.bucket_d >= V5_MIN_BUCKET_D)
+        elif self.total >= THRESHOLD_V4:
+            return True
+        return False
     def summary(self) -> str:
         lines = [
             f"📊 Score Summary (v5.3)",
@@ -194,37 +208,27 @@ class ScoreManager:
 
     def _score_bucket_b(
         self,
-        harmonic_in_prz:   bool,    # ราคาอยู่ใน Harmonic PRZ
-        harmonic_priority: str,     # "primary" | "secondary"
-        kivanc_in_golden:  bool,    # Kivanc OB อยู่ใน Golden Zone
-        kivanc_score:      int,     # confluence_score จาก kivanc (0-5)
-        fvg_verdict:       str,     # "HUNT" | "MSS" | "WAIT" | "NONE"
-        breakdown:         dict,
+        harmonic_in_prz: bool,
+        harmonic_priority: str,
+        kivanc_in_golden: bool,
+        kivanc_score: int,
+        vsa_ok: bool = False,
+        bos_detected: bool = False
     ) -> int:
-
-        # Priority 1: Harmonic PRZ (strongest)
-        if harmonic_in_prz:
-            pts = 5 if harmonic_priority == "primary" else 3
-            breakdown["Harmonic PRZ"] = pts
-            return pts
-
-        # Priority 2: Kivanc Golden Zone
-        if kivanc_in_golden and kivanc_score >= 3:
-            pts = min(kivanc_score, 4)   # max +4 จาก kivanc
-            breakdown["Kivanc Golden Zone"] = pts
-            return pts
-
-        # Priority 3: FVG zone (ต่ำสุด)
-        if fvg_verdict in ("HUNT", "MSS"):
-            pts = 2
-            breakdown["FVG Zone"] = pts
-            return pts
-
+        """Bucket B: VSA+Kivanc PRZ Entry -> BOS Confirmation"""
+        # 1. แค่ PRZ ไม่มี VSA -> ให้ 1 (ไม่พอเข้าเทรด)
+        if not vsa_ok:
+            return 1 if harmonic_in_prz else 0
+        
+        # 2. VSA + Kivanc ใน PRZ
+        if harmonic_in_prz and (kivanc_in_golden or kivanc_score >= 3):
+            # 3. เช็ค BOS เพื่อตัดสินใจ
+            if bos_detected:
+                return 5  # ถือต่อเต็ม TP
+            else:
+                return 4  # ปิดเร็ว ไม่ SL
+        
         return 0
-
-    # ── BUCKET C: Trigger Confirmation (max +5) ───────────
-    # NEW: Sweep และ H1 Spike แยก + confluence bonus
-
     def _score_bucket_c(
         self,
         bos_detected:           bool,
@@ -387,8 +391,8 @@ class ScoreManager:
         result.bucket_b = self._score_bucket_b(
             harmonic_in_prz, harmonic_priority,
             kivanc_in_golden, kivanc_score,
-            fvg_verdict, breakdown
-        )
+            vsa_ok=vsa_ok,
+            bos_detected=bos_detected)
         result.bucket_c = self._score_bucket_c(
             bos_detected, mss_detected,
             sweep_valid, sweep_is_pdh_pdl,
