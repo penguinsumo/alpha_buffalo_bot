@@ -88,25 +88,3 @@ except NameError:
 def is_in_session(timestamp):
     """🔧 Changed: Always True (no blocking), use get_session_score() for scoring"""
     return True
-
-# ============================================================
-# 🆕 PHASE 4A: Time-of-Day Hard Block (Killer Hours)
-# ============================================================
-# Based on 5.5 months backtest: blocks 11 hours, saves +27.83% PnL
-# Applied: 2026-06-14T11:48:54.451236
-
-# Killer Hours (UTC) — ห้ามเปิดออเดอร์ทุกกรณี
-BLOCKED_HOURS = [1, 8, 12, 13, 14, 15, 16, 17, 18, 19, 21]
-
-def is_in_session(timestamp):
-    """
-    🔧 Phase 4A: Block killer hours
-    Returns True if trading is allowed
-    """
-    import pandas as pd
-    if isinstance(timestamp, str):
-        hour = pd.Timestamp(timestamp).hour
-    else:
-        hour = timestamp.hour if hasattr(timestamp, 'hour') else pd.Timestamp(timestamp).hour
-    
-    return hour not in BLOCKED_HOURS

@@ -475,20 +475,3 @@ def get_market_summary() -> dict:
         }
     except:
         return {"trend": {}, "session": {}, "scanner": {}}
-
-# ═══════════════════════════════════════════════
-# 🔧 PHASE 6C: Use full format + correct function
-# ═══════════════════════════════════════════════
-
-def _send_telegram_full(signal: dict) -> bool:
-    """Send signal to Telegram with ALL fields"""
-    try:
-        from telegram_broadcaster import format_signal_full, broadcast_message
-        msg = format_signal_full(signal)
-        return broadcast_message(msg)
-    except ImportError:
-        pass
-    except Exception as e:
-        import logging
-        logging.warning(f"Telegram send failed: {e}")
-    return False

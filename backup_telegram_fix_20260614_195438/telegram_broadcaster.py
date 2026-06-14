@@ -85,7 +85,7 @@ def format_signal_message(data):
     return message
 
 def format_signal_full(signal: dict) -> str:
-    """Format signal message — Clean, no pattern name, correct partial order"""
+    """Format signal message with ALL fields — same as EA receives"""
     
     direction = signal.get("direction", "N/A")
     entry = signal.get("entry", 0)
@@ -94,11 +94,17 @@ def format_signal_full(signal: dict) -> str:
     score = signal.get("score", 0)
     signal_type = signal.get("signal_type", "N/A")
     session = signal.get("session", "N/A")
-    be_price = signal.get("be_price", 0)
+    pattern = signal.get("pattern", "")
+    harmonic = signal.get("harmonic", "")
     prz_low = signal.get("prz_low", 0)
     prz_high = signal.get("prz_high", 0)
+    be_price = signal.get("be_price", 0)
+    trail = signal.get("trail", 0)
     vsa_gate = signal.get("vsa_gate", signal.get("vsa_ok", "N/A"))
+    
     partials = signal.get("partials", signal.get("partial", []))
+    fallback_sl = signal.get("fallback_sl", 0)
+    fallback_tp = signal.get("fallback_tp", 0)
     
     # Emoji
     dir_emoji = "🟢" if direction == "BUY" else "🔴" if direction == "SELL" else "⚪"
@@ -109,7 +115,12 @@ def format_signal_full(signal: dict) -> str:
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 {dir_emoji} {direction} | {signal_type} | Score: {score} {score_emoji}
 📊 Session: {session}
-
+"""
+    
+    if pattern or harmonic:
+        msg += f"📐 Pattern: {pattern or harmonic}\n"
+    
+    msg += f"""
 💰 Entry: ${entry:.2f}
 🛑 SL:    ${sl:.2f}
 🎯 TP:    ${tp:.2f}
@@ -133,6 +144,12 @@ def format_signal_full(signal: dict) -> str:
     if vsa_gate and vsa_gate != "N/A":
         msg += f"📊 VSA Gate: {vsa_gate}\n"
     
+    if fallback_sl > 0:
+        msg += f"⚠️ Fallback SL: ${fallback_sl:.2f} | TP: ${fallback_tp:.2f}\n"
+    
     msg += "━━━━━━━━━━━━━━━━━━━━━━━━━"
     
     return msg
+
+# 🔧 PHASE 6C: Use full format for Telegram messages
+# Replace old format_message() call with format_signal_full()

@@ -343,33 +343,3 @@ kivanc_engine = KivancVSAEngine(min_score=3)
 
 def run_kivanc(df: pd.DataFrame) -> Optional[KivancSignal]:
     return kivanc_engine.analyze(df)
-
-# ============================================================
-# 🆕 PHASE 6A: Weighted Score System (แทน AND conditions)
-# ============================================================
-
-KIVANC_SIGNAL_WEIGHTS = {
-    "stopping_volume": 2.0,
-    "absorption": 2.0,
-    "high_spread": 1.5,
-    "reversal_wick": 1.5,
-    "golden_zone": 2.0,
-    "volume_confirmation": 1.0,
-    "order_block": 1.0,
-}
-
-def get_kivanc_score(signals: dict) -> float:
-    """
-    Weighted Score — ไม่ต้องครบทุก AND
-    signals = {"stopping_volume": True, "golden_zone": True, ...}
-    Returns: 0.0 - 3.0
-    """
-    score = 0.0
-    for key, weight in KIVANC_SIGNAL_WEIGHTS.items():
-        if signals.get(key, False):
-            score += weight
-    return min(score, 3.0)  # Cap at 3.0
-
-def is_valid_kivanc_signal(signals: dict, min_score: float = 2.0) -> bool:
-    """ผ่านเกณฑ์ขั้นต่ำ (2.0 จาก 3.0) = สัญญาณใช้ได้"""
-    return get_kivanc_score(signals) >= min_score

@@ -25,3 +25,43 @@ def get_trade_signal(df_15m, df_1h, df_4h) -> Optional[Dict[str, Any]]:
         "sources": sig.sources,
         "signal_type": sig.signal_type
     }
+
+
+# ============================================================
+# 🆕 PHASE 2: Signal Engine — Wire trade_mode through pipeline
+# ============================================================
+
+def process_signal_with_mode(signal_data: dict) -> dict:
+    """
+    ประมวลผล signal และเพิ่ม trade_mode
+    Pipeline: score → trade_mode → state → trade_execution
+    """
+    score = signal_data.get('score', 0)
+    
+    # Get trade mode
+    try:
+        from signal_composer import _get_trade_mode_for_signal
+        trade_mode = _get_trade_mode_for_signal(score)
+    except ImportError:
+        abs_score = abs(score)
+        if abs_score == 3:
+            trade_mode = 'SCALP_BE'
+        elif 4 <= abs_score <= 5:
+            trade_mode = 'V4_SCALP'
+        elif abs_score >= 6:
+            trade_mode = 'V5_SNIPER'
+        else:
+            trade_mode = 'NONE'
+    
+    signal_data['trade_mode'] = trade_mode
+    
+    # State transition
+    if trade_mode == 'SCALP_BE':
+        try:
+            from state_manager import get_scalp_be_transition
+            new_state = get_scalp_be_transition('IDLE', 'SCALP_BE_SIGNAL')
+            signal_data['state'] = new_state
+        except ImportError:
+            signal_data['state'] = 'SCALP_BE_ENTRY'
+    
+    return signal_data
