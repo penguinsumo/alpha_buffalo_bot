@@ -185,3 +185,48 @@ def kill_basket(direction: str):
 
 def reset_basket(direction: str):
     composer.reset_basket(direction)
+
+# ═══════════════════════════════════════════════
+# P0 FIX: Entry Fill Timing (Signal ≠ Fill)
+# ═══════════════════════════════════════════════
+
+def get_fill_price(signal_bar, next_bar=None):
+    """
+    TV Fill Model:
+    - Signal bar close → fill price
+    - แต่ใน TV จริง fill อาจเกิดที่ open ของ bar ถัดไป
+    - ใช้ strategy.position_avg_price ใน TV
+    - Python: ใช้ next_bar['open'] ถ้ามี, else signal_bar['close']
+    """
+    if next_bar is not None:
+        return next_bar['open']  # Fill at next bar open (TV default)
+    return signal_bar['close']   # Fallback
+
+# v10 INTEGRATION
+def compose_signal_v10(signal, df, equity, dd_pct):
+    try:
+        from alpha_buffalo_signal import V10_READY, V10_CONFIG, AdaptiveEngine, PositionSizer
+        if V10_READY:
+            adaptive = AdaptiveEngine(V10_CONFIG)
+            regime = adaptive.update_regime(df)
+            signal['regime'] = regime
+            signal['threshold'] = adaptive.get_score_threshold()
+    except ImportError:
+        pass
+    return signal
+
+# ═══════════════════════════════════════════════
+# P0 FIX: Entry Fill Timing (Signal ≠ Fill)
+# ═══════════════════════════════════════════════
+
+def get_fill_price(signal_bar, next_bar=None):
+    """
+    TV Fill Model:
+    - Signal bar close → fill price
+    - แต่ใน TV จริง fill อาจเกิดที่ open ของ bar ถัดไป
+    - ใช้ strategy.position_avg_price ใน TV
+    - Python: ใช้ next_bar['open'] ถ้ามี, else signal_bar['close']
+    """
+    if next_bar is not None:
+        return next_bar['open']  # Fill at next bar open (TV default)
+    return signal_bar['close']   # Fallback

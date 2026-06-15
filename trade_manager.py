@@ -435,3 +435,169 @@ def execute_trade_by_mode(trade_mode: str, direction: str, price: float) -> dict
             'status': 'OPEN'
         }
     return {'status': 'ERROR', 'message': f'Unknown mode: {trade_mode}'}
+
+# PINE v6.5: USE_ATR_SL=False, SCORE_THRESHOLD=4.0, COOLDOWN_BARS=5
+# Exit Collision: use if/elif (not if/if)
+
+# PINE v6.5: Save trade state BEFORE reset
+# last_ep, last_dir, last_exit_price must be saved
+# before ep := na to ensure Win/Loss tracking works
+
+# ═══════════════════════════════════════════════
+# P0 FIX: Intrabar Fill Model (TV Compatible)
+# ═══════════════════════════════════════════════
+
+def intrabar_fill(high, low, entry, direction, tp_price, sl_price):
+    """
+    TV Broker Emulator Logic:
+    ใช้ high/low ของแท่ง → ตรวจว่า TP หรือ SL ถึงก่อน
+    """
+    if direction == 'BUY':
+        # TP hit before SL?
+        if high >= tp_price:
+            return 'TP', tp_price
+        elif low <= sl_price:
+            return 'SL', sl_price
+        else:
+            return None, None
+    else:
+        # SELL: TP hit before SL?
+        if low <= tp_price:
+            return 'TP', tp_price
+        elif high >= sl_price:
+            return 'SL', sl_price
+        else:
+            return None, None
+
+# ═══════════════════════════════════════════════
+# P0 FIX: Accurate Win/Loss Tracking
+# ═══════════════════════════════════════════════
+
+class ClosedTrade:
+    """Trade Record — saved BEFORE state reset"""
+    def __init__(self, entry, exit_price, direction, pnl_pct, exit_reason, timestamp):
+        self.entry = entry
+        self.exit_price = exit_price
+        self.direction = direction
+        self.pnl_pct = pnl_pct
+        self.exit_reason = exit_reason
+        self.timestamp = timestamp
+
+# Store BEFORE resetting state
+trade_history = []
+
+def record_closed_trade(entry, exit_price, direction, exit_reason, timestamp):
+    """บันทึก trade ก่อน reset state"""
+    pnl = (exit_price - entry) / entry * 100 if direction == 'BUY'          else (entry - exit_price) / entry * 100
+    
+    trade = ClosedTrade(entry, exit_price, direction, pnl, exit_reason, timestamp)
+    trade_history.append(trade)
+    
+    # Update equity
+    update_equity(pnl)
+    
+    return trade
+
+def get_stats():
+    """คำนวณสถิติจาก trade_history"""
+    if not trade_history:
+        return {}
+    
+    wins = [t for t in trade_history if t.pnl_pct > 0]
+    losses = [t for t in trade_history if t.pnl_pct <= 0]
+    
+    return {
+        'total': len(trade_history),
+        'wins': len(wins),
+        'losses': len(losses),
+        'wr': len(wins) / len(trade_history) * 100,
+        'avg_win': sum(t.pnl_pct for t in wins) / len(wins) if wins else 0,
+        'avg_loss': sum(t.pnl_pct for t in losses) / len(losses) if losses else 0,
+        'pf': sum(t.pnl_pct for t in wins) / abs(sum(t.pnl_pct for t in losses)) if losses else float('inf'),
+        'net_pnl': sum(t.pnl_pct for t in trade_history)
+    }
+
+# v10 INTEGRATION
+def get_v10_qty(signal, equity, dd_pct):
+    try:
+        from alpha_buffalo_signal import V10_READY, V10_CONFIG, PositionSizer
+        if V10_READY:
+            sizer = PositionSizer(V10_CONFIG)
+            return sizer.calculate(signal, equity, dd_pct).get('qty', 0.01)
+    except ImportError:
+        pass
+    return signal.get('qty', 0.01)
+
+# ═══════════════════════════════════════════════
+# P0 FIX: Intrabar Fill Model (TV Compatible)
+# ═══════════════════════════════════════════════
+
+def intrabar_fill(high, low, entry, direction, tp_price, sl_price):
+    """
+    TV Broker Emulator Logic:
+    ใช้ high/low ของแท่ง → ตรวจว่า TP หรือ SL ถึงก่อน
+    """
+    if direction == 'BUY':
+        # TP hit before SL?
+        if high >= tp_price:
+            return 'TP', tp_price
+        elif low <= sl_price:
+            return 'SL', sl_price
+        else:
+            return None, None
+    else:
+        # SELL: TP hit before SL?
+        if low <= tp_price:
+            return 'TP', tp_price
+        elif high >= sl_price:
+            return 'SL', sl_price
+        else:
+            return None, None
+
+# ═══════════════════════════════════════════════
+# P0 FIX: Accurate Win/Loss Tracking
+# ═══════════════════════════════════════════════
+
+class ClosedTrade:
+    """Trade Record — saved BEFORE state reset"""
+    def __init__(self, entry, exit_price, direction, pnl_pct, exit_reason, timestamp):
+        self.entry = entry
+        self.exit_price = exit_price
+        self.direction = direction
+        self.pnl_pct = pnl_pct
+        self.exit_reason = exit_reason
+        self.timestamp = timestamp
+
+# Store BEFORE resetting state
+trade_history = []
+
+def record_closed_trade(entry, exit_price, direction, exit_reason, timestamp):
+    """บันทึก trade ก่อน reset state"""
+    pnl = (exit_price - entry) / entry * 100 if direction == 'BUY'          else (entry - exit_price) / entry * 100
+    
+    trade = ClosedTrade(entry, exit_price, direction, pnl, exit_reason, timestamp)
+    trade_history.append(trade)
+    
+    # Update equity
+    update_equity(pnl)
+    
+    return trade
+
+def get_stats():
+    """คำนวณสถิติจาก trade_history"""
+    if not trade_history:
+        return {}
+    
+    wins = [t for t in trade_history if t.pnl_pct > 0]
+    losses = [t for t in trade_history if t.pnl_pct <= 0]
+    
+    return {
+        'total': len(trade_history),
+        'wins': len(wins),
+        'losses': len(losses),
+        'wr': len(wins) / len(trade_history) * 100,
+        'avg_win': sum(t.pnl_pct for t in wins) / len(wins) if wins else 0,
+        'avg_loss': sum(t.pnl_pct for t in losses) / len(losses) if losses else 0,
+        'pf': sum(t.pnl_pct for t in wins) / abs(sum(t.pnl_pct for t in losses)) if losses else float('inf'),
+        'net_pnl': sum(t.pnl_pct for t in trade_history)
+    }

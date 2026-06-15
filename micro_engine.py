@@ -179,3 +179,5 @@ if 'class MicroEngine' not in open(__file__).read():
     def run_micro(df_15m):
         engine = MicroEngine()
         return engine.update(df_15m)
+
+# PINE v6.5: ATR Sweep - (high-low) >= atr14 * 0.50

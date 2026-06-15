@@ -373,3 +373,5 @@ def get_kivanc_score(signals: dict) -> float:
 def is_valid_kivanc_signal(signals: dict, min_score: float = 2.0) -> bool:
     """ผ่านเกณฑ์ขั้นต่ำ (2.0 จาก 3.0) = สัญญาณใช้ได้"""
     return get_kivanc_score(signals) >= min_score
+
+# PINE v6.5: Frozen Fib - use high[:-1]/low[:-1] (no repaint)

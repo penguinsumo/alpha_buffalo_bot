@@ -182,3 +182,14 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     logger.info(f"Starting Alpha Buffalo v5.3 on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+
+# v10 INTEGRATION
+import sys
+sys.path.insert(0, 'v10_modules')
+try:
+    from v10_modules.config import CONFIG as V10_CONFIG
+    from v10_modules.layer9_adaptive import AdaptiveEngine
+    from v10_modules.layer5_position_sizer import PositionSizer
+    V10_READY = True
+except ImportError:
+    V10_READY = False

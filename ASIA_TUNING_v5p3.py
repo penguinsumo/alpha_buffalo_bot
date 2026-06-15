@@ -109,4 +109,8 @@ def is_in_session(timestamp):
     else:
         hour = timestamp.hour if hasattr(timestamp, 'hour') else pd.Timestamp(timestamp).hour
     
-    return hour not in BLOCKED_HOURS
+    return 12 <= hour <= 22  # London+NY UTC (Pine v6.5)
+
+# PINE v6.5: Session 12-22 UTC (London+NY only)
+
+# PINE v6.5: Ensure hour is UTC before session check
