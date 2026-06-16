@@ -76,3 +76,49 @@ class SignalEngine:
             'bb_high': bb_high,
             'bb_low': bb_low,
         }
+    
+    def get_golden_zone_from_scanner(self, current_price, df_4h=None, df_1h=None):
+        """Layer 0: Get Golden Zone from Scenario Scanner (Pre-Market)"""
+        try:
+            from scenario_scanner import ScenarioScanner
+            scanner = ScenarioScanner()
+            blueprint = scanner.scan(df_4h, df_1h, None)
+            if blueprint and hasattr(blueprint, 'swing_high'):
+                f_range = blueprint.swing_high - blueprint.swing_low
+                fib_618 = blueprint.swing_high - f_range * 0.618
+                fib_786 = blueprint.swing_high - f_range * 0.786
+                in_zone = fib_786 <= current_price <= fib_618
+                return {
+                    'swing_high': blueprint.swing_high,
+                    'swing_low': blueprint.swing_low,
+                    'fib_618': fib_618, 'fib_786': fib_786,
+                    'in_golden_zone': in_zone,
+                }
+        except ImportError: pass
+        except Exception: pass
+        return None
+    
+    def generate_with_scanner(self, df_15m, df_1h, df_4h, regime):
+        """Generate signal using Scanner (Layer 0) + v10 Entry Logic"""
+        row = df_15m.iloc[-1]
+        current_price = row['Close']
+        scanner_data = self.get_golden_zone_from_scanner(current_price, df_4h, df_1h)
+        score = self.bucket_f_score(row, scanner_data)
+        thresholds = {'TREND': 4.0, 'CHOP': 2.5, 'MEAN_REV': 3.0}
+        threshold = thresholds.get(regime, 3.0)
+        if score < threshold: return None
+        ema20 = row['EMA20']; ema50 = row['EMA50']
+        ha_buy = row.get('HA_Buy_Signal', False)
+        ha_sell = row.get('HA_Sell_Signal', False)
+        if row['Low'] <= row['BB_Low'] * 1.02 and ema20 > ema50 and ha_buy:
+            direction = 'BUY'
+        elif row['High'] >= row['BB_High'] * 0.98 and ema20 < ema50 and ha_sell:
+            direction = 'SELL'
+        else: return None
+        return {
+            'direction': direction, 'score': score, 'threshold': threshold,
+            'regime': regime, 'entry': current_price,
+            'atr': row.get('ATR14', 0),
+            'bb_high': row['BB_High'], 'bb_low': row['BB_Low'],
+            'scanner_data': scanner_data,
+        }

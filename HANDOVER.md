@@ -77,3 +77,33 @@ curl https://alphabuffalobot-production.up.railway.app/health
 pm2 logs AlphaBuffalo --lines 20
 ### Restart
 pm2 restart AlphaBuffalo --update-env
+
+---
+
+## 18. Production Data Sources (June 15, 2026)
+
+### Data Providers
+
+| Source | Use Case | Symbol | Status |
+|--------|----------|--------|--------|
+| **Twelve Data** | Production (Live) | XAU/USD | ✅ Active |
+| **Yahoo Finance** | Backtest Only | GC=F | ✅ Test Only |
+
+### Twelve Data
+- API Key: `4b75c872...`
+- Interval: 15min
+- Free Tier: 800 calls/day
+- Fields: Open, High, Low, Close
+- No Volume on Free Tier
+
+### Yahoo Finance
+- Used for: Backtest, Strategy Testing
+- Symbol: GC=F (Gold Futures)
+- NOT used in Production
+- Prices may differ from Twelve Data by ~$20-30
+
+### Important: Do NOT confuse!
+- Production Signal → Twelve Data
+- Backtest Results → Yahoo Finance
+- Both are valid but for DIFFERENT purposes
+

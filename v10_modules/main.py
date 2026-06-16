@@ -65,7 +65,7 @@ def run_backtest(symbol='GC=F', start='2026-01-01', end='2026-06-13'):
             continue
         
         fib_data = Indicators.get_fib_levels(current_df)
-        signal = signal_engine.generate(current_df, fib_data, regime)
+        signal = signal_engine.generate_with_scanner(current_df, df_1h, df_4h, regime) if hasattr(signal_engine, 'generate_with_scanner') else signal_engine.generate(current_df, fib_data, regime)
         if signal is None:
             continue
         

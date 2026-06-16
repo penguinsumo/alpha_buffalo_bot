@@ -1,67 +1,40 @@
 """
-signal_engine.py — Alpha Buffalo v5.3 (Execution Bridge)
-ส่ง DataFrame ให้ Composer ตัดสินใจ
+signal_engine.py — Alpha Buffalo v11.2 (Bridge with Blueprint support)
 """
-import logging
-from typing import Optional, Dict, Any
-from signal_composer import compose_signal, ComposedSignal
 
-logging.basicConfig(level=logging.INFO)
+import logging
+from scenario_scanner import scanner as scenario_scanner
+from signal_composer import compose_signal
+
 logger = logging.getLogger(__name__)
 
-def get_trade_signal(df_15m, df_1h, df_4h) -> Optional[Dict[str, Any]]:
-    sig: Optional[ComposedSignal] = compose_signal(df_4h, df_1h, df_15m)
-    if not sig:
-        return None
-    return {
-        "direction": sig.direction,
-        "entry": round(sig.entry_price, 5),
-        "sl": round(sig.sl_price, 5),
-        "tp1": round(sig.tp1_price, 5),
-        "tp2": round(sig.tp2_price, 5),
-        "lot_multiplier": round(sig.lot_multiplier, 2),
-        "basket_layer": sig.basket_layer,
-        "score": sig.confluence_score,
-        "sources": sig.sources,
-        "signal_type": sig.signal_type
-    }
-
-
-# ============================================================
-# 🆕 PHASE 2: Signal Engine — Wire trade_mode through pipeline
-# ============================================================
-
-def process_signal_with_mode(signal_data: dict) -> dict:
+def get_trade_signal(df_15m, df_1h, df_4h):
     """
-    ประมวลผล signal และเพิ่ม trade_mode
-    Pipeline: score → trade_mode → state → trade_execution
+    Bridge function (backward compatible)
+    Now generates Blueprint automatically before calling Composer
     """
-    score = signal_data.get('score', 0)
-    
-    # Get trade mode
+    # 🆕 Generate Blueprint
     try:
-        from signal_composer import _get_trade_mode_for_signal
-        trade_mode = _get_trade_mode_for_signal(score)
-    except ImportError:
-        abs_score = abs(score)
-        if abs_score == 3:
-            trade_mode = 'SCALP_BE'
-        elif 4 <= abs_score <= 5:
-            trade_mode = 'V4_SCALP'
-        elif abs_score >= 6:
-            trade_mode = 'V5_SNIPER'
-        else:
-            trade_mode = 'NONE'
+        blueprint = scenario_scanner.scan(df_4h, df_1h, df_15m)
+        logger.info(f"Blueprint generated: tunnel_valid={blueprint.tunnel_valid}, market_mode={blueprint.market_mode}")
+    except Exception as e:
+        logger.warning(f"Blueprint generation failed, proceeding without: {e}")
+        blueprint = None
+
+    # Call new Composer with Blueprint
+    signal = compose_signal(df_4h, df_1h, df_15m, blueprint=blueprint)
     
-    signal_data['trade_mode'] = trade_mode
+    if signal is None:
+        return None
     
-    # State transition
-    if trade_mode == 'SCALP_BE':
-        try:
-            from state_manager import get_scalp_be_transition
-            new_state = get_scalp_be_transition('IDLE', 'SCALP_BE_SIGNAL')
-            signal_data['state'] = new_state
-        except ImportError:
-            signal_data['state'] = 'SCALP_BE_ENTRY'
-    
-    return signal_data
+    # Convert to legacy dict format for any existing consumers
+    return {
+        "direction": signal.direction,
+        "score": signal.confluence_score,
+        "entry": signal.entry_price,
+        "tp1": signal.tp1_price,
+        "tp2": signal.tp2_price,
+        "sl": signal.sl_price,
+        "signal_type": signal.signal_type,
+        "sources": signal.sources
+    }
