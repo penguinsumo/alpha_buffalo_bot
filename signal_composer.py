@@ -1,5 +1,7 @@
 """
-signal_composer.py — Alpha Buffalo v5.4 (Tunnel & Golden Zone Integrated)
+signal_composer.py — Alpha Buffalo v5.4 (Dow Theory Tunnel + Micro BOS)
+- V4 Entry: PRZ/Golden Zone + BOS Breakout Add-on
+- V5 Entry: PRZ/Golden Zone only (before BOS confirmation)
 """
 
 import pandas as pd
@@ -15,8 +17,10 @@ from micro_engine      import run_micro, MicroSignal
 
 # v5.3 Modules
 from session_clock      import H4SessionTracker, get_market_session_info
-from score_manager_v5p3 import ScoreManager
 from ASIA_TUNING_v5p3   import ASITuningManager, ASIAScalpTriggerGate
+
+# ScoreManager (actual)
+from score_manager_v5p3 import ScoreManager, THRESHOLD_V4, THRESHOLD_V5
 
 # 🆕 Blueprint
 from scenario_scanner import ScenarioBlueprint
@@ -47,6 +51,9 @@ class BasketState:
     tp2: float = 0.0
     active: bool = False
     killed: bool = False
+    v5_alive: bool = False
+    v4_alive: bool = False
+    v4_partial_closed: bool = False   # True ถ้า V4 ถูกแบ่งปิดไปแล้ว
 
 @dataclass
 class ComposedSignal:
@@ -71,37 +78,28 @@ def calc_bb(df: pd.DataFrame, period: int = 20, std: float = 2.0) -> dict:
 
 def calc_exits(direction: str, entry: float, prz_zones: List[PRZZone], bb: dict,
                kivanc_sig: Optional[KivancSignal], blueprint: Optional[ScenarioBlueprint] = None):
-    """
-    คำนวณ SL/TP โดยรวม Tunnel, Golden Zone จาก Blueprint (ถ้ามี)
-    """
     if direction == "BUY":
-        sl = entry - 2.0   # fallback
+        sl = entry - 2.0
         tp1 = entry + 3.0
         tp2 = bb["upper"]
 
-        # 1. ใช้ Kivanç ถ้ามี
         if kivanc_sig and kivanc_sig.direction == "BUY":
             sl = kivanc_sig.sl_price
             tp1 = kivanc_sig.tp1_price
             tp2 = max(kivanc_sig.tp2_price, bb["upper"])
 
-        # 2. ปรับด้วย Tunnel + Golden Zone จาก Blueprint
-        if blueprint and blueprint.tunnel_valid:
-            # SL: แนวรับที่แข็งที่สุด (สูงสุดของ lower bounds)
+        if blueprint and blueprint.tunnel_status == "CONFIRMED":
             supports = [sl]
             if blueprint.tunnel_lower > 0: supports.append(blueprint.tunnel_lower)
             if blueprint.golden_zone_low > 0: supports.append(blueprint.golden_zone_low)
-            sl = max(supports) * 0.999  # buffer เล็กน้อย
-            # TP1: แนวต้านที่ใกล้ที่สุด (ต่ำสุดของ upper bounds)
+            sl = max(supports) * 0.999
             resistances = [tp1]
             if blueprint.tunnel_upper > entry: resistances.append(blueprint.tunnel_upper)
             if blueprint.golden_zone_high > entry: resistances.append(blueprint.golden_zone_high)
             tp1 = min(resistances)
-            # TP2: ใช้ PRZ หรือ plan_b_tp2
             if blueprint.plan_b_tp2 > entry:
                 tp2 = blueprint.plan_b_tp2
-
-        elif blueprint:  # tunnel not valid แต่มี golden zone
+        elif blueprint:
             if blueprint.golden_zone_low > sl:
                 sl = blueprint.golden_zone_low * 0.999
             if blueprint.golden_zone_high > entry and blueprint.golden_zone_high < tp1:
@@ -117,20 +115,17 @@ def calc_exits(direction: str, entry: float, prz_zones: List[PRZZone], bb: dict,
             tp1 = kivanc_sig.tp1_price
             tp2 = min(kivanc_sig.tp2_price, bb["lower"])
 
-        if blueprint and blueprint.tunnel_valid:
-            # SL: แนวต้านที่ต่ำที่สุด (ต่ำสุดของ upper bounds)
+        if blueprint and blueprint.tunnel_status == "CONFIRMED":
             resistances = [sl]
             if blueprint.tunnel_upper > 0: resistances.append(blueprint.tunnel_upper)
             if blueprint.golden_zone_high > 0: resistances.append(blueprint.golden_zone_high)
             sl = min(resistances) * 1.001
-            # TP1: แนวรับที่สูงที่สุด (สูงสุดของ lower bounds)
             supports = [tp1]
             if blueprint.tunnel_lower < entry: supports.append(blueprint.tunnel_lower)
             if blueprint.golden_zone_low < entry: supports.append(blueprint.golden_zone_low)
             tp1 = max(supports)
             if blueprint.plan_b_tp2 < entry:
                 tp2 = blueprint.plan_b_tp2
-
         elif blueprint:
             if blueprint.golden_zone_high < sl:
                 sl = blueprint.golden_zone_high * 1.001
@@ -139,12 +134,12 @@ def calc_exits(direction: str, entry: float, prz_zones: List[PRZZone], bb: dict,
 
     return sl, tp1, tp2
 
-# ── Main Composer ─────────────────────────────────────────
 class SignalComposer:
     def __init__(self):
         self.buy_basket  = BasketState(direction="BUY")
         self.sell_basket = BasketState(direction="SELL")
         self.last_signal: Optional[ComposedSignal] = None
+        self.score_mgr = ScoreManager()
 
     def compose(self, df_4h: pd.DataFrame, df_1h: pd.DataFrame, df_15m: pd.DataFrame,
                 blueprint: Optional[ScenarioBlueprint] = None) -> Optional[ComposedSignal]:
@@ -153,43 +148,77 @@ class SignalComposer:
         h4_info = H4SessionTracker.get_h4_boundary()
         current_price = float(df_15m["close"].iloc[-1])
 
-        # 1. รัน Engines ย่อย
+        # 1. Run engines
         kivanc_sig = run_kivanc(df_1h) or run_kivanc(df_4h)
         prz_zones = run_harmonic(df_4h) + run_harmonic(df_1h)
         micro_sigs = run_micro(df_15m)
 
-        # 2. ScoreManager
-        score_data = ScoreManager.evaluate(
-            df_15m=df_15m, df_1h=df_1h, df_4h=df_4h, current_session=current_session
+        # 2. Real BOS from Micro Engine
+        micro_bos = any(s.bos for s in micro_sigs) if micro_sigs else False
+
+        # 3. ScoreManager (base)
+        kivanc_score = 1 if kivanc_sig else 0
+        vsa_ok = False
+        score_result = self.score_mgr.calculate(
+            kivanc_score=kivanc_score,
+            bos_detected=micro_bos,
+            vsa_ok=vsa_ok
         )
-        if not score_data or not score_data.get('is_tradable'):
+        base_score = score_result.total
+        if not score_result.is_tradable and base_score < THRESHOLD_V4:
             return None
 
-        best_dir = score_data['direction']
-        best_score = score_data['total_score']
-        signal_type = score_data.get('signal_type', 'V5_STANDARD')
-
-        # 🆕 ปรับคะแนนจาก Blueprint
-        if blueprint and blueprint.tunnel_valid:
-            if best_dir == "BUY" and blueprint.tunnel_lower > 0 and current_price <= blueprint.tunnel_lower * 1.02:
-                best_score += 2  # อยู่ใกล้แนวรับแข็งแรง
-            elif best_dir == "SELL" and blueprint.tunnel_upper > 0 and current_price >= blueprint.tunnel_upper * 0.98:
-                best_score += 2
-        if blueprint and blueprint.bos_triggered:
-            best_score += 3  # BOS ยืนยัน
-        # ถ้าคะแนนติดลบหรือต่ำไป ให้ยกเลิก
-        if best_score < 3:
+        # 4. Direction
+        if kivanc_sig and kivanc_sig.direction in ("BUY", "SELL"):
+            best_dir = kivanc_sig.direction
+        elif blueprint:
+            best_dir = "BUY" if blueprint.trend_h4 == "UP" else "SELL"
+        else:
             return None
 
-        # 3. ASIA Tuning Gates
+        basket = self.buy_basket if best_dir == "BUY" else self.sell_basket
+
+        # 5. Blueprint Boost (Tunnel CONFIRMED only)
+        score_boost = 0
+        if blueprint and blueprint.tunnel_status == "CONFIRMED":
+            if best_dir == "BUY" and current_price <= blueprint.tunnel_lower * 1.02:
+                score_boost += 2
+            elif best_dir == "SELL" and current_price >= blueprint.tunnel_upper * 0.98:
+                score_boost += 2
+        best_score = base_score + score_boost
+        if best_score < THRESHOLD_V4:
+            return None
+
+        # 6. Signal type assignment
+        # กรณี BOS เกิดขึ้น → ตรรกะการเปิด V4 เพิ่ม
+        if micro_bos:
+            # V5 รอด + V4 ตาย → เปิด V4 ใหม่
+            if basket.v5_alive and not basket.v4_alive:
+                signal_type = "V4_SCALP"
+            # V5 รอด + V4 ยังอยู่เต็ม (ยังไม่ถูก partial) → เปิด V4 เพิ่ม (แรงซื้อมหาศาล)
+            elif basket.v5_alive and basket.v4_alive and not basket.v4_partial_closed:
+                signal_type = "V4_SCALP"
+            # V4 ถูกแบ่งปิดไปแล้ว (partial) → ถือเป็น re-entry → ไม่เปิด
+            elif basket.v5_alive and basket.v4_alive and basket.v4_partial_closed:
+                return None
+            # ไม่มี V5 หรือ V4 ไม่เข้าเงื่อนไขใด → ไม่เปิด
+            else:
+                return None
+        else:
+            # ไม้ที่เกิดก่อน BOS (PRZ)
+            if best_score >= THRESHOLD_V5:
+                signal_type = "V5_SNIPER"
+            else:
+                signal_type = "V4_SCALP"
+
+        # 7. ASIA Gates
         if current_session == "ASIA":
             if not ASIAScalpTriggerGate.verify_sweep(micro_sigs):
                 return None
             if not ASITuningManager.is_within_safe_time(h4_info["current_hour_utc"]):
                 return None
 
-        # 4. Basket Layer
-        basket = self.buy_basket if best_dir == "BUY" else self.sell_basket
+        # 8. Basket Layer
         if basket.killed:
             return None
         layer = basket.layer + 1
@@ -197,15 +226,27 @@ class SignalComposer:
         if layer > 2:
             return None
 
-        # 5. คำนวณจุดออก
-        if current_session == "ASIA" and (blueprint is None or not blueprint.tunnel_valid):
-            # ใช้ ASITuning เฉพาะเมื่อไม่มี Tunnel ที่เชื่อถือได้
+        # 9. Exits
+        if current_session == "ASIA" and (blueprint is None or blueprint.tunnel_status != "CONFIRMED"):
             sl, tp1, tp2 = ASITuningManager.calculate_dynamic_exits(best_dir, current_price, df_15m)
         else:
             bb = calc_bb(df_15m, COMPOSER_CONFIG["bb_period"], COMPOSER_CONFIG["bb_std"])
             sl, tp1, tp2 = calc_exits(best_dir, current_price, prz_zones, bb, kivanc_sig, blueprint)
 
-        # 6. สร้างแพ็กเกจสัญญาณ
+        # 10. Update basket state
+        if signal_type == "V5_SNIPER":
+            basket.v5_alive = True
+        elif signal_type == "V4_SCALP":
+            if not basket.v4_alive:
+                basket.v4_alive = True
+                basket.v4_partial_closed = False  # เปิดใหม่ → ไม่ได้ถูก partial
+            # ถ้ามี V4 อยู่แล้วและยังไม่ partial → การเปิดเพิ่ม (ที่ BOS) จะไม่เปลี่ยนสถานะ partial
+
+        basket.layer = layer
+        basket.active = True
+        basket.sl, basket.tp1, basket.tp2 = sl, tp1, tp2
+
+        # 11. Package
         now = datetime.now(BKK).strftime("%H:%M:%S")
         sig = ComposedSignal(
             direction=best_dir,
@@ -217,14 +258,11 @@ class SignalComposer:
             lot_multiplier=lot_multi,
             basket_layer=layer,
             confluence_score=best_score,
-            sources=[f"ScoreManager({best_score})", "Blueprint" if blueprint else "Legacy"],
+            sources=[f"Base({base_score})+Boost({score_boost})", "Kivanc" if kivanc_sig else "Trend", "MicroBOS" if micro_bos else "NoBOS"],
             timestamp=now,
             label=f"🎯 {signal_type} {best_dir} | Layer:{layer} | Score:{best_score} | Session:{current_session}",
         )
 
-        basket.layer = layer
-        basket.active = True
-        basket.sl, basket.tp1, basket.tp2 = sl, tp1, tp2
         self.last_signal = sig
         return sig
 
@@ -250,7 +288,7 @@ def kill_basket(direction: str):
 def reset_basket(direction: str):
     composer.reset_basket(direction)
 
-# ── P0 FIX: Entry Fill Timing ──
+# ── P0 FIX ──
 def get_fill_price(signal_bar, next_bar=None):
     if next_bar is not None:
         return next_bar['open']
