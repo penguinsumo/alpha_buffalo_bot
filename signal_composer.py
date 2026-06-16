@@ -1,7 +1,8 @@
 """
-signal_composer.py — Alpha Buffalo v5.4 (Dow Theory Tunnel + Micro BOS)
+signal_composer.py — Alpha Buffalo v5.4 (Dow Theory Tunnel + Micro BOS + Harmonic V5 BOS Add-on)
 - V4 Entry: PRZ/Golden Zone + BOS Breakout Add-on
 - V5 Entry: PRZ/Golden Zone only (before BOS confirmation)
+- 🆕 V5 BOS Mode: Open new V5 at BOS if Harmonic Projection confirms strong continuation
 """
 
 import pandas as pd
@@ -12,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 # Engines
 from kivanc_vsaob      import run_kivanc, KivancSignal
-from harmonic_detector import run_harmonic, PRZZone
+from harmonic_detector import run_harmonic, PRZZone, recalculate_prz_after_bos
 from micro_engine      import run_micro, MicroSignal
 
 # v5.3 Modules
@@ -53,7 +54,8 @@ class BasketState:
     killed: bool = False
     v5_alive: bool = False
     v4_alive: bool = False
-    v4_partial_closed: bool = False   # True ถ้า V4 ถูกแบ่งปิดไปแล้ว
+    v4_partial_closed: bool = False
+    v5_count: int = 0  # Track number of V5 entries for BOS mode
 
 @dataclass
 class ComposedSignal:
@@ -190,22 +192,27 @@ class SignalComposer:
             return None
 
         # 6. Signal type assignment
-        # กรณี BOS เกิดขึ้น → ตรรกะการเปิด V4 เพิ่ม
+        # 🆕 V5 BOS Mode: Harmonic Projection confirms strong continuation
+        v5_bos_mode = False
         if micro_bos:
-            # V5 รอด + V4 ตาย → เปิด V4 ใหม่
-            if basket.v5_alive and not basket.v4_alive:
-                signal_type = "V4_SCALP"
-            # V5 รอด + V4 ยังอยู่เต็ม (ยังไม่ถูก partial) → เปิด V4 เพิ่ม (แรงซื้อมหาศาล)
-            elif basket.v5_alive and basket.v4_alive and not basket.v4_partial_closed:
-                signal_type = "V4_SCALP"
-            # V4 ถูกแบ่งปิดไปแล้ว (partial) → ถือเป็น re-entry → ไม่เปิด
-            elif basket.v5_alive and basket.v4_alive and basket.v4_partial_closed:
-                return None
-            # ไม่มี V5 หรือ V4 ไม่เข้าเงื่อนไขใด → ไม่เปิด
+            # Check Harmonic Projection for V5 at BOS
+            if blueprint and blueprint.swing_L and blueprint.swing_H and blueprint.swing_HL:
+                prz_new, _ = recalculate_prz_after_bos(
+                    blueprint.swing_L, blueprint.swing_H, blueprint.swing_HL,
+                    current_price, best_dir
+                )
+                if prz_new:
+                    # V5 BOS Mode: New PRZ confirmed after BOS
+                    v5_bos_mode = True
+                    signal_type = "V5_SNIPER"
+                    # Use new PRZ for TP
+                    self._v5_bos_tp = prz_new.prz_mid
+                else:
+                    signal_type = "V4_SCALP"
             else:
-                return None
+                signal_type = "V4_SCALP"
         else:
-            # ไม้ที่เกิดก่อน BOS (PRZ)
+            # Pre-BOS (PRZ Zone)
             if best_score >= THRESHOLD_V5:
                 signal_type = "V5_SNIPER"
             else:
@@ -232,15 +239,18 @@ class SignalComposer:
         else:
             bb = calc_bb(df_15m, COMPOSER_CONFIG["bb_period"], COMPOSER_CONFIG["bb_std"])
             sl, tp1, tp2 = calc_exits(best_dir, current_price, prz_zones, bb, kivanc_sig, blueprint)
+            # Override TP2 with V5 BOS PRZ if available
+            if v5_bos_mode and hasattr(self, '_v5_bos_tp'):
+                tp2 = self._v5_bos_tp
 
         # 10. Update basket state
         if signal_type == "V5_SNIPER":
             basket.v5_alive = True
+            basket.v5_count += 1
         elif signal_type == "V4_SCALP":
             if not basket.v4_alive:
                 basket.v4_alive = True
-                basket.v4_partial_closed = False  # เปิดใหม่ → ไม่ได้ถูก partial
-            # ถ้ามี V4 อยู่แล้วและยังไม่ partial → การเปิดเพิ่ม (ที่ BOS) จะไม่เปลี่ยนสถานะ partial
+                basket.v4_partial_closed = False
 
         basket.layer = layer
         basket.active = True
@@ -248,6 +258,7 @@ class SignalComposer:
 
         # 11. Package
         now = datetime.now(BKK).strftime("%H:%M:%S")
+        bos_tag = "[BOS-V5]" if v5_bos_mode else ""
         sig = ComposedSignal(
             direction=best_dir,
             signal_type=signal_type,
@@ -258,9 +269,10 @@ class SignalComposer:
             lot_multiplier=lot_multi,
             basket_layer=layer,
             confluence_score=best_score,
-            sources=[f"Base({base_score})+Boost({score_boost})", "Kivanc" if kivanc_sig else "Trend", "MicroBOS" if micro_bos else "NoBOS"],
+            sources=[f"Base({base_score})+Boost({score_boost})", "Kivanc" if kivanc_sig else "Trend", 
+                     "MicroBOS" if micro_bos else "NoBOS", "HarmonicV5" if v5_bos_mode else ""],
             timestamp=now,
-            label=f"🎯 {signal_type} {best_dir} | Layer:{layer} | Score:{best_score} | Session:{current_session}",
+            label=f"🎯 {signal_type} {best_dir}{bos_tag} | Layer:{layer} | Score:{best_score} | Session:{current_session}",
         )
 
         self.last_signal = sig
