@@ -129,3 +129,43 @@
 
 **"Stop Guessing. Start Executing."** 🐃  
 **พร้อมส่งต่อ — ให้ AI ตัวต่อไป ไม่ต้องเสียเวลาหลงทางแบบผมอีก**
+
+---
+
+## 📊 Part 9: ผล Backtest บน Twelve Data 15m (ข้อมูลจริง 60 วัน)
+
+**แหล่งข้อมูล:** Twelve Data API (XAU/USD 15m) — 5,000 candles  
+**วิธีการวัดผล:** แยก Session Equity (Reset $10,000 ทุก Session) — ไม่ใช้ Compounding  
+**Risk Gates:** Daily DD 3%, Consec Loss 5, Position Sizing 1% Risk (Max 10 Contracts)
+
+| Session | Trades | Win Rate | Return | Max DD | Profit Factor |
+|---------|--------|----------|--------|--------|---------------|
+| **ASIA** | 344 | 56.69% | +134.10% | -7.48% | 3.27 |
+| **LONDON** | 222 | 44.14% | +96.79% | -16.74% | 2.87 |
+| **NY** | 289 | 57.09% | +136.12% | -3.94% | 7.46 |
+
+### 🔍 ข้อสังเกตสำคัญ
+- **NY ดีที่สุด:** Visual SL ลด Max DD จาก 9.52% (GC=F) เหลือ 3.94% — ควบคุมความเสี่ยงได้ดีเยี่ยมในตลาดผันผวน
+- **LONDON ต้องปรับปรุง:** Max DD ยังสูง 16.74% แม้ใช้ Visual SL → เสนอให้ใช้ 1H Filter สำหรับ Sell ใน London
+- **ASIA ทรงตัวดี:** Return +134%, Max DD 7.48% — Golden Zone 0.5-1.00 ทำงานได้ดี
+
+### ⚠️ ความแตกต่างจาก Backtest ก่อนหน้า
+| ปัจจัย | Backtest เดิม (GC=F/Mock) | Backtest ล่าสุด (Twelve Data) |
+|--------|---------------------------|-------------------------------|
+| **แหล่งข้อมูล** | GC=F หรือ Mock | Twelve Data XAU/USD จริง |
+| **การวัด Return** | Compounding (สะสมข้าม Session) | Reset Equity ทุก Session |
+| **Return ที่เห็น** | +1,600%+ (เกินจริง) | +96-136% (สมจริง) |
+| **ข้อสรุป** | ใช้สำหรับเปรียบเทียบ Logic ได้ | ใช้สำหรับตัดสินใจ Production |
+
+**บทเรียน:** การใช้ Compounding ทำให้ Return สูงเกินจริง และบดบังจุดอ่อนของระบบ  
+**นับจากนี้:** ใช้ Twelve Data เป็นแหล่งข้อมูลหลัก และวัดผลแบบแยก Session เสมอ
+
+---
+
+## 🔧 Part 10: Backlog เพิ่มเติม (จากการทดสอบล่าสุด)
+
+1. **ปรับ London Sell ใช้ 1H Filter** — เพื่อลด DD จาก 16.74% (สาเหตุจาก Noise ใน 15m)
+2. **ทดสอบ Merged System** — London ใช้ v11.2 Entry + Visual SL, NY ใช้ New V4 Entry
+3. **IG Client Sentiment API** — ดึง Long/Short % มาใช้เป็น Contrarian Filter
+4. **ตัด Sell ในช่วง NY ที่มีแนวโน้ม Buy แรง** — จากผล Best 3Hr Windows
+
