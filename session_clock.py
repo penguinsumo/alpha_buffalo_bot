@@ -1,53 +1,70 @@
 """
-session_clock.py — Alpha Buffalo v5.4 (BKK Time UTC+7)
-Session Constants: ASIA 05:00-14:00, LONDON 14:00-19:00, NY 19:00-03:15 BKK
+session_clock.py — Alpha Buffalo v5.4 (Bangkok Time Standard)
+Session Boundaries (Final):
+  ASIA    05:00 – 14:00
+  LONDON  14:00 – 19:00
+  NY      19:00 – 02:15 (next day)
+  CLOSED  02:15 – 05:00
 """
 import pytz
-from datetime import datetime
+from datetime import datetime, time
 
-class SessionConstants:
-    ASIA_START_HOUR = 5
-    ASIA_END_HOUR = 14
-    
-    LONDON_START_HOUR = 14
-    LONDON_END_HOUR = 19
-    
-    NY_SUMMER_START = 19
-    NY_WINTER_START = 20
-    
-    NY_END_HOUR = 3
-    NY_END_MINUTE = 15
+BKK = pytz.timezone('Asia/Bangkok')
 
-def get_ny_start_hour(current_date: datetime) -> int:
-    tz_us = pytz.timezone("US/Eastern")
-    if current_date.tzinfo is None:
-        current_date = pytz.timezone('Asia/Bangkok').localize(current_date)
-    localized_time = current_date.astimezone(tz_us)
-    if localized_time.dst().total_seconds() > 0:
-        return SessionConstants.NY_SUMMER_START
-    return SessionConstants.NY_WINTER_START
+class Session:
+    ASIA = 'ASIA'
+    LONDON = 'LONDON'
+    NY = 'NY'
+    CLOSED = 'CLOSED'
+
+# Boundaries in Bangkok time
+ASIA_START    = time(5, 0)
+ASIA_END      = time(14, 0)
+LONDON_START  = time(14, 0)
+LONDON_END    = time(19, 0)
+NY_START      = time(19, 0)
+NY_END        = time(2, 15)   # next day
+
+def get_current_session(now_bkk: datetime) -> str:
+    t = now_bkk.time()
+    # CLOSED: 02:15 - 05:00
+    if time(2, 15) <= t < time(5, 0):
+        return Session.CLOSED
+    # ASIA: 05:00 - 14:00
+    if ASIA_START <= t < ASIA_END:
+        return Session.ASIA
+    # LONDON: 14:00 - 19:00
+    if LONDON_START <= t < LONDON_END:
+        return Session.LONDON
+    # NY: 19:00 - 02:15 (next day)
+    if t >= NY_START or t < NY_END:
+        return Session.NY
+    # Fallback (should not happen)
+    return Session.CLOSED
 
 def get_market_session_info():
-    bkk = pytz.timezone('Asia/Bangkok')
-    now_bkk = datetime.now(bkk)
-    hour = now_bkk.hour
-    minute = now_bkk.minute
-    
-    # ASIA: 05:00-14:00 BKK
-    if SessionConstants.ASIA_START_HOUR <= hour < SessionConstants.ASIA_END_HOUR:
-        session = "ASIA"
-    # LONDON: 14:00-19:00 BKK
-    elif SessionConstants.LONDON_START_HOUR <= hour < SessionConstants.LONDON_END_HOUR:
-        session = "LONDON"
-    # NY: 19:00-03:15 BKK (summer) / 20:00-03:15 BKK (winter)
-    elif (hour >= SessionConstants.NY_SUMMER_START) or (hour < SessionConstants.NY_END_HOUR) or \
-         (hour == SessionConstants.NY_END_HOUR and minute < SessionConstants.NY_END_MINUTE):
-        session = "NY"
-    else:
-        session = "CLOSED"
-    
+    now_bkk = datetime.now(BKK)
+    session = get_current_session(now_bkk)
     return {
         'session': session,
         'bkk_time': now_bkk.strftime('%H:%M (BKK)'),
         'display_msg': f"Session: {session} | {now_bkk.strftime('%H:%M BKK')}"
     }
+
+class H4SessionTracker:
+    """ตรวจจับช่วงเวลา H4 ปัจจุบัน (อิงตาม BKK time)"""
+    @staticmethod
+    def get_h4_boundary():
+        now_bkk = datetime.now(BKK)
+        current_hour = now_bkk.hour
+        h4_start = (current_hour // 4) * 4
+        h4_end = h4_start + 4
+        if h4_end >= 24:
+            h4_end = 0
+        is_approaching = (h4_end - current_hour) == 1 or (current_hour == 23 and h4_end == 0)
+        return {
+            'current_hour_bkk': current_hour,
+            'h4_start_bkk': h4_start,
+            'h4_end_bkk': h4_end,
+            'is_boundary_approaching': is_approaching
+        }
