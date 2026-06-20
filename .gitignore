@@ -2,3 +2,4 @@ backup_*/
 *.csv
 *.json
 venv/
+*.md
