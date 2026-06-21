@@ -103,7 +103,7 @@ class SignalComposer:
                 confluence_score=5,
                 sources=["BB Touch", "Bull Sweep", "EMA Trend"],
                 timestamp=datetime.now(BKK).strftime("%H:%M:%S"),
-                label="🟢 BUY 1H V4+Sweep",
+                label="BUY 1H",
                 visual_sl=sl
             )
 
@@ -129,7 +129,7 @@ class SignalComposer:
                 confluence_score=5,
                 sources=["BB Touch", "Bear Sweep", "EMA Trend"],
                 timestamp=datetime.now(BKK).strftime("%H:%M:%S"),
-                label="🔴 SELL 15m V4+Sweep",
+                label="SELL 15M",
                 visual_sl=visual_sl
             )
 
