@@ -1,32 +1,3 @@
-
-import traceback
-
-def debug_stage(name):
-    print(f"\n[DEBUG STAGE] {name}")
-
-def debug_log(label, value):
-    print(f"[DEBUG] {label}: {value}")
-
-def debug_error(e):
-    print("[DEBUG ERROR]")
-    print(traceback.format_exc())
-
-
-def safe_execute(fn, fallback=None):
-    try:
-        return fn()
-    except Exception as e:
-        print('[CORE ERROR]', e)
-        return fallback
-
-
-def safe_run(fn, default=None):
-    try:
-        return fn()
-    except Exception as e:
-        print('[ENGINE ERROR]', fn.__name__, e)
-        return default
-
 """
 signal_composer.py — Alpha Buffalo v11.2 (New V4 Hybrid)
 - Structured Decision Output (No‑None)
@@ -46,7 +17,7 @@ from harmonic_detector import run_harmonic, PRZZone
 from micro_engine      import run_micro, MicroSignal
 
 # v5.3 Modules
-from session_clock      import H4SessionTracker, get_current_session
+from session_clock      import H4SessionTracker, get_market_session_info
 from score_manager_v5p3 import ScoreManager, THRESHOLD_V4, THRESHOLD_V5
 from ASIA_TUNING_v5p3   import ASITuningManager, ASIAScalpTriggerGate
 
@@ -72,16 +43,18 @@ SESSION_HOURS = {
 }
 SESSION_V4_THRESHOLD = {'ASIA': 3, 'LONDON': 4, 'NY': 4}
 
-# ── Safe helper ─────────────────────────────────────
-def safe_float(x, default=0.0):
-    return default if x is None else float(x)
+def get_session(hour: int) -> str:
+    if 1 <= hour < 8: return 'ASIA'
+    elif 8 <= hour < 13: return 'LONDON'
+    elif 13 <= hour < 19: return 'NY'
+    return 'CLOSED'
 
 # ── Decision Object (No‑None) ──────────────────────────
 @dataclass
 class SignalDecision:
-    status: str = "NO_SIGNAL"       # "SIGNAL" | "NO_SIGNAL" | "WEAK_SIGNAL"
-    reason: str = "initial"
-    score: float = 0.0
+    status: str                     # "SIGNAL" | "NO_SIGNAL" | "WEAK_SIGNAL"
+    reason: str = ""                # human‑readable reason if not approved
+    score: int = 0
     direction: Optional[str] = None
     signal_type: Optional[str] = None
     entry_price: Optional[float] = None
@@ -140,78 +113,70 @@ class SignalComposer:
 
     def compose(self, df_4h: pd.DataFrame, df_1h: pd.DataFrame, df_15m: pd.DataFrame,
                 blueprint: Optional[ScenarioBlueprint] = None) -> SignalDecision:
-        session = get_current_session()
+        session_info = get_market_session_info()
+        current_session = session_info["session"]
         h4_info = H4SessionTracker.get_h4_boundary()
         current_price = float(df_15m["close"].iloc[-1])
 
         # 1. Run engines
-        kivanc_sig = safe_run(lambda: run_kivanc(df_1h)) or safe_run(lambda: run_kivanc(df_4h))
-        prz_zones = safe_run(lambda: run_harmonic(df_4h), []) + safe_run(lambda: run_harmonic(df_1h), [])
-        debug_stage('MICRO_ENGINE')
-micro_sigs = run_micro(df_15m) or []
+        kivanc_sig = run_kivanc(df_1h) or run_kivanc(df_4h)
+        prz_zones = run_harmonic(df_4h) + run_harmonic(df_1h)
+        micro_sigs = run_micro(df_15m)
 
         # 2. ScoreManager (using calculate, NOT evaluate)
         kivanc_score = 1 if kivanc_sig else 0
-        bos_detected = any(getattr(s, 'bos', False) for s in micro_sigs) if micro_sigs else False
-        score_result = safe_run(lambda: self.score_mgr.calculate(
-kivanc_score=kivanc_score,
+        bos_detected = any(s.bos for s in micro_sigs) if micro_sigs else False
+        score_result = self.score_mgr.calculate(
+            kivanc_score=kivanc_score,
             bos_detected=bos_detected,
             vsa_ok=False
         )
-        base_score = float(getattr(score_result, 'total', 0))
+        base_score = score_result.total
 
         # Direction detection
         if kivanc_sig and kivanc_sig.direction in ("BUY", "SELL"):
-            debug_stage('DIRECTION')
-best_dir = kivanc_sig.direction
+            best_dir = kivanc_sig.direction
         elif blueprint:
             best_dir = "BUY" if blueprint.trend_h4 == "UP" else "SELL"
         else:
-            debug_stage('DECISION_BUILD')
-return SignalDecision(status="NO_SIGNAL", reason="no_direction", score=base_score)
+            return SignalDecision(status="NO_SIGNAL", reason="no_direction", score=base_score)
 
         # 3. Session-Hour Permission Gate
-        if session == 'CLOSED':
-            debug_stage('DECISION_BUILD')
-return SignalDecision(status="NO_SIGNAL", reason="session_closed", score=base_score)
-        allowed_hours = SESSION_HOURS.get(session, {}).get(best_dir, [])
         utc_hour = pd.Timestamp.now(tz='UTC').hour
+        session = get_session(utc_hour)
+        if session == 'CLOSED':
+            return SignalDecision(status="NO_SIGNAL", reason="session_closed", score=base_score)
+        allowed_hours = SESSION_HOURS.get(session, {}).get(best_dir, [])
         if utc_hour not in allowed_hours:
-            debug_stage('DECISION_BUILD')
-return SignalDecision(status="NO_SIGNAL", reason="hour_not_permitted",
+            return SignalDecision(status="NO_SIGNAL", reason="hour_not_permitted",
                                   score=base_score, direction=best_dir,
                                   debug={"session": session, "hour": utc_hour, "allowed": allowed_hours})
 
         # 4. Session Threshold
         thresh = SESSION_V4_THRESHOLD.get(session, THRESHOLD_V4)
         if base_score < thresh:
-            debug_stage('DECISION_BUILD')
-return SignalDecision(status="NO_SIGNAL", reason="below_threshold",
+            return SignalDecision(status="NO_SIGNAL", reason="below_threshold",
                                   score=base_score, direction=best_dir,
                                   debug={"threshold": thresh, "score": base_score})
 
         # 5. ASIA Tuning Gates
-        if session == "ASIA":
+        if current_session == "ASIA":
             if not ASIAScalpTriggerGate.verify_sweep(micro_sigs):
-                debug_stage('DECISION_BUILD')
-return SignalDecision(status="NO_SIGNAL", reason="asia_sweep_fail", score=base_score)
+                return SignalDecision(status="NO_SIGNAL", reason="asia_sweep_fail", score=base_score)
             if not ASITuningManager.is_within_safe_time(h4_info["current_hour_utc"]):
-                debug_stage('DECISION_BUILD')
-return SignalDecision(status="NO_SIGNAL", reason="asia_safe_time_fail", score=base_score)
+                return SignalDecision(status="NO_SIGNAL", reason="asia_safe_time_fail", score=base_score)
 
         # 6. Basket Layer
         basket = self.buy_basket if best_dir == "BUY" else self.sell_basket
         if basket.killed:
-            debug_stage('DECISION_BUILD')
-return SignalDecision(status="NO_SIGNAL", reason="basket_killed", score=base_score)
+            return SignalDecision(status="NO_SIGNAL", reason="basket_killed", score=base_score)
         layer = basket.layer + 1
         lot_multi = COMPOSER_CONFIG[f"lot_layer_{min(layer, 2)}"]
         if layer > 2:
-            debug_stage('DECISION_BUILD')
-return SignalDecision(status="NO_SIGNAL", reason="max_layer_reached", score=base_score)
+            return SignalDecision(status="NO_SIGNAL", reason="max_layer_reached", score=base_score)
 
         # 7. Exits
-        if session == "ASIA":
+        if current_session == "ASIA":
             sl, tp1, tp2 = ASITuningManager.calculate_dynamic_exits(best_dir, current_price, df_15m)
         else:
             bb = calc_bb(df_15m, COMPOSER_CONFIG["bb_period"], COMPOSER_CONFIG["bb_std"])
@@ -228,12 +193,12 @@ return SignalDecision(status="NO_SIGNAL", reason="max_layer_reached", score=base
             direction=best_dir,
             signal_type=sig_type,
             entry_price=current_price,
-            sl_price=safe_float(sl),
-            tp1_price=safe_float(tp1),
-            tp2_price=safe_float(tp2),
+            sl_price=sl,
+            tp1_price=tp1,
+            tp2_price=tp2,
             lot_multiplier=lot_multi,
             basket_layer=layer,
-            debug={"session": session, "hour": utc_hour, "threshold": thresh}
+            debug={"session": current_session, "hour": utc_hour, "threshold": thresh}
         )
 
         basket.layer = layer
@@ -256,13 +221,7 @@ return SignalDecision(status="NO_SIGNAL", reason="max_layer_reached", score=base
 composer = SignalComposer()
 
 def compose_signal(df_4h, df_1h, df_15m, blueprint=None) -> SignalDecision:
-
-try:
     return composer.compose(df_4h, df_1h, df_15m, blueprint)
-except Exception as e:
-    print('[FATAL SIGNAL ERROR]', e)
-    return {'status':'NO_SIGNAL','score':0,'reason':'fatal_error'}
-
 
 def kill_basket(direction: str):
     composer.kill_basket(direction)

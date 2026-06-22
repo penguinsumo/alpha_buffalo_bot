@@ -1,7 +1,7 @@
 """
 alpha_buffalo_signal.py — Alpha Buffalo v11.2 (New V4 Hybrid)
 - Uses SignalDecision from signal_composer
-- No‑None pipeline with DecisionValidator
+- No‑None pipeline
 """
 import os, logging, sys
 from datetime import datetime, timezone
@@ -12,7 +12,7 @@ from pydantic import BaseModel
 import uvicorn
 
 from scenario_scanner import scanner as scenario_scanner
-from signal_composer import compose_signal, SignalDecision, safe_float
+from signal_composer import compose_signal, SignalDecision
 from data_provider_twelvedata import fetch_twelvedata
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -40,7 +40,7 @@ license_manager = SimpleLicenseManager()
 class CloudSignal(BaseModel):
     timestamp: str
     direction: str
-    score: float
+    score: int
     entry: float
     tp1: float
     tp2: float
@@ -71,7 +71,7 @@ def format_signal_message(signal: CloudSignal) -> str:
     msg = (
         f"{emoji} Alpha Buffalo{v5_tag}\n"
         f"📊 {signal.direction}\n"
-        f"🎯 Score: {signal.score:.1f}\n"
+        f"🎯 Score: {signal.score}\n"
         f"💰 Entry: {signal.entry:.2f}\n"
         f"📈 TP1: {signal.tp1:.2f}  TP2: {signal.tp2:.2f}\n"
         f"🛡️ SL: {signal.sl:.2f} (Visual: {signal.visual_sl:.2f})"
@@ -91,29 +91,6 @@ def fetch_market_data():
     except Exception as e:
         logger.error(f"fetch_market_data failed: {e}")
         return None, None, None
-
-# ── Decision Validator ─────────────────────────────────
-def validate_decision(decision: SignalDecision) -> bool:
-    if decision.status != "SIGNAL":
-        return False
-    if None in (decision.entry_price, decision.sl_price, decision.tp1_price, decision.tp2_price):
-        logger.error(f"Decision has None prices: {decision}")
-        return False
-    if decision.direction == "BUY":
-        if decision.sl_price >= decision.entry_price:
-            logger.error(f"Invalid SL for BUY: SL={decision.sl_price} >= Entry={decision.entry_price}")
-            return False
-        if decision.tp1_price <= decision.entry_price:
-            logger.error(f"Invalid TP for BUY: TP={decision.tp1_price} <= Entry={decision.entry_price}")
-            return False
-    else:
-        if decision.sl_price <= decision.entry_price:
-            logger.error(f"Invalid SL for SELL: SL={decision.sl_price} <= Entry={decision.entry_price}")
-            return False
-        if decision.tp1_price >= decision.entry_price:
-            logger.error(f"Invalid TP for SELL: TP={decision.tp1_price} >= Entry={decision.entry_price}")
-            return False
-    return True
 
 app = FastAPI(title="Alpha Buffalo Signal Bot", version="11.2")
 
@@ -150,26 +127,22 @@ async def latest_signal(key: str):
             "debug": decision.debug
         }
 
-    # Validate before broadcasting
-    if not validate_decision(decision):
-        return JSONResponse(status_code=500, content={"error": "Decision validation failed"})
-
-    # Build CloudSignal
+    # Build CloudSignal for broadcast
     is_v5 = decision.signal_type == "V5_SNIPER"
     signal = CloudSignal(
         timestamp=datetime.now(timezone.utc).isoformat(),
         direction=decision.direction,
         score=decision.score,
-        entry=safe_float(decision.entry_price),
-        tp1=safe_float(decision.tp1_price),
-        tp2=safe_float(decision.tp2_price),
-        sl=safe_float(decision.sl_price),
-        visual_sl=safe_float(decision.sl_price),
+        entry=decision.entry_price,
+        tp1=decision.tp1_price,
+        tp2=decision.tp2_price,
+        sl=decision.sl_price,
+        visual_sl=decision.sl_price,
         zone_valid=True,
         vsa_bias="NEUTRAL",
         is_v5=is_v5,
-        v5_tp1=safe_float(decision.tp1_price) if is_v5 else None,
-        v5_tp2=safe_float(decision.tp2_price) if is_v5 else None,
+        v5_tp1=decision.tp1_price if is_v5 else None,
+        v5_tp2=decision.tp2_price if is_v5 else None,
     )
     broadcast_signal(format_signal_message(signal))
     return signal.dict()

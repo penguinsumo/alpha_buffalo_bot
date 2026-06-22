@@ -151,7 +151,7 @@ class SignalComposer:
 micro_sigs = run_micro(df_15m) or []
 
         # 2. ScoreManager (using calculate, NOT evaluate)
-        kivanc_score = 1 if kivanc_sig else 0
+kivanc_score = 1 if kivanc_sig else 0
         bos_detected = any(getattr(s, 'bos', False) for s in micro_sigs) if micro_sigs else False
         score_result = safe_run(lambda: self.score_mgr.calculate(
 kivanc_score=kivanc_score,
@@ -256,7 +256,7 @@ return SignalDecision(status="NO_SIGNAL", reason="max_layer_reached", score=base
 composer = SignalComposer()
 
 def compose_signal(df_4h, df_1h, df_15m, blueprint=None) -> SignalDecision:
-
+    
 try:
     return composer.compose(df_4h, df_1h, df_15m, blueprint)
 except Exception as e:
