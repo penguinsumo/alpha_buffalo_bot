@@ -19,3 +19,4 @@ time_profile.json
 avg_spread
 body
 bot.log
+*.bak
