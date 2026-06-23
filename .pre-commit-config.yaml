@@ -1,8 +1,10 @@
 repos:
-  - repo: local
+  - repo: https://github.com/psf/black
+    rev: 24.4.2
     hooks:
-      - id: signal-contract-check
-        name: Signal Contract Validator
-        entry: python scripts/contract_check.py
-        language: system
-        files: signal_composer.py
+      - id: black
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.0
+    hooks:
+      - id: ruff
