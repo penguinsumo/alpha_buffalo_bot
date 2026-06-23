@@ -1,0 +1,27 @@
+name: Signal CI Gate
+
+on:
+  push:
+    paths:
+      - "signal_composer.py"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Compile Check
+        run: python -m py_compile signal_composer.py
+
+      - name: Contract Check
+        run: python scripts/contract_check.py
+
+      - name: Smoke Import Test
+        run: python -c "import signal_composer"
