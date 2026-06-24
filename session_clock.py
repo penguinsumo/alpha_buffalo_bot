@@ -1,268 +1,131 @@
+"""
+session_clock.py — Alpha Buffalo V12 (READ ONLY LAYER)
+
+ROLE:
+    - Provide market session state ONLY
+    - No decision logic
+    - No threshold logic
+    - No strategy logic
+
+OUTPUT:
+    - session: ASIA | LONDON | NY | CLOSED
+    - liquidity: NORMAL | OVERLAP | NONE
+    - time: BKK / UTC hour
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timedelta, time
 from typing import Optional, Dict, Any
 
 
 # =========================================================
-# TIMEBASE
+# TIMEBASE (BKK STANDARD)
 # =========================================================
 
 BKK = timezone(timedelta(hours=7))
 
 
 # =========================================================
-# SESSION PROVIDER (READ ONLY LAYER)
+# SESSION CONSTANTS (BKK TIME)
 # =========================================================
 
-class SessionProvider:
+ASIA_START   = time(5, 0)
+ASIA_END     = time(14, 0)
 
-    def get(self, dt: Optional[datetime] = None) -> Dict[str, Any]:
+LONDON_START = time(14, 0)
+LONDON_END   = time(19, 0)
+
+NY_START     = time(19, 0)
+NY_END       = time(2, 15)
+
+CLOSED_START = time(2, 15)
+CLOSED_END   = time(5, 0)
+
+
+# =========================================================
+# DATA MODEL (READ ONLY OUTPUT)
+# =========================================================
+
+@dataclass(frozen=True)
+class SessionState:
+    session: str
+    liquidity: str
+    bkk_hour: int
+    utc_hour: int
+    timestamp: str
+
+
+# =========================================================
+# SESSION CLOCK (READ ONLY)
+# =========================================================
+
+class SessionClock:
+    """
+    Read-only market session provider.
+    No trading logic allowed.
+    """
+
+    def get(self, dt: Optional[datetime] = None) -> SessionState:
 
         if dt is None:
             dt = datetime.now(BKK)
+
         elif dt.tzinfo is None:
             dt = dt.replace(tzinfo=BKK)
+
         else:
             dt = dt.astimezone(BKK)
 
-        hour = dt.hour
-        t = dt.time()
+        bkk_time = dt.time()
+        bkk_hour = dt.hour
 
-        # session boundaries (fixed truth)
-        if 2 <= hour < 5:
-            return {"session": "CLOSED", "hour": hour}
+        utc_dt = dt.astimezone(timezone.utc)
+        utc_hour = utc_dt.hour
 
-        if 5 <= hour < 14:
-            return {"session": "ASIA", "hour": hour}
+        session = "CLOSED"
+        liquidity = "NONE"
 
-        if 14 <= hour < 19:
-            return {"session": "LONDON", "hour": hour}
+        # =========================
+        # SESSION RESOLUTION
+        # =========================
 
-        if hour >= 19 or hour < 2:
-            liquidity = "OVERLAP" if 19 <= hour <= 23 else "NORMAL"
-            return {
-                "session": "NY",
-                "hour": hour,
-                "liquidity": liquidity
-            }
+        if ASIA_START <= bkk_time < ASIA_END:
+            session = "ASIA"
+            liquidity = "NORMAL"
 
-        return {"session": "CLOSED", "hour": hour}
+        elif LONDON_START <= bkk_time < LONDON_END:
+            session = "LONDON"
+            liquidity = "NORMAL"
 
+        elif bkk_time >= LONDON_START or bkk_time < time(2, 15):
+            session = "NY"
 
-# =========================================================
-# ADAPTIVE THRESHOLD ENGINE (EXTERNAL LOGIC PLUG)
-# =========================================================
+            # liquidity refinement only (no decision logic)
+            if 19 <= bkk_hour <= 23:
+                liquidity = "OVERLAP"
+            else:
+                liquidity = "NORMAL"
 
-class AdaptiveThresholdEngine:
+        elif CLOSED_START <= bkk_time < CLOSED_END:
+            session = "CLOSED"
+            liquidity = "NONE"
 
-    def calculate(self, session: str, liquidity: str, volatility: str, hour_state: str) -> int:
-
-        base_map = {
-            "ASIA": 60,
-            "LONDON": 70,
-            "NY": 70,
-            "CLOSED": 999
-        }
-
-        base = base_map.get(session, 70)
-
-        liquidity_adj = 5 if liquidity == "OVERLAP" else 0
-
-        volatility_adj = {
-            "HIGH": 5,
-            "MID": 0,
-            "LOW": -3
-        }.get(volatility, 0)
-
-        hour_adj = {
-            "HIGH": -2,
-            "NORMAL": 0,
-            "LOW": 4
-        }.get(hour_state, 0)
-
-        raw = base + liquidity_adj + volatility_adj + hour_adj
-
-        return max(55, min(80, raw))
-
-
-# =========================================================
-# SUPPORT ENGINES
-# =========================================================
-
-class VolatilityEngine:
-    def classify(self, v: float) -> str:
-        if v >= 1.5:
-            return "HIGH"
-        if v >= 0.8:
-            return "MID"
-        return "LOW"
-
-
-class HourEngine:
-    def classify(self, h: int) -> str:
-        if h in {7, 8, 9, 13, 14, 15, 18}:
-            return "HIGH"
-        if h in {0, 1, 2, 3, 22, 23}:
-            return "LOW"
-        return "NORMAL"
-
-
-class SweepEngine:
-    def detect(self, fibo: float, session: str) -> str:
-        if session == "NY" and fibo >= 0.786:
-            return "LIQUIDITY_SWEEP"
-        if session == "ASIA" and fibo <= 0.618:
-            return "EARLY_SWEEP"
-        return "NONE"
-
-
-class RiskEngine:
-    def calc(self, volatility: str, sweep: str) -> float:
-        r = 1.0
-
-        if volatility == "HIGH":
-            r *= 0.6
-        elif volatility == "MID":
-            r *= 0.8
-
-        if sweep != "NONE":
-            r *= 0.7
-
-        return round(r, 3)
-
-
-# =========================================================
-# CONTEXT MODEL
-# =========================================================
-
-@dataclass(frozen=True)
-class MarketContext:
-    session: str
-    liquidity: str
-    volatility: str
-    hour_state: str
-    sweep: str
-    hour: int
-
-
-@dataclass(frozen=True)
-class Decision:
-    allowed: bool
-    confidence: float
-    threshold: int
-    reason: str
-
-
-# =========================================================
-# DECISION ENGINE (CORE BRAIN)
-# =========================================================
-
-class DecisionEngine:
-
-    def evaluate(
-        self,
-        ctx: MarketContext,
-        fibo: float,
-        score: float,
-        risk_multiplier: float,
-        threshold: int
-    ) -> Decision:
-
-        confidence = score * 100
-
-        # session pressure
-        if ctx.session == "NY" and ctx.liquidity == "OVERLAP":
-            confidence += 5
-
-        # volatility penalty
-        if ctx.volatility == "HIGH":
-            confidence -= 10
-
-        # sweep boost
-        if ctx.sweep != "NONE":
-            confidence += 7
-
-        # risk scaling
-        confidence *= risk_multiplier
-
-        confidence = max(0, min(100, confidence))
-
-        allowed = confidence >= threshold
-
-        reason = f"{ctx.session}|{ctx.liquidity}|{ctx.volatility}|{ctx.sweep}"
-
-        return Decision(
-            allowed=allowed,
-            confidence=round(confidence, 2),
-            threshold=threshold,
-            reason=reason
-        )
-
-
-# =========================================================
-# UNIFIED ENGINE V12 (FINAL ORCHESTRATOR)
-# =========================================================
-
-class UnifiedEngineV12:
-
-    def __init__(self):
-        self.session_provider = SessionProvider()
-        self.vol = VolatilityEngine()
-        self.hour = HourEngine()
-        self.sweep = SweepEngine()
-        self.risk = RiskEngine()
-        self.threshold = AdaptiveThresholdEngine()
-        self.decision = DecisionEngine()
-
-    def run(
-        self,
-        fibo: float,
-        score: float,
-        volatility_score: float,
-        dt: Optional[datetime] = None
-    ) -> Decision:
-
-        s = self.session_provider.get(dt)
-
-        session = s["session"]
-        hour = s["hour"]
-        liquidity = s.get("liquidity", "NORMAL")
-
-        volatility = self.vol.classify(volatility_score)
-        hour_state = self.hour.classify(hour)
-        sweep = self.sweep.detect(fibo, session)
-
-        risk = self.risk.calc(volatility, sweep)
-
-        threshold = self.threshold.calculate(
+        return SessionState(
             session=session,
             liquidity=liquidity,
-            volatility=volatility,
-            hour_state=hour_state
-        )
-
-        ctx = MarketContext(
-            session=session,
-            liquidity=liquidity,
-            volatility=volatility,
-            hour_state=hour_state,
-            sweep=sweep,
-            hour=hour
-        )
-
-        return self.decision.evaluate(
-            ctx=ctx,
-            fibo=fibo,
-            score=score,
-            risk_multiplier=risk,
-            threshold=threshold
+            bkk_hour=bkk_hour,
+            utc_hour=utc_hour,
+            timestamp=dt.isoformat()
         )
 
 
 # =========================================================
-# SINGLETON EXPORT
+# BACKTEST SUPPORT ONLY
 # =========================================================
 
-engine = UnifiedEngineV12()
+class SessionClockBacktest(SessionClock):
+
+    def get_many(self, dates: list[datetime]):
+        return [self.get(dt) for dt in dates]
