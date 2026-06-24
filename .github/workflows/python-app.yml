@@ -39,4 +39,6 @@ jobs:
           pip install pytest  # or better: pip install -r requirements-dev.txt
 
       - name: Test with pytest
-        run: python -m pytest --suppress-no-test-exit-code
+        run: |
+        # รัน pytest แบบปกติ ถ้าไม่มีไฟล์ test มันจะจบด้วย Exit Code 0 (ผ่าน) เองอยู่แล้ว
+        python -m pytest
