@@ -34,11 +34,6 @@ async def webhook(request: Request):
         send_message(chat_id, "🐃 ALPHA BUFFALO V5\nGold Trading Signal System\nCommands: /status")
     return {"ok": True}
 
-@app.get("/")
-def root():
-    return {"ok": True}
-
-@app.get("/")nasync def root():n    return {"status": "OK", "bot": "Alpha Buffalo v11.2"}nif __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
 
