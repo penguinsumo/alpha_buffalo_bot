@@ -1,9 +1,6 @@
-from dataclasses import dataclass
-from typing import Optional
-
-@dataclass
-class SignalDecision:
-    direction: str
-    confidence: float
-    score: float
-    reason: Optional[str] = None
+def create_signal(direction="HOLD", confidence=0.0, source="system"):
+    return {
+        "direction": direction,
+        "confidence": float(confidence),
+        "source": str(source)
+    }

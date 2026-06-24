@@ -1,6 +1,6 @@
 """
 alpha_buffalo_signal.py — Alpha Buffalo v11.2 (New V4 Hybrid)
-- Uses  from signal_composer
+- Uses SignalDecision from signal_composer
 - No‑None pipeline with DecisionValidator
 """
 import os, logging, sys
@@ -12,6 +12,7 @@ from pydantic import BaseModel
 import uvicorn
 
 from scenario_scanner import scanner as scenario_scanner
+from signal_composer import compose_signal, SignalDecision, safe_float
 from data_provider_twelvedata import fetch_twelvedata
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -65,11 +66,11 @@ def broadcast_signal(text: str):
             logger.error(f"Broadcast failed: {e}")
 
 def format_signal_message(signal: CloudSignal) -> str:
-    emoji = "🟢" if signal['direction'] == "BUY" else "🔴" if signal['direction'] == "SELL" else "⚪"
+    emoji = "🟢" if signal.direction == "BUY" else "🔴" if signal.direction == "SELL" else "⚪"
     v5_tag = " [V5]" if signal.is_v5 else ""
     msg = (
         f"{emoji} Alpha Buffalo{v5_tag}\n"
-        f"📊 {signal['direction']}\n"
+        f"📊 {signal.direction}\n"
         f"🎯 Score: {signal.score:.1f}\n"
         f"💰 Entry: {signal.entry:.2f}\n"
         f"📈 TP1: {signal.tp1:.2f}  TP2: {signal.tp2:.2f}\n"
@@ -92,25 +93,25 @@ def fetch_market_data():
         return None, None, None
 
 # ── Decision Validator ─────────────────────────────────
-def validate_decision(decision: dict) -> bool:
-    if decision["direction"] != "SIGNAL":
+def validate_decision(decision: SignalDecision) -> bool:
+    if decision.status != "SIGNAL":
         return False
-    if None in (decision['entry_price'], decision['sl_price'], decision['tp1_price'], decision['tp2_price']):
+    if None in (decision.entry_price, decision.sl_price, decision.tp1_price, decision.tp2_price):
         logger.error(f"Decision has None prices: {decision}")
         return False
-    if decision['direction'] == "BUY":
-        if decision['sl_price'] >= decision['entry_price']:
-            logger.error(f"Invalid SL for BUY: SL={decision['sl_price']} >= Entry={decision['entry_price']}")
+    if decision.direction == "BUY":
+        if decision.sl_price >= decision.entry_price:
+            logger.error(f"Invalid SL for BUY: SL={decision.sl_price} >= Entry={decision.entry_price}")
             return False
-        if decision['tp1_price'] <= decision['entry_price']:
-            logger.error(f"Invalid TP for BUY: TP={decision['tp1_price']} <= Entry={decision['entry_price']}")
+        if decision.tp1_price <= decision.entry_price:
+            logger.error(f"Invalid TP for BUY: TP={decision.tp1_price} <= Entry={decision.entry_price}")
             return False
     else:
-        if decision['sl_price'] <= decision['entry_price']:
-            logger.error(f"Invalid SL for SELL: SL={decision['sl_price']} <= Entry={decision['entry_price']}")
+        if decision.sl_price <= decision.entry_price:
+            logger.error(f"Invalid SL for SELL: SL={decision.sl_price} <= Entry={decision.entry_price}")
             return False
-        if decision['tp1_price'] >= decision['entry_price']:
-            logger.error(f"Invalid TP for SELL: TP={decision['tp1_price']} >= Entry={decision['entry_price']}")
+        if decision.tp1_price >= decision.entry_price:
+            logger.error(f"Invalid TP for SELL: TP={decision.tp1_price} >= Entry={decision.entry_price}")
             return False
     return True
 
@@ -136,17 +137,17 @@ async def latest_signal(key: str):
         blueprint = None
 
     try:
-        decision = compose_signal(df_4h, df_1h, df_15m)
+        decision = compose_signal(df_4h, df_1h, df_15m, blueprint=blueprint)
     except Exception as e:
         logger.error(f"Signal engine error: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "Signal engine failure"})
 
-    if decision["direction"] != "SIGNAL":
+    if decision.status != "SIGNAL":
         return {
-            "status": decision["direction"],
-            "score": decision['score'],
-            "reason": decision['reason'],
-            "debug": decision['debug']
+            "status": decision.status,
+            "score": decision.score,
+            "reason": decision.reason,
+            "debug": decision.debug
         }
 
     # Validate before broadcasting
@@ -154,21 +155,21 @@ async def latest_signal(key: str):
         return JSONResponse(status_code=500, content={"error": "Decision validation failed"})
 
     # Build CloudSignal
-    is_v5 = decision['signal_type'] == "V5_SNIPER"
+    is_v5 = decision.signal_type == "V5_SNIPER"
     signal = CloudSignal(
         timestamp=datetime.now(timezone.utc).isoformat(),
-        direction=decision['direction'],
-        score=decision['score'],
-        entry=safe_float(decision['entry_price']),
-        tp1=safe_float(decision['tp1_price']),
-        tp2=safe_float(decision['tp2_price']),
-        sl=safe_float(decision['sl_price']),
-        visual_sl=safe_float(decision['sl_price']),
+        direction=decision.direction,
+        score=decision.score,
+        entry=safe_float(decision.entry_price),
+        tp1=safe_float(decision.tp1_price),
+        tp2=safe_float(decision.tp2_price),
+        sl=safe_float(decision.sl_price),
+        visual_sl=safe_float(decision.sl_price),
         zone_valid=True,
         vsa_bias="NEUTRAL",
         is_v5=is_v5,
-        v5_tp1=safe_float(decision['tp1_price']) if is_v5 else None,
-        v5_tp2=safe_float(decision['tp2_price']) if is_v5 else None,
+        v5_tp1=safe_float(decision.tp1_price) if is_v5 else None,
+        v5_tp2=safe_float(decision.tp2_price) if is_v5 else None,
     )
     broadcast_signal(format_signal_message(signal))
     return signal.dict()
@@ -177,7 +178,7 @@ async def latest_signal(key: str):
 async def tv_webhook(payload: TVWebhookPayload):
     if payload.passphrase != TV_PASSPHRASE:
         raise HTTPException(status_code=401, detail="Invalid passphrase")
-    msg = f"📡 TV Alert\nDirection: {payload['direction']}\nPrice: {payload.price}"
+    msg = f"📡 TV Alert\nDirection: {payload.direction}\nPrice: {payload.price}"
     broadcast_signal(msg)
     return {"status": "ok"}
 
