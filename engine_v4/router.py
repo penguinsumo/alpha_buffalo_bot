@@ -4,7 +4,7 @@ SignalRouter — จัดการ loop แท่ง เรียก gate + eng
 """
 from typing import List
 import pandas as pd
-from session_clock import SessionClock, SessionInfo
+from session_clock import SessionClock, SessionState
 from engine_v4.session_gate import SessionGate, GateResult
 from engine_v4.buy_engine import BuySignalEngine
 from engine_v4.sell_engine import SellSignalEngine
@@ -19,31 +19,25 @@ class SignalRouter:
 
     def process(self, df: pd.DataFrame, daily_dd_ok: bool = True,
                 consec_loss_ok: bool = True) -> List[dict]:
-        """
-        รับ DataFrame 15m ที่มี indicator พร้อมแล้ว
-        ตรวจสอบเฉพาะแท่งล่าสุด (หรือตามที่เราต้องการ) โดย loop จากท้าย
-        """
-        signals = []
-        # ตรวจสอบเฉพาะแท่งล่าสุด (production) หรือทั้ง history (backtest)
-        # สำหรับ production: เริ่มจากแท่งสุดท้าย
-        last_idx = len(df) - 1
-        idx = last_idx
+        # ดูเฉพาะแท่งล่าสุด
+        idx = len(df) - 1
         row = df.iloc[idx]
         ts = row.name
-        utc_hour = ts.hour
-        session_info = self.clock.get(ts)
+        # แก้ timezone ให้เป็น UTC ก่อนส่งเข้า SessionClock
+        if ts.tzinfo is None:
+            ts = ts.tz_localize('UTC')
+        session_state = self.clock.get(ts)
 
+        signals = []
         # BUY
-        gate_buy = self.gate.evaluate(session_info, 'BUY', utc_hour,
-                                       daily_dd_ok, consec_loss_ok)
-        signal = self.buy_engine.evaluate(df, idx, session_info, gate_buy)
+        gate_buy = self.gate.evaluate(session_state, 'BUY', daily_dd_ok, consec_loss_ok)
+        signal = self.buy_engine.evaluate(df, idx, session_state, gate_buy)
         if signal:
             signals.append(signal)
 
         # SELL
-        gate_sell = self.gate.evaluate(session_info, 'SELL', utc_hour,
-                                        daily_dd_ok, consec_loss_ok)
-        signal = self.sell_engine.evaluate(df, idx, session_info, gate_sell)
+        gate_sell = self.gate.evaluate(session_state, 'SELL', daily_dd_ok, consec_loss_ok)
+        signal = self.sell_engine.evaluate(df, idx, session_state, gate_sell)
         if signal:
             signals.append(signal)
 
