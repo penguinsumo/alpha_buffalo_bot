@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BuySignalEngine — V12 Final Logic
+BuySignalEngine — V12 Final Logic (ตรง Final Baseline)
 """
 from typing import Optional
 import pandas as pd
@@ -10,7 +10,6 @@ from session_clock import SessionState
 
 class BuySignalEngine(BaseEngine):
     def run(self, *args, **kwargs):
-        """Concrete implementation required by BaseEngine."""
         return self.evaluate(*args, **kwargs)
 
     def evaluate(self, df: pd.DataFrame, idx: int,
@@ -19,7 +18,11 @@ class BuySignalEngine(BaseEngine):
         if not gate_result.allowed:
             return None
         row = df.iloc[idx]
+        # Trend Filter (1H)
         if not row['Trend_1H_Up']:
+            return None
+        # EMA Alignment (สำคัญ)
+        if not (row['EMA20'] > row['EMA50']):
             return None
         if row['Diff'] <= 0:
             return None
