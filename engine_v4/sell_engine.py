@@ -9,6 +9,10 @@ from engine_v4.session_gate import GateResult
 from session_clock import SessionState
 
 class SellSignalEngine(BaseEngine):
+    def run(self, *args, **kwargs):
+        """Concrete implementation required by BaseEngine."""
+        return self.evaluate(*args, **kwargs)
+
     def evaluate(self, df: pd.DataFrame, idx: int,
                  session_state: SessionState,
                  gate_result: GateResult) -> Optional[dict]:
