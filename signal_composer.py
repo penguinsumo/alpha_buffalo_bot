@@ -233,3 +233,9 @@ def compose_signal(df_4h, df_1h, df_15m, blueprint=None):
 def get_fill_price(signal_bar, next_bar=None):
     if next_bar is not None: return next_bar['open']
     return signal_bar['close']
+
+def safe_float(x, default=0.0):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
