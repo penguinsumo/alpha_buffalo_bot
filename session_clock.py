@@ -129,3 +129,16 @@ class SessionClockBacktest(SessionClock):
 
     def get_many(self, dates: list[datetime]):
         return [self.get(dt) for dt in dates]
+
+# =========================================================
+# BACKWARD COMPATIBILITY (for signal_composer.py)
+# =========================================================
+class H4SessionTracker:
+    """Placeholder for legacy support."""
+    pass
+
+def get_current_session():
+    """Return current session string for legacy code."""
+    clock = SessionClock()
+    state = clock.get()
+    return state.session
