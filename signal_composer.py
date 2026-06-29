@@ -1,3 +1,4 @@
+import os
 """
 signal_composer.py — Alpha Buffalo New V4 + Session-Hour Gate + Adaptive Hourly Gate + Threshold per Session
 """
@@ -118,6 +119,12 @@ class SignalComposer:
         self.score_mgr = ScoreManager()
 
     def compose(self, df_4h, df_1h, df_15m, blueprint=None):
+        if os.getenv('ENABLE_V12_ENGINE', 'false').lower() == 'true':
+            return self._compose_v4(df_4h, df_1h, df_15m, blueprint)
+
+        if os.getenv('ENABLE_V12_ENGINE', 'false').lower() == 'true':
+            return self._compose_v4(df_4h, df_1h, df_15m, blueprint)
+
         current_price = float(df_15m["close"].iloc[-1])
 
         kivanc_sig = run_kivanc(df_1h) or run_kivanc(df_4h)
@@ -212,6 +219,72 @@ class SignalComposer:
         self.last_signal = sig
         return sig
 
+    
+    def _compose_v4(self, df_4h, df_1h, df_15m, blueprint=None):
+        from engine_v4.indicators import add_indicators
+        from engine_v4.router import SignalRouter
+        from engine_v4.final_gate import FinalGate
+        from engine_v4.buy_engine import BuySignalEngine
+        from engine_v4.sell_engine import SellSignalEngine
+        from session_clock import SessionClock
+
+        df = add_indicators(df_15m)
+        if df.empty:
+            return None
+        clock = SessionClock()
+        gate = FinalGate(clock)
+        buy_eng = BuySignalEngine()
+        sell_eng = SellSignalEngine()
+        router = SignalRouter(clock, gate, buy_eng, sell_eng)
+        signals = router.process(df)
+        if not signals:
+            return None
+        best = max(signals, key=lambda s: s.get('score', 0))
+        return {
+            'direction': best['direction'],
+            'score': best.get('score', 5),
+            'entry_price': best['entry'],
+            'sl_price': best['sl'],
+            'tp1_price': best['tp'],
+            'tp2_price': best['tp'],
+            'signal_type': 'V4_SCALP',
+            'reason': f"V4 Engine: {best.get('session','')} {best.get('direction','')}",
+            'debug': best
+        }
+
+    
+    def _compose_v4(self, df_4h, df_1h, df_15m, blueprint=None):
+        from engine_v4.indicators import add_indicators
+        from engine_v4.router import SignalRouter
+        from engine_v4.final_gate import FinalGate
+        from engine_v4.buy_engine import BuySignalEngine
+        from engine_v4.sell_engine import SellSignalEngine
+        from session_clock import SessionClock
+
+        df = add_indicators(df_15m)
+        if df.empty:
+            return None
+        clock = SessionClock()
+        gate = FinalGate(clock)
+        buy_eng = BuySignalEngine()
+        sell_eng = SellSignalEngine()
+        router = SignalRouter(clock, gate, buy_eng, sell_eng)
+        signals = router.process(df)
+        if not signals:
+            return None
+        best = max(signals, key=lambda s: s.get('score', 0))
+        return {
+            'direction': best['direction'],
+            'score': best.get('score', 5),
+            'entry_price': best['entry'],
+            'sl_price': best['sl'],
+            'tp1_price': best['tp'],
+            'tp2_price': best['tp'],
+            'signal_type': 'V4_SCALP',
+            'reason': f"V4 Engine: {best.get('session','')} {best.get('direction','')}",
+            'debug': best
+        }
+
     def kill_basket(self, direction: str):
         basket = self.buy_basket if direction == "BUY" else self.sell_basket
         basket.killed = True; basket.active = False; basket.layer = 0
@@ -228,3 +301,9 @@ def compose_signal(df_4h, df_1h, df_15m, blueprint=None):
 def get_fill_price(signal_bar, next_bar=None):
     if next_bar is not None: return next_bar['open']
     return signal_bar['close']
+
+def safe_float(x, default=0.0):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
