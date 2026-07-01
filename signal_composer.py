@@ -1,21 +1,21 @@
 """
-signal_composer.py — Alpha Buffalo New V4 + Session-Hour Gate + Adaptive Hourly Gate + Threshold per Session
+signal_composer.py — Alpha Buffalo New V4 + Session-Hour Gate (SessionClock V12)
+Refactored: ใช้ SessionClock จริงเป็น Single Source of Truth
 """
 import pandas as pd
 from dataclasses import dataclass, field
 from typing import Optional, List
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from kivanc_vsaob      import run_kivanc, KivancSignal
 from harmonic_detector import run_harmonic, PRZZone
 from micro_engine      import run_micro, MicroSignal
-from session_clock     import H4SessionTracker, get_current_session
+from session_clock     import SessionClock          # V12 Read-Only Clock
 from score_manager_v5p3 import ScoreManager, THRESHOLD_V4, THRESHOLD_V5
 from scenario_scanner  import ScenarioBlueprint
 from trade_manager     import hourly_stats
 
-BKK = ZoneInfo("Asia/Bangkok")
+BKK = timezone.utc  # ระบบใช้ UTC เป็นหลัก
 
 COMPOSER_CONFIG = {
     "basket_layer_1":   0.618,
@@ -27,7 +27,7 @@ COMPOSER_CONFIG = {
     "bb_std":           2.0,
 }
 
-# ── Permission Table ──────────────────────────────
+# ── Permission Table (กฎการเปิดช่วงเวลา) ──
 SESSION_HOURS = {
     'ASIA':   {'BUY': [1],           'SELL': [3, 5]},
     'LONDON': {'BUY': [],            'SELL': [8, 9, 12]},
@@ -37,11 +37,12 @@ SESSION_HOURS = {
 MIN_HOURLY_WR = {'ASIA': 0.30, 'LONDON': 0.35, 'NY': 0.40}
 SESSION_V4_THRESHOLD = {'ASIA': 3, 'LONDON': 4, 'NY': 4}
 
-def get_session(hour: int) -> str:
-    if 1 <= hour < 8: return 'ASIA'
-    elif 8 <= hour < 13: return 'LONDON'
-    elif 13 <= hour < 19: return 'NY'
-    return 'CLOSED'
+# Session Clock instance (สร้างครั้งเดียว)
+_session_clock = SessionClock()
+
+def get_current_session_state():
+    """คืนค่า session state จาก SessionClock ปัจจุบัน"""
+    return _session_clock.get(datetime.now(timezone.utc))
 
 @dataclass
 class BasketState:
@@ -139,12 +140,16 @@ class SignalComposer:
         else:
             return None
 
-        utc_hour = pd.Timestamp.now(tz='UTC').hour
-        session = get_session(utc_hour)
+        # ── ใช้ SessionClock แทน hardcoded get_session ──
+        now_utc = datetime.now(timezone.utc)
+        session_state = _session_clock.get(now_utc)
+        session = session_state.session
+        utc_hour = now_utc.hour
+
         if session == 'CLOSED':
             return None
 
-        # ── Gate 1: Session-Hour Permission Table ──
+        # ── Gate 1: Session-Hour Permission Table (กฎเดิม แต่ session มาจาก Clock) ──
         allowed_hours = SESSION_HOURS.get(session, {}).get(best_dir, [])
         if utc_hour not in allowed_hours:
             return None
@@ -228,3 +233,9 @@ def compose_signal(df_4h, df_1h, df_15m, blueprint=None):
 def get_fill_price(signal_bar, next_bar=None):
     if next_bar is not None: return next_bar['open']
     return signal_bar['close']
+
+def safe_float(x, default=0.0):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default

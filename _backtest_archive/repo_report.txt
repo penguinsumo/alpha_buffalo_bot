@@ -1,0 +1,379 @@
+--- Repository Report ---
+FILE: main.py
+--- Lines ---
+      48 main.py
+--- Imports ---
+import os
+import logging
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from decision_engine import engine
+--- Top/Bottom ---
+import os
+import logging
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+# ดึง engine มาจากไฟล์ที่คุณเพิ่งทำเสร็จ
+from decision_engine import engine
+
+# 1. ตั้งค่า Logger (ก่อน lifespan จะได้อ้างอิงได้)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("AlphaBuffaloGateway")
+
+# 2. ใช้ lifespan แทน on_event (มาตรฐานใหม่)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Gateway Started. System Ready.")
+    yield
+    logger.info("Gateway Shutdown.")
+
+app = FastAPI(lifespan=lifespan)
+
+# 3. จุดเชื่อมต่อจริง (เชื่อมกับ decision_engine)
+@app.post("/webhook")
+async def handle_signal(data: dict):
+    try:
+        # ส่งค่าเข้า Engine V12 ของคุณ
+        decision = engine.run(
+            fibo=float(data.get("fibo", 0)),
+            score=float(data.get("score", 0)),
+            volatility_score=float(data.get("vol", 0))
+        )
+        return {"allowed": decision.allowed, "confidence": decision.confidence, "reason": decision.reason}
+    except Exception as e:
+        logger.error(f"Engine Error: {e}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+--------------------------
+FILE: alpha_buffalo_signal.py
+--- Lines ---
+     364 alpha_buffalo_signal.py
+--- Imports ---
+import os
+import requests
+import time
+import threading
+import uuid
+import pandas as pd
+from datetime import datetime, timezone, timedelta
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
+from pydantic import BaseModel
+import uvicorn
+from signal_engine import compute_signal, signal_to_dict
+from trend_monitor import (analyze_trend, format_trend_message,
+--- Top/Bottom ---
+"""
+alpha_buffalo_signal.py — Alpha Buffalo v5 Cloud-Driven
+"""
+import os
+import requests
+import time
+import threading
+import uuid
+import pandas as pd
+from datetime import datetime, timezone, timedelta
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
+from pydantic import BaseModel
+import uvicorn
+from signal_engine import compute_signal, signal_to_dict
+from trend_monitor import (analyze_trend, format_trend_message,
+                            format_signal_message, format_welcome_message,
+                            should_send_trend_alert)
+
+BKK = timezone(timedelta(hours=7))
+            from session_weight import format_session_status, should_close_asia_positions
+            msg = format_session_status()
+            close = should_close_asia_positions()
+            if close["should_close"]:
+                urgency = "URGENT" if close["urgent"] else "INFO"
+                msg += f"\n{urgency}: {close['reason']}"
+        except Exception as e:
+            msg = f"Session error: {e}"
+        send_telegram(msg, chat_id)
+    elif t in ("/help", "/?"):
+        help_msg = "/status /price /health /context /setup\n/quota /newlicense /newtrial /revoke /extend /licenses"
+        send_telegram(help_msg, chat_id)
+
+
+if __name__ == "__main__":
+    print("🐃 ALPHA BUFFALO v5 started\n")
+    threading.Thread(target=command_loop, daemon=True).start()
+    threading.Thread(target=signal_loop,  daemon=True).start()
+    port = int(os.getenv("PORT",8080))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+--------------------------
+FILE: decision_engine.py
+--- Lines ---
+     268 decision_engine.py
+--- Imports ---
+from __future__ import annotations
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any
+--- Top/Bottom ---
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any
+
+
+# =========================================================
+# TIMEBASE
+# =========================================================
+
+BKK = timezone(timedelta(hours=7))
+
+
+# =========================================================
+# SESSION PROVIDER (READ ONLY LAYER)
+# =========================================================
+
+class SessionProvider:
+
+            volatility=volatility,
+            hour_state=hour_state,
+            sweep=sweep,
+            hour=hour
+        )
+
+        return self.decision.evaluate(
+            ctx=ctx,
+            fibo=fibo,
+            score=score,
+            risk_multiplier=risk,
+            threshold=threshold
+        )
+
+
+# =========================================================
+# SINGLETON EXPORT
+# =========================================================
+
+engine = UnifiedEngineV12()
+--------------------------
+FILE: signal_engine.py
+--- Lines ---
+     594 signal_engine.py
+--- Imports ---
+import pandas as pd
+import numpy as np
+import os
+from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+from score_manager import calculate_score, THRESHOLD_V4, THRESHOLD_V5
+--- Top/Bottom ---
+"""
+signal_engine_v2.py — Alpha Buffalo v5.2 (Sprint Clean)
+Python Brain: รวม Cascade H4→H1→M15 + Harmonic PRZ + Context + Scenario
+
+Changes from v5.1:
+  [PATCH] ลบ inline score += ทุกจุด
+          → ใช้ score_manager.calculate() แทน (Bucket A/B/C/D/E)
+  [PATCH] กัน double count: VSA / Sweep / PDH ไม่นับซ้ำ
+  [KEEP]  Logic ทุกส่วนเหมือนเดิม (cascade, BOS, harmonic, BB, context, scenario)
+"""
+
+import pandas as pd
+import numpy as np
+import os
+from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+
+# ── Score Manager (ใหม่) ──────────────────────────────────
+from score_manager import calculate_score, THRESHOLD_V4, THRESHOLD_V5
+        "entry":           sig.entry,
+        "sl":              sig.sl,
+        "be_price":        sig.be_price,
+        "trail_from":      sig.trail_from,
+        "tp_final":        sig.tp_final,
+        "partial":         sig.partial,
+        "pattern":         sig.pattern,
+        "score":           sig.score,
+        "context_adj":     sig.context_adj,
+        "final_score":     sig.final_score,
+        "layer":           sig.layer,
+        "session":         sig.session,
+        "timestamp":       sig.timestamp,
+        "fallback_sl":     sig.fallback_sl,
+        "fallback_tp":     sig.fallback_tp,
+        "st_h4":           sig.st_h4,
+        "st_1h":           sig.st_1h,
+        "st_15m":          sig.st_15m,
+        "score_breakdown": sig.score_breakdown,  # [NEW] debug field
+    }
+--------------------------
+FILE: signal_composer.py
+--- Lines ---
+     347 signal_composer.py
+--- Imports ---
+import pandas as pd
+import numpy as np
+from dataclasses import dataclass, field
+from typing import Optional
+from datetime import datetime, timezone, timedelta
+from kivanc_vsaob    import run_kivanc,    KivancSignal
+from harmonic_detector import run_harmonic, PRZZone, get_active_prz
+from micro_engine    import run_micro,     MicroSignal, get_micro_summary
+--- Top/Bottom ---
+"""
+signal_composer.py — Alpha Buffalo v5
+รวม v4+ Session Logic + v5 Sniper (Kivanc + Harmonic + Micro)
+
+Flow:
+  df_4h  → pivot_engine (structure) + harmonic_detector (PRZ)
+  df_1h  → pivot_engine (fibo) + kivanc_vsaob (OB zone)
+  df_15m → micro_engine (session H/L + sweep)
+         → signal_composer (stack confluence → BUY/SELL Engine)
+         → equity_guard → send_signal()
+
+Exit:
+  TP1 = 0.382 CD
+  TP2 = BB Upper/Lower + Kivanc PRZ ใหม่
+  Trail SL = BB Middle
+  Kill Switch = ทะลุ 88.6% → lot=0
+
+Basket Martingale:
+  ชั้น 1: PRZ 61.8%  lot=1.0x
+  ชั้น 2: PRZ 78.6%  lot=1.5x
+
+def compose_signal(
+    df_4h: pd.DataFrame,
+    df_1h: pd.DataFrame,
+    df_15m: pd.DataFrame,
+) -> Optional[ComposedSignal]:
+    """Entry point หลัก — เรียกจาก alpha_buffalo_signal.py"""
+    return composer.compose(df_4h, df_1h, df_15m)
+
+
+def format_composed(sig: ComposedSignal) -> str:
+    return composer.format_signal(sig)
+
+
+def kill_basket(direction: str):
+    composer.kill_basket(direction)
+
+
+def reset_basket(direction: str):
+    composer.reset_basket(direction)
+--------------------------
+FILE: session_clock.py
+--- Lines ---
+     131 session_clock.py
+--- Imports ---
+from __future__ import annotations
+from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta, time
+from typing import Optional, Dict, Any
+--- Top/Bottom ---
+"""
+session_clock.py — Alpha Buffalo V12 (READ ONLY LAYER)
+
+ROLE:
+    - Provide market session state ONLY
+    - No decision logic
+    - No threshold logic
+    - No strategy logic
+
+OUTPUT:
+    - session: ASIA | LONDON | NY | CLOSED
+    - liquidity: NORMAL | OVERLAP | NONE
+    - time: BKK / UTC hour
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta, time
+from typing import Optional, Dict, Any
+            session = "CLOSED"
+            liquidity = "NONE"
+
+        return SessionState(
+            session=session,
+            liquidity=liquidity,
+            bkk_hour=bkk_hour,
+            utc_hour=utc_hour,
+            timestamp=dt.isoformat()
+        )
+
+
+# =========================================================
+# BACKTEST SUPPORT ONLY
+# =========================================================
+
+class SessionClockBacktest(SessionClock):
+
+    def get_many(self, dates: list[datetime]):
+        return [self.get(dt) for dt in dates]
+--------------------------
+FILE: context_engine.py
+--- Lines ---
+     193 context_engine.py
+--- Imports ---
+import logging
+import os
+from datetime import datetime, timezone, timedelta
+from dataclasses import dataclass, field
+from typing import Tuple
+from plugin_news       import check_news_filter
+from plugin_fear_greed import get_fg_score_adj
+from plugin_dxy        import get_dxy_score_adj
+from plugin_cot        import get_cot_score_adj
+--- Top/Bottom ---
+"""
+context_engine.py — Alpha Buffalo v5
+รวม External Plugins เป็น Context Score
+เสริม signal_engine.py
+
+Flow:
+signal_engine คำนวณ Technical Score
+context_engine คำนวณ Fundamental Score
+รวมกัน → Final Score → ส่งให้ EA
+"""
+
+import logging
+import os
+from datetime import datetime, timezone, timedelta
+from dataclasses import dataclass, field
+from typing import Tuple
+
+from plugin_news       import check_news_filter
+from plugin_fear_greed import get_fg_score_adj
+from plugin_dxy        import get_dxy_score_adj
+    try:
+        dxy  = get_dxy_score_adj("BUY", TWELVE_API_KEY)
+    except Exception as e:
+        logger.warning(f"DXY status error: {e}")
+        dxy = {"emoji": "?", "trend": "N/A"}
+    
+    try:
+        cot  = get_cot_score_adj("BUY")
+    except Exception as e:
+        logger.warning(f"COT status error: {e}")
+        cot = {"emoji": "?", "pct_rank": "N/A", "bias": "N/A"}
+
+    return {
+        "timestamp":   now,
+        "news_safe":   news["safe"],
+        "news_reason": news["reason"],
+        "fear_greed":  f"{fg['emoji']} {fg['value']} ({fg['label']})",
+        "dxy_trend":   f"{dxy['emoji']} {dxy['trend']}",
+        "cot_rank":    f"{cot['emoji']} {cot['pct_rank']}% ({cot['bias']})",
+    }
+--------------------------
+FILE: trade_manager.py
+--- Lines ---
+--- Imports ---
+--- Top/Bottom ---
+--------------------------

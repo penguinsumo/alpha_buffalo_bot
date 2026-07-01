@@ -12,6 +12,7 @@ from pydantic import BaseModel
 import uvicorn
 
 from scenario_scanner import scanner as scenario_scanner
+from signal_composer import safe_float
 from data_provider_twelvedata import fetch_twelvedata
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -136,7 +137,10 @@ async def latest_signal(key: str):
         blueprint = None
 
     try:
-        decision = compose_signal(df_4h, df_1h, df_15m)
+        if os.getenv('ENABLE_V12_ENGINE') == 'true':
+            decision = v4_decision(df_4h, df_1h, df_15m)
+        else:
+            decision = compose_signal(df_4h, df_1h, df_15m)
     except Exception as e:
         logger.error(f"Signal engine error: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "Signal engine failure"})
@@ -185,3 +189,35 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     logger.info(f"Starting Alpha Buffalo v11.2 on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+
+# ─── V4 Engine Decision (ENABLE_V12_ENGINE) ───
+def v4_decision(df_4h, df_1h, df_15m):
+    from engine_v4.indicators import add_indicators
+    from engine_v4.router import SignalRouter
+    from engine_v4.final_gate import FinalGate
+    from engine_v4.buy_engine import BuySignalEngine
+    from engine_v4.sell_engine import SellSignalEngine
+    from session_clock import SessionClock
+    import pandas as pd
+
+    df = add_indicators(df_15m)
+    if df.empty:
+        return {"direction": "NO_SIGNAL", "score": 0, "reason": "No data", "debug": {}}
+    clock = SessionClock()
+    gate = FinalGate(clock)
+    router = SignalRouter(clock, gate, BuySignalEngine(), SellSignalEngine())
+    signals = router.process(df)
+    if not signals:
+        return {"direction": "NO_SIGNAL", "score": 0, "reason": "No V4 signal", "debug": {}}
+    best = max(signals, key=lambda s: s.get('score', 0))
+    return {
+        "direction": best['direction'],
+        "score": best.get('score', 5),
+        "entry_price": best['entry'],
+        "sl_price": best['sl'],
+        "tp1_price": best['tp'],
+        "tp2_price": best['tp'],
+        "signal_type": "V4_SCALP",
+        "reason": f"V4 Engine: {best.get('session','')} {best.get('direction','')}",
+        "debug": best
+    }

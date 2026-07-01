@@ -20,3 +20,9 @@ avg_spread
 body
 bot.log
 *.bak
+backtest_*.py
+debug_*.py
+dd_analysis_*.py
+analyze_buy_by_hour.py
+repo_report.txt
+venv/
