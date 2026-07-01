@@ -20,3 +20,4 @@ avg_spread
 body
 bot.log
 *.bak
+.venv/
