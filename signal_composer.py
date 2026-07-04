@@ -1,47 +1,26 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
+import time
 
 from session_clock import SessionClock
 from scenario_blueprint import ScenarioBlueprint
-
-
-# =========================================================
-# SIGNAL COMPOSER (PHASE 1 FINAL GATE LAYER)
-# =========================================================
-# RULES:
-# - NO market analysis
-# - NO interpretation
-# - NO fallback logic
-# - ONLY gate + pass-through
-# =========================================================
+from edge_logger import EdgeLogger, TradeEvidence
 
 
 class SignalComposer:
-
     def __init__(self):
         self._clock = SessionClock()
+        self._edge_logger = EdgeLogger()
 
-    # -----------------------------------------------------
-    # MAIN ENTRY
-    # -----------------------------------------------------
     def compose(self, bp: ScenarioBlueprint) -> Dict[str, Any]:
-
         session_ctx = self._clock.get()
 
-        # === HARD GUARD: contract must be valid ===
         if not bp or not bp.current_price:
             return self._empty("INVALID_BLUEPRINT")
 
-        # === SESSION GATE ONLY (NO INTERPRETATION) ===
         session = session_ctx.get("session", "UNKNOWN")
 
-        # NOTE:
-        # composer does NOT decide market condition
-        # it only attaches runtime session metadata
-
-        # === GATE FLAGS (PURE PASS THROUGH) ===
         gates = {
             "session": session,
             "bos_triggered": bp.bos_triggered,
@@ -49,9 +28,27 @@ class SignalComposer:
             "has_golden_zone": bp.golden_zone_high > 0,
         }
 
-        # === RAW BLUEPRINT PASS-THROUGH ===
-        # no transformation, no inference
         payload = bp.to_dict()
+
+        try:
+            self._edge_logger.log_trade(TradeEvidence(
+                timestamp=time.time(),
+                pattern=bp.harmonic_pattern or "Unknown",
+                direction="BUY" if bp.trend_h4 == "UP" else "SELL",
+                bos=bp.bos_triggered,
+                vsa_ok=False,
+                atr_value=bp.atr_15m,
+                entry_price=0.0,
+                exit_price=0.0,
+                sl=0.0,
+                tp=0.0,
+                pnl=0.0,
+                r_multiple=0.0,
+                confidence=0.0,
+                regime=bp.market_mode
+            ))
+        except Exception:
+            pass
 
         return {
             "type": "COMPOSED_SIGNAL",
@@ -61,18 +58,8 @@ class SignalComposer:
             "blueprint": payload
         }
 
-    # -----------------------------------------------------
-    # SAFE EMPTY OUTPUT
-    # -----------------------------------------------------
     def _empty(self, reason: str) -> Dict[str, Any]:
-        return {
-            "type": "COMPOSED_SIGNAL",
-            "valid": False,
-            "reason": reason
-        }
+        return {"type": "COMPOSED_SIGNAL", "valid": False, "reason": reason}
 
 
-# =========================================================
-# SINGLETON
-# =========================================================
 composer = SignalComposer()
