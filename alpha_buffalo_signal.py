@@ -6,7 +6,7 @@ from typing import Dict, Tuple
 
 import pandas as pd
 import requests
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 
 from decision_engine import DecisionEngine
 from scenario_scanner import ScenarioScanner
@@ -106,6 +106,16 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
         "signal": signal,
     }
 
+
+
+@app.head("/")
+def root_head():
+    return Response(status_code=200)
+
+
+@app.head("/health")
+def health_head():
+    return Response(status_code=200)
 
 @app.get("/")
 def root():
