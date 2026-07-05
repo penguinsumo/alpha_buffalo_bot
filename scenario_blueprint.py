@@ -76,6 +76,38 @@ class ScenarioBlueprint:
     prz_support_top: float = 0.0
     prz_support_bottom: float = 0.0
 
+    # ─────────────────────────────
+    # PRZ LAYERS v12+
+    # ─────────────────────────────
+    # HTF / New Day structural PRZ
+    htf_prz_support_low: float = 0.0
+    htf_prz_support_high: float = 0.0
+    htf_prz_resistance_low: float = 0.0
+    htf_prz_resistance_high: float = 0.0
+
+    # Harmonic forecast PRZ
+    harmonic_prz_low: float = 0.0
+    harmonic_prz_high: float = 0.0
+    harmonic_completion: float = 0.0
+    harmonic_probability: float = 0.0
+    harmonic_state: str = "DISCOVERED"
+
+    # Micro execution PRZ
+    micro_prz_low: float = 0.0
+    micro_prz_high: float = 0.0
+
+    # PRZ validation
+    inside_htf_prz: bool = False
+    inside_micro_prz: bool = False
+    bos_confirmed: bool = False
+    choch_confirmed: bool = False
+    zone_validated: bool = False
+    zone_invalidated: bool = False
+
+    # Plan routing
+    trade_plan: str = "NONE"
+    execution_state: str = "WATCH"
+
     is_valid: bool = False
     validation_errors: List[str] = field(default_factory=list)
 
@@ -146,6 +178,37 @@ class ScenarioBlueprint:
                 "bias": self.decision_bias,
                 "smc": self.smc_confirmed,
                 "vsa": self.vsa_confirmed,
+            },
+            "prz_layers": {
+                "htf": {
+                    "support_low": self.htf_prz_support_low,
+                    "support_high": self.htf_prz_support_high,
+                    "resistance_low": self.htf_prz_resistance_low,
+                    "resistance_high": self.htf_prz_resistance_high,
+                },
+                "harmonic_forecast": {
+                    "low": self.harmonic_prz_low,
+                    "high": self.harmonic_prz_high,
+                    "completion": self.harmonic_completion,
+                    "probability": self.harmonic_probability,
+                    "state": self.harmonic_state,
+                },
+                "micro": {
+                    "low": self.micro_prz_low,
+                    "high": self.micro_prz_high,
+                },
+                "validation": {
+                    "inside_htf_prz": self.inside_htf_prz,
+                    "inside_micro_prz": self.inside_micro_prz,
+                    "bos_confirmed": self.bos_confirmed,
+                    "choch_confirmed": self.choch_confirmed,
+                    "zone_validated": self.zone_validated,
+                    "zone_invalidated": self.zone_invalidated,
+                },
+                "routing": {
+                    "trade_plan": self.trade_plan,
+                    "execution_state": self.execution_state,
+                },
             },
             "is_valid": self.is_valid,
             "validation_errors": self.validation_errors,
