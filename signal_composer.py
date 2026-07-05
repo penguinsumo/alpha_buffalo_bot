@@ -47,3 +47,6 @@ class SignalComposer:
 
 
 composer = SignalComposer()
+
+def compose_signal(*args, **kwargs):
+    return composer.compose(*args, **kwargs)
