@@ -40,5 +40,4 @@ jobs:
 
       - name: Test with pytest
         run: |
-        # รัน pytest แบบปกติ ถ้าไม่มีไฟล์ test มันจะจบด้วย Exit Code 0 (ผ่าน) เองอยู่แล้ว
-        python -m pytest
+          python -m pytest
