@@ -1,106 +1,86 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from scenario_blueprint import ScenarioBlueprint
 
 
-# =========================================================
-# DECISION ENGINE v1 (SINGLE SOURCE OF TRUTH)
-# =========================================================
-# RULE:
-# - NO market analysis
-# - NO signal composition
-# - ONLY decision from confluence
-# =========================================================
-
-
 @dataclass(frozen=True)
 class Decision:
-    action: str          # BUY / SELL / NONE
+    action: str
     confidence: float
     score: int
     reason: str
+    grade: str = "NONE"
+
+    def to_dict(self):
+        return {
+            "action": self.action,
+            "confidence": self.confidence,
+            "score": self.score,
+            "reason": self.reason,
+            "grade": self.grade,
+        }
 
 
 class DecisionEngine:
-
     def evaluate(self, bp: ScenarioBlueprint) -> Decision:
-
         if not bp or not bp.is_valid:
             return Decision(
                 action="NONE",
                 confidence=0.0,
                 score=0,
-                reason="INVALID_BLUEPRINT"
+                reason="INVALID_BLUEPRINT",
+                grade="INVALID",
             )
 
-        score = 0
+        score = int(bp.base_score)
 
-        # =====================================================
-        # 1. BASE SCORE (from scanner)
-        # =====================================================
-        score += getattr(bp, "base_score", 0)
-
-        # =====================================================
-        # 2. STRUCTURE CONFIRMATION
-        # =====================================================
-        if bp.bos_triggered:
+        if bp.decision_bias == "STRONG":
             score += 2
-
-        if bp.smc_confirmed:
-            score += 2
-
-        # =====================================================
-        # 3. VSA CONFIRMATION
-        # =====================================================
-        if bp.vsa_confirmed:
-            score += 2
-
-        # =====================================================
-        # 4. PRZ CONTEXT BONUS
-        # =====================================================
-        if bp.prz_support_top and bp.prz_support_bottom:
+        elif bp.decision_bias == "MODERATE":
             score += 1
 
-        # =====================================================
-        # 5. DECISION BIAS WEIGHTING
-        # =====================================================
-        bias = getattr(bp, "decision_bias", "WEAK")
-
-        if bias == "STRONG":
-            score += 2
-        elif bias == "MODERATE":
-            score += 1
-
-        # =====================================================
-        # FINAL DECISION LOGIC (CLEAN THRESHOLD MODEL)
-        # =====================================================
         if score >= 8:
-            action = "BUY" if bp.trend_h4 == "UP" else "SELL"
+            grade = "STRONG_TRADE"
+            action = self._trend_to_action(bp.trend_h4)
             confidence = 0.85
         elif score >= 5:
-            action = "BUY" if bp.trend_h4 == "UP" else "SELL"
+            grade = "VALID_TRADE"
+            action = self._trend_to_action(bp.trend_h4)
             confidence = 0.65
         elif score >= 3:
+            grade = "WAIT"
             action = "NONE"
             confidence = 0.40
         else:
+            grade = "NONE"
             action = "NONE"
             confidence = 0.20
 
-        reason = f"score={score}|bias={bias}|trend={bp.trend_h4}"
+        if action not in ("BUY", "SELL"):
+            action = "NONE"
+
+        reason = (
+            f"score={score}|base={bp.base_score}|bias={bp.decision_bias}"
+            f"|trend_h4={bp.trend_h4}|trend_h1={bp.trend_h1}"
+            f"|bos={bp.bos_triggered}|smc={bp.smc_confirmed}|vsa={bp.vsa_confirmed}"
+        )
 
         return Decision(
             action=action,
             confidence=round(confidence, 2),
             score=score,
-            reason=reason
+            reason=reason,
+            grade=grade,
         )
 
+    def _trend_to_action(self, trend: str) -> str:
+        if trend == "UP":
+            return "BUY"
+        if trend == "DOWN":
+            return "SELL"
+        return "NONE"
 
-# =========================================================
-# SINGLETON
-# =========================================================
+
 engine = DecisionEngine()
