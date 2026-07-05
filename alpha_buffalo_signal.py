@@ -17,7 +17,13 @@ app = FastAPI(title="Alpha Buffalo v12 API Adapter", version="12.0.0")
 
 SYMBOL_DEFAULT = os.getenv("ALPHA_SYMBOL", "XAU/USD")
 PUBLIC_SYMBOL_DEFAULT = os.getenv("ALPHA_PUBLIC_SYMBOL", "XAUUSD")
-TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
+TWELVEDATA_API_KEY = (
+    os.getenv("TWELVEDATA_API_KEY")
+    or os.getenv("TWELVE_API_KEY")
+    or os.getenv("TWELVE_DATA_API_KEY")
+    or os.getenv("TWELVEDATA_KEY")
+    or ""
+)
 API_LICENSE_KEY = os.getenv("ALPHA_API_KEY", os.getenv("LICENSE_KEY", "DEMO123"))
 
 
