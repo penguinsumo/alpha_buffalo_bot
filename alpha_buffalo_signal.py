@@ -6,7 +6,7 @@ from typing import Dict, Tuple
 
 import pandas as pd
 import requests
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response, Response
 
 from decision_engine import DecisionEngine
 from scenario_scanner import ScenarioScanner
