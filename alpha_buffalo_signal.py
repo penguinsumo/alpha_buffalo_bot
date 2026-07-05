@@ -13,8 +13,7 @@ import uvicorn
 
 from scenario_scanner import scanner as scenario_scanner
 from data_provider_twelvedata import fetch_twelvedata
-from signal_composer import compose_signal
-
+from scenario_scanner import scanner
 
 def safe_float(val):
     try:
