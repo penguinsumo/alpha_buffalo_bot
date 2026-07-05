@@ -135,3 +135,5 @@ class ScenarioScanner:
             bp.decision_bias = "WEAK"
 
         return bp
+
+scanner = ScenarioScanner()

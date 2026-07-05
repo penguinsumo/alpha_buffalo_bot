@@ -13,6 +13,7 @@ import uvicorn
 
 from scenario_scanner import scanner as scenario_scanner
 from data_provider_twelvedata import fetch_twelvedata
+from signal_composer import compose_signal
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -65,11 +66,11 @@ def broadcast_signal(text: str):
             logger.error(f"Broadcast failed: {e}")
 
 def format_signal_message(signal: CloudSignal) -> str:
-    emoji = "🟢" if signal['direction'] == "BUY" else "🔴" if signal['direction'] == "SELL" else "⚪"
+    emoji = "🟢" if signal.direction == "BUY" else "🔴" if signal.direction == "SELL" else "⚪"
     v5_tag = " [V5]" if signal.is_v5 else ""
     msg = (
         f"{emoji} Alpha Buffalo{v5_tag}\n"
-        f"📊 {signal['direction']}\n"
+        f"📊 {signal.direction}\n"
         f"🎯 Score: {signal.score:.1f}\n"
         f"💰 Entry: {signal.entry:.2f}\n"
         f"📈 TP1: {signal.tp1:.2f}  TP2: {signal.tp2:.2f}\n"
@@ -177,7 +178,7 @@ async def latest_signal(key: str):
 async def tv_webhook(payload: TVWebhookPayload):
     if payload.passphrase != TV_PASSPHRASE:
         raise HTTPException(status_code=401, detail="Invalid passphrase")
-    msg = f"📡 TV Alert\nDirection: {payload['direction']}\nPrice: {payload.price}"
+    msg = f"📡 TV Alert\nDirection: {payload.direction}\nPrice: {payload.price}"
     broadcast_signal(msg)
     return {"status": "ok"}
 
@@ -185,3 +186,9 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     logger.info(f"Starting Alpha Buffalo v11.2 on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+
+def safe_float(val):
+    try:
+        return float(val) if val is not None else 0.0
+    except (ValueError, TypeError):
+        return 0.0
