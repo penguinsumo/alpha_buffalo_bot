@@ -1,65 +1,49 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
-import time
 
-from session_clock import SessionClock
+from typing import Any, Dict
+
+from decision_engine import Decision
 from scenario_blueprint import ScenarioBlueprint
-from edge_logger import EdgeLogger, TradeEvidence
+from session_clock import SessionClock
+
+
+class EdgeLogger:
+    def log(self, payload: Dict[str, Any]) -> None:
+        return None
 
 
 class SignalComposer:
-    def __init__(self):
-        self._clock = SessionClock()
-        self._edge_logger = EdgeLogger()
+    def __init__(self, session_clock: SessionClock | None = None, edge_logger: EdgeLogger | None = None):
+        self.session_clock = session_clock or SessionClock()
+        self.edge_logger = edge_logger or EdgeLogger()
 
-    def compose(self, bp: ScenarioBlueprint) -> Dict[str, Any]:
-        session_ctx = self._clock.get()
+    def compose(self, blueprint: ScenarioBlueprint, decision: Decision, symbol: str | None = None) -> Dict[str, Any]:
+        session_state = self.session_clock.get()
 
-        if not bp or not bp.current_price:
-            return self._empty("INVALID_BLUEPRINT")
+        blueprint.session = session_state.session
 
-        session = session_ctx.get("session", "UNKNOWN")
-
-        gates = {
-            "session": session,
-            "bos_triggered": bp.bos_triggered,
-            "tunnel_valid": bp.tunnel_valid,
-            "has_golden_zone": bp.golden_zone_high > 0,
+        payload = {
+            "type": "COMPOSED_SIGNAL",
+            "timestamp": blueprint.timestamp,
+            "symbol": symbol or blueprint.symbol,
+            "decision": decision.to_dict(),
+            "gates": {
+                "session": session_state.session,
+                "liquidity": session_state.liquidity,
+                "bkk_hour": session_state.bkk_hour,
+                "utc_hour": session_state.utc_hour,
+                "session_timestamp": session_state.timestamp,
+                "blueprint_valid": blueprint.is_valid,
+            },
+            "blueprint": blueprint.to_dict(),
         }
 
-        payload = bp.to_dict()
-
         try:
-            self._edge_logger.log_trade(TradeEvidence(
-                timestamp=time.time(),
-                pattern=bp.harmonic_pattern or "Unknown",
-                direction="BUY" if bp.trend_h4 == "UP" else "SELL",
-                bos=bp.bos_triggered,
-                vsa_ok=False,
-                atr_value=bp.atr_15m,
-                entry_price=0.0,
-                exit_price=0.0,
-                sl=0.0,
-                tp=0.0,
-                pnl=0.0,
-                r_multiple=0.0,
-                confidence=0.0,
-                regime=bp.market_mode
-            ))
+            self.edge_logger.log(payload)
         except Exception:
             pass
 
-        return {
-            "type": "COMPOSED_SIGNAL",
-            "timestamp": session_ctx.get("timestamp"),
-            "symbol": bp.symbol,
-            "gates": gates,
-            "blueprint": payload
-        }
-
-    def _empty(self, reason: str) -> Dict[str, Any]:
-        return {"type": "COMPOSED_SIGNAL", "valid": False, "reason": reason}
+        return payload
 
 
 composer = SignalComposer()
