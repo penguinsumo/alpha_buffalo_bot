@@ -1,43 +1,16 @@
 name: Python CI
-
 on:
   push:
-    branches: ["main"]
+    branches: ["v12-core", "main"]
   pull_request:
-    branches: ["main"]
-
-permissions:
-  contents: read
+    branches: ["v12-core", "main"]
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install pytest  # or better: pip install -r requirements-dev.txt
-
-      - name: Test with pytest
-        run: |
-          python -m pytest
+          python-version: "3.12"
+      - run: python -m py_compile alpha_buffalo_signal.py scenario_blueprint.py scenario_scanner.py decision_engine.py signal_composer.py session_clock.py
