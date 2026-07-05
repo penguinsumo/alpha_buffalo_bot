@@ -137,3 +137,5 @@ class ScenarioScanner:
         return bp
 
 scanner = ScenarioScanner()
+
+scanner = ScenarioScanner()

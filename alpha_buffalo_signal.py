@@ -13,4 +13,11 @@ import uvicorn
 
 from scenario_scanner import scanner as scenario_scanner
 from data_provider_twelvedata import fetch_twelvedata
+from signal_composer import compose_signal
 
+
+def safe_float(val):
+    try:
+        return float(val) if val is not None else 0.0
+    except (ValueError, TypeError):
+        return 0.0
