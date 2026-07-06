@@ -2,7 +2,8 @@
 """
 Final Backtest — HA-Filtered Buy Gate + Baseline, ใช้ engine_v4.indicators
 """
-import sys, os
+import sys, os, json
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pandas as pd, numpy as np
 from collections import defaultdict
@@ -41,40 +42,68 @@ for i in range(20, len(df)-40):
     gate_buy = gate.evaluate(session_state, 'BUY', df=df, idx=i, daily_dd_ok=True, consec_loss_ok=True)
     signal = buy_eng.evaluate(df, i, session_state, gate_buy)
     if signal:
-        entry = signal['entry']; sl = signal['sl']; tp = signal['tp']
-        be_act = False; highest = entry; exit_price = entry
+        entry = signal['entry']; initial_sl = signal['sl']; sl = signal['sl']; tp = signal['tp']
+        be_act = False; highest = entry; exit_price = entry; exit_reason = 'TIME'
         for j in range(i+1, min(i+40, len(df))):
             r = df.iloc[j]; hh, ll = r['high'], r['low']
             if hh > highest: highest = hh
             if not be_act and highest >= signal['be_trigger']: be_act = True; sl = entry
             if be_act: sl = max(sl, highest * signal['trail_factor'])
-            if hh >= tp: exit_price = tp; break
-            if ll <= sl: exit_price = sl; break
+            if hh >= tp: exit_price = tp; exit_reason = 'TP'; break
+            if ll <= sl:
+                exit_price = sl
+                exit_reason = 'TRAIL' if sl > entry else ('BE' if sl == entry else 'SL')
+                break
         else:
             exit_price = df.iloc[min(i+40-1, len(df)-1)]['close']
         trades.append({'time': ts, 'session': signal['session'], 'dir': 'BUY',
-                       'entry': entry, 'exit': exit_price, 'sl': sl})
+                       'entry': entry, 'exit': exit_price, 'sl': sl,
+                       'initial_sl': initial_sl, 'tp': tp,
+                       'exit_reason': exit_reason,
+                       'entry_mode': signal.get('entry_mode', 'BUY_BASE'),
+                       'exit_mode': signal.get('exit_mode', 'BUY_TP')})
     # SELL
     gate_sell = gate.evaluate(session_state, 'SELL', daily_dd_ok=True, consec_loss_ok=True)
     signal = sell_eng.evaluate(df, i, session_state, gate_sell)
     if signal:
-        entry = signal['entry']; sl = signal['sl']; tp = signal['tp']
-        mid_crossed = False; exit_price = entry
+        entry = signal['entry']; initial_sl = signal['sl']; sl = signal['sl']; tp = signal['tp']
+        mid_crossed = False; exit_price = entry; exit_reason = 'TIME'
         for j in range(i+1, min(i+40, len(df))):
             r = df.iloc[j]; hh, ll = r['high'], r['low']
             if not mid_crossed and ll <= r['BB_Mid']: mid_crossed = True; sl = entry
-            if ll <= tp: exit_price = tp; break
-            if hh >= sl: exit_price = sl; break
+            if ll <= tp:
+                exit_price = tp
+                exit_reason = signal.get('exit_mode', 'TP')
+                break
+            if hh >= sl:
+                exit_price = sl
+                exit_reason = 'BE' if sl == entry else 'SL'
+                break
         else:
             exit_price = df.iloc[min(i+40-1, len(df)-1)]['close']
         trades.append({'time': ts, 'session': signal['session'], 'dir': 'SELL',
-                       'entry': entry, 'exit': exit_price, 'sl': sl})
+                       'entry': entry, 'exit': exit_price, 'sl': sl,
+                       'initial_sl': initial_sl, 'tp': tp,
+                       'exit_reason': exit_reason,
+                       'entry_mode': signal.get('entry_mode', 'NONE'),
+                       'exit_mode': signal.get('exit_mode', 'NONE'),
+                       'v4_session_confirmed': signal.get('v4_session_confirmed', False),
+                       'sell_dot_proxy': signal.get('sell_dot_proxy', False),
+                       'v5_exit_qualified': signal.get('v5_exit_qualified', False),
+                       'recent_micro_bos_down': signal.get('recent_micro_bos_down', False),
+                       'recent_sweep_above_100': signal.get('recent_sweep_above_100', False),
+                       'recent_sell_reclaim': signal.get('recent_sell_reclaim', False),
+                       'ha_bearish': signal.get('ha_bearish', False),
+                       'buy_obstacle_policy': signal.get('buy_obstacle_policy', ''),
+                       'signal_tp': signal.get('signal_tp'),
+                       'bb_lower_tp': signal.get('bb_lower_tp')})
 
 print(f"Total trades: {len(trades)}")
 
 def simulate(trades, initial=10000, risk_pct=0.0075, max_contracts=10,
              daily_dd_limit=0.03, max_consec_loss=5):
     trades = sorted(trades, key=lambda x: x['time'])
+    executed_trades = []
     sessions = defaultdict(lambda: {'trades':[], 'curve':[initial], 'equity':initial,
                                     'daily_eq_start':initial, 'current_day':None,
                                     'consec_loss':0, 'stop_day':False, 'stopped':0, 'max_dd':0})
@@ -102,7 +131,9 @@ def simulate(trades, initial=10000, risk_pct=0.0075, max_contracts=10,
         dd = (peak - sd['equity']) / peak * 100 if peak > 0 else 0
         if dd > sd['max_dd']: sd['max_dd'] = dd
         sd['curve'].append(sd['equity'])
-        sd['trades'].append({**t, 'pnl_$':pnl_dollar, 'contracts':contracts})
+        executed = {**t, 'pnl_$': pnl_dollar, 'contracts': contracts}
+        sd['trades'].append(executed)
+        executed_trades.append(executed)
     stats = {}
     for sess, sd in sessions.items():
         curve = sd['curve']; final_eq = curve[-1]
@@ -115,9 +146,9 @@ def simulate(trades, initial=10000, risk_pct=0.0075, max_contracts=10,
         pf = gp / gl if gl > 0 else float('inf')
         stats[sess] = {'trades':len(t_list),'wr':wr,'return':ret,'dd':sd['max_dd'],'pf':pf,
                        'stopped':sd['stopped'],'final_eq':final_eq}
-    return stats
+    return stats, executed_trades
 
-stats = simulate(trades)
+stats, executed_trades = simulate(trades)
 
 def fmt(v, kind='pct'):
     if v == float('inf'): return 'inf'
@@ -140,3 +171,49 @@ for sess in ['ASIA', 'LONDON', 'NY']:
 tot_ret = sum(v['return'] for v in stats.values())
 print(f"\nTOTAL SUM RETURN: {fmt(tot_ret,'pct')}")
 print(f"NY Max DD: {fmt(stats.get('NY', {}).get('dd', 0), 'pct')}")
+
+
+def json_safe(v):
+    if hasattr(v, 'isoformat'):
+        return v.isoformat()
+    if isinstance(v, np.bool_):
+        return bool(v)
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.floating):
+        return float(v)
+    return v
+
+evidence = []
+for t in executed_trades:
+    evidence.append({
+        'entry_time': json_safe(t.get('time')),
+        'side': t.get('dir'),
+        'session': t.get('session'),
+        'entry': json_safe(t.get('entry')),
+        'exit': json_safe(t.get('exit')),
+        'tp': json_safe(t.get('tp')),
+        'sl': json_safe(t.get('sl')),
+        'initial_sl': json_safe(t.get('initial_sl')),
+        'exit_reason': t.get('exit_reason'),
+        'entry_mode': t.get('entry_mode'),
+        'exit_mode': t.get('exit_mode'),
+        'v4_session_confirmed': json_safe(t.get('v4_session_confirmed', False)),
+        'sell_dot_proxy': json_safe(t.get('sell_dot_proxy', False)),
+        'v5_exit_qualified': json_safe(t.get('v5_exit_qualified', False)),
+        'recent_micro_bos_down': json_safe(t.get('recent_micro_bos_down', False)),
+        'recent_sweep_above_100': json_safe(t.get('recent_sweep_above_100', False)),
+        'recent_sell_reclaim': json_safe(t.get('recent_sell_reclaim', False)),
+        'ha_bearish': json_safe(t.get('ha_bearish', False)),
+        'buy_obstacle_policy': t.get('buy_obstacle_policy', ''),
+        'signal_tp': json_safe(t.get('signal_tp')),
+        'bb_lower_tp': json_safe(t.get('bb_lower_tp')),
+        'pnl_dollar': json_safe(t.get('pnl_$')),
+        'contracts': json_safe(t.get('contracts')),
+    })
+
+Path('trade_evidence.json').write_text(
+    json.dumps(evidence, ensure_ascii=False, indent=2),
+    encoding='utf-8',
+)
+print(f"Evidence exported: trade_evidence.json ({len(evidence)} trades)")
