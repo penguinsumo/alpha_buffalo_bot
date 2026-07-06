@@ -63,7 +63,25 @@ class SellSignalEngine(BaseEngine):
 
         entry = row['close']
         sl = entry + row['ATR14'] * 1.5
-        tp = row['Fib_072'] if row['Fib_072'] < entry else row['PRZ_Next']
+
+        # SIGNAL_TP เดิม: Fib_072 หรือ PRZ_Next
+        signal_tp = row['Fib_072'] if row['Fib_072'] < entry else row['PRZ_Next']
+
+        # V5 / quality short มีสิทธิ์ถือไกล
+        v5_exit_qualified = (
+            recent_micro_bos_down
+            or recent_sweep_above_100
+            or recent_sell_reclaim
+        )
+
+        if v5_exit_qualified:
+            tp = signal_tp
+            exit_mode = "V5_SIGNAL_TP"
+        else:
+            # V4 SELL ใช้ BB Lower เป็น TP หลัก
+            tp = row['BB_Lower']
+            exit_mode = "V4_BB_LOWER"
+
         return {
             'direction': 'SELL',
             'entry': entry,
@@ -73,10 +91,15 @@ class SellSignalEngine(BaseEngine):
             'timestamp': row.name,
             'visual_sl_mid': row['BB_Mid'],
             'entry_mode': sell_class,
+            'exit_mode': exit_mode,
+            'buy_obstacle_policy': 'BE_ON_BB_MID_CLOSE_ON_HA_BULL_AT_BB_LOWER',
+            'signal_tp': signal_tp,
+            'bb_lower_tp': row['BB_Lower'],
             'bb_touch_factor': bb_touch_factor,
             'recent_sell_reclaim': recent_sell_reclaim,
             'recent_sweep_above_100': recent_sweep_above_100,
             'recent_micro_bos_down': recent_micro_bos_down,
+            'v5_exit_qualified': v5_exit_qualified,
             'ha_bearish': ha_bearish,
             'max_bars': 40
         }
