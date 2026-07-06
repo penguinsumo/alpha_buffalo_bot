@@ -26,27 +26,40 @@ class SellSignalEngine(BaseEngine):
         if not (row['EMA20'] < row['EMA50']):
             return None
 
-        # ต้องแตะ/ทะลุ Upper BB ก่อน ถือเป็น setup ไม่ใช่ entry ทันที
-        if not (row['Bear_Sweep'] and row['high'] >= row['BB_Upper'] * 0.98):
+        # V4 SELL BASELINE:
+        # - 1H trend down
+        # - EMA20 < EMA50
+        # - Bear sweep
+        # - แตะ Upper BB 0.98-1.00 zone
+        #
+        # ห้ามบังคับ Sweep_Above_100 ที่นี่
+        # เพราะ Sweep_Above_100 เป็น V5 / deep resistance candidate
+        bb_touch_factor = 0.98
+
+        if not (
+            row['Bear_Sweep']
+            and row['high'] >= row['BB_Upper'] * bb_touch_factor
+        ):
             return None
 
-        # รอ sweep/reclaim ล่าสุด แล้วค่อยให้ micro BOS close ลงเป็น trigger
         lookback = df.iloc[max(0, idx - 5):idx + 1]
-        recent_sell_reclaim = bool(lookback.get('Sell_Reclaim', False).any())
-        recent_sweep_above_100 = bool(lookback.get('Sweep_Above_100', False).any())
 
-        if not recent_sweep_above_100:
-            return None
+        recent_sweep_above_100 = bool(
+            lookback.get('Sweep_Above_100', False).any()
+        )
+        recent_sell_reclaim = bool(
+            lookback.get('Sell_Reclaim', False).any()
+        )
+        recent_micro_bos_down = bool(
+            lookback.get('Micro_BOS_Down', False).any()
+        )
 
-        if not recent_sell_reclaim:
-            return None
+        ha_bearish = bool(row.get('HA_Bearish', False))
 
-        if not bool(row.get('HA_Bearish', False)):
-            return None
-
-        # BOS ต้องเป็น close break ไม่ใช่ wick
-        if not bool(row.get('Micro_BOS_Down', False)):
-            return None
+        # Classify only, do not hard gate.
+        # V4 = scalp sell
+        # V5 candidate = มี sweep เหนือ 1.00 / structure high
+        sell_class = "V5_SELL_CANDIDATE" if recent_sweep_above_100 else "V4_SELL_BASE"
 
         entry = row['close']
         sl = entry + row['ATR14'] * 1.5
@@ -59,10 +72,11 @@ class SellSignalEngine(BaseEngine):
             'session': session_state.session,
             'timestamp': row.name,
             'visual_sl_mid': row['BB_Mid'],
-            'entry_mode': 'SELL_MICRO_BOS',
+            'entry_mode': sell_class,
+            'bb_touch_factor': bb_touch_factor,
             'recent_sell_reclaim': recent_sell_reclaim,
             'recent_sweep_above_100': recent_sweep_above_100,
-            'ha_bearish': bool(row.get('HA_Bearish', False)),
-            'micro_bos_down': bool(row.get('Micro_BOS_Down', False)),
+            'recent_micro_bos_down': recent_micro_bos_down,
+            'ha_bearish': ha_bearish,
             'max_bars': 40
         }
