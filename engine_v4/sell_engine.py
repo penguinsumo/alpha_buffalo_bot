@@ -82,6 +82,19 @@ class SellSignalEngine(BaseEngine):
             tp = row['BB_Lower']
             exit_mode = "V4_BB_LOWER"
 
+        # ASIA/LONDON V4 SELL ต้องมี micro sell confirmation เพิ่ม
+        # กันไม้ที่เป็นแค่ BB upper touch แต่ยังไม่มีแรงขายจริง
+        if session_state.session in {"ASIA", "LONDON"} and exit_mode == "V4_BB_LOWER":
+            v4_session_confirmed = (
+                (ha_bearish and row['close'] < row['EMA20'])
+                or recent_micro_bos_down
+            )
+
+            if not v4_session_confirmed:
+                return None
+        else:
+            v4_session_confirmed = True
+
         return {
             'direction': 'SELL',
             'entry': entry,
@@ -100,6 +113,8 @@ class SellSignalEngine(BaseEngine):
             'recent_sweep_above_100': recent_sweep_above_100,
             'recent_micro_bos_down': recent_micro_bos_down,
             'v5_exit_qualified': v5_exit_qualified,
+            'v4_session_confirmed': v4_session_confirmed,
             'ha_bearish': ha_bearish,
+            'sell_dot_proxy': bool(ha_bearish and row['close'] < row['EMA20']),
             'max_bars': 40
         }
