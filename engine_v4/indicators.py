@@ -38,6 +38,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['HA_Close'] = ha_close
     df['HA_Open'] = ha_open
     df['HA_Bullish'] = df['HA_Close'] > df['HA_Open']
+    df['HA_Bearish'] = df['HA_Close'] < df['HA_Open']
 
     # 1H Swing & Trend
     df1h = df.resample('1h').agg({'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
@@ -58,4 +59,32 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     trend_up = (df1h['close'] > df1h['EMA50_1h']).astype(int)
     trend_up = trend_up.reindex(df.index, method='ffill').fillna(0)
     df['Trend_1H_Up'] = trend_up.astype(bool)
+
+    # Micro structure confirmation
+    # ใช้ค่า shift(1) เพื่อกัน lookahead bias
+    df['Micro_Swing_H'] = df['high'].rolling(5).max().shift(1)
+    df['Micro_Swing_L'] = df['low'].rolling(5).min().shift(1)
+
+    df['Swing_H_Prev'] = df['Swing_H'].shift(1)
+    df['Swing_L_Prev'] = df['Swing_L'].shift(1)
+
+    # Sweep เหนือ/ใต้โครงสร้างใหญ่ 1.00
+    df['Sweep_Above_100'] = (
+        (df['high'] > df['Swing_H_Prev']) &
+        (df['close'] < df['Swing_H_Prev'])
+    )
+
+    df['Sweep_Below_100'] = (
+        (df['low'] < df['Swing_L_Prev']) &
+        (df['close'] > df['Swing_L_Prev'])
+    )
+
+    # Reclaim หลัง sweep
+    df['Sell_Reclaim'] = df['Sweep_Above_100'] & df['HA_Bearish']
+    df['Buy_Reclaim'] = df['Sweep_Below_100'] & df['HA_Bullish']
+
+    # Micro BOS ต้องเป็น close break ไม่ใช่ wick
+    df['Micro_BOS_Down'] = df['close'] < df['Micro_Swing_L']
+    df['Micro_BOS_Up'] = df['close'] > df['Micro_Swing_H']
+
     return df
