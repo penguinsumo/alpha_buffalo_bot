@@ -90,6 +90,120 @@ def fetch_multi_tf(symbol: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFram
     )
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _first_float(*values, default: float = 0.0) -> float:
+    for value in values:
+        parsed = _safe_float(value, default=0.0)
+        if parsed != 0.0:
+            return parsed
+    return default
+
+
+def build_ea_payload(symbol: str, signal: Dict) -> Dict:
+    """
+    EA execution payload.
+    Adapter-only: ไม่ตัดสินใจตลาดใหม่ ไม่คำนวณ PRZ/BOS/TP/SL เอง
+    """
+    decision = signal.get("decision", {}) or {}
+    gates = signal.get("gates", {}) or {}
+    blueprint = signal.get("blueprint", {}) or {}
+
+    plan_a = blueprint.get("plan_a", {}) or {}
+    plan_b = blueprint.get("plan_b", {}) or {}
+
+    direction = str(decision.get("action", "NONE")).upper()
+    timestamp = str(signal.get("timestamp") or blueprint.get("timestamp") or "")
+
+    current_price = _safe_float(blueprint.get("current_price"))
+
+    # อ่านทั้ง v12 nested plan และ legacy flat fields
+    entry = _first_float(
+        signal.get("entry"),
+        blueprint.get("entry"),
+        plan_a.get("entry"),
+        plan_b.get("entry"),
+        blueprint.get("plan_a_entry"),
+        blueprint.get("plan_b_entry"),
+        current_price,
+    )
+
+    sl = _first_float(
+        signal.get("sl"),
+        blueprint.get("sl"),
+        plan_a.get("sl"),
+        plan_b.get("sl"),
+        blueprint.get("plan_a_sl"),
+        blueprint.get("plan_b_sl"),
+    )
+
+    tp_final = _first_float(
+        signal.get("tp_final"),
+        signal.get("tp"),
+        blueprint.get("tp_final"),
+        blueprint.get("tp"),
+        plan_a.get("tp"),
+        plan_b.get("tp2"),
+        plan_b.get("tp1"),
+        blueprint.get("plan_a_tp"),
+        blueprint.get("plan_b_tp2"),
+        blueprint.get("plan_b_tp1"),
+    )
+
+    blueprint_valid = bool(gates.get("blueprint_valid", blueprint.get("is_valid", False)))
+    trade_direction_ok = direction in {"BUY", "SELL"}
+    levels_ready = entry > 0 and sl > 0 and tp_final > 0
+
+    execution_state = (
+        "READY"
+        if blueprint_valid and trade_direction_ok and levels_ready
+        else "WATCH"
+    )
+
+    action = "OPEN" if execution_state == "READY" else "WAIT"
+
+    signal_id = f"{symbol}-{timestamp}-{direction}".replace(":", "").replace("/", "")
+
+    return {
+        "signal_id": signal_id,
+        "symbol": symbol,
+        "action": action,
+        "execution_state": execution_state,
+        "direction": direction if trade_direction_ok else "NONE",
+
+        "entry": entry,
+        "sl": sl,
+        "tp_final": tp_final,
+        "risk_pct": _safe_float(signal.get("risk_pct"), 0.0075),
+        "max_bars": int(signal.get("max_bars", 40)),
+
+        "session": gates.get("session", ""),
+        "entry_mode": signal.get("entry_mode", "V12_DECISION"),
+        "exit_mode": signal.get("exit_mode", "NONE"),
+        "be_policy": signal.get("be_policy", "NONE"),
+        "trail_policy": signal.get("trail_policy", "NONE"),
+
+        "v5_quality_score": int(signal.get("v5_quality_score", 0) or 0),
+        "v5_quality_grade": signal.get("v5_quality_grade", "UNKNOWN"),
+        "v5_basis": signal.get("v5_basis", "UNKNOWN"),
+
+        "session_quality_gate": signal.get("session_quality_gate", "UNKNOWN"),
+        "sell_dot_reason": signal.get("sell_dot_reason", "UNKNOWN"),
+
+        "confidence": _safe_float(decision.get("confidence")),
+        "score": _safe_float(decision.get("score")),
+        "grade": decision.get("grade", ""),
+        "reason": decision.get("reason", ""),
+    }
+
+
 def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBOL_DEFAULT) -> Dict:
     df_4h, df_1h, df_15m = fetch_multi_tf(symbol)
 
@@ -110,6 +224,7 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
         "status": "ok",
         "symbol": public_symbol,
         "signal": signal,
+        "ea": build_ea_payload(public_symbol, signal),
     }
 
 
