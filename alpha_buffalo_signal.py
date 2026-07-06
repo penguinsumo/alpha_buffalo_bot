@@ -161,9 +161,16 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
     trade_direction_ok = direction in {"BUY", "SELL"}
     levels_ready = entry > 0 and sl > 0 and tp_final > 0
 
+    if direction == "BUY":
+        directional_levels_ok = sl < entry < tp_final
+    elif direction == "SELL":
+        directional_levels_ok = tp_final < entry < sl
+    else:
+        directional_levels_ok = False
+
     execution_state = (
         "READY"
-        if blueprint_valid and trade_direction_ok and levels_ready
+        if blueprint_valid and trade_direction_ok and levels_ready and directional_levels_ok
         else "WATCH"
     )
 
@@ -182,6 +189,8 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
         "sl": sl,
         "tp_final": tp_final,
         "risk_pct": _safe_float(signal.get("risk_pct"), 0.0075),
+        "levels_ready": levels_ready,
+        "directional_levels_ok": directional_levels_ok,
         "max_bars": int(signal.get("max_bars", 40)),
 
         "session": gates.get("session", ""),
