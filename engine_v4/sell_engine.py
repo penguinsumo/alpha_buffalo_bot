@@ -95,6 +95,86 @@ class SellSignalEngine(BaseEngine):
         else:
             v4_session_confirmed = True
 
+        # Evidence-only fields: ไม่เปลี่ยน logic, entry, TP, BE
+        close_below_ema20 = bool(row['close'] < row['EMA20'])
+        close_below_bb_mid = bool(row['close'] < row['BB_Mid'])
+        ema20_below_ema50 = bool(row['EMA20'] < row['EMA50'])
+
+        candle_range = float(row['high'] - row['low'])
+        if candle_range > 0:
+            sell_rejection_wick_ratio = float(
+                (row['high'] - max(row['open'], row['close'])) / candle_range
+            )
+            candle_body_ratio = float(abs(row['close'] - row['open']) / candle_range)
+        else:
+            sell_rejection_wick_ratio = 0.0
+            candle_body_ratio = 0.0
+
+        bb_upper_touch_strength = (
+            float(row['high'] / row['BB_Upper']) if row['BB_Upper'] else 0.0
+        )
+
+        entry_to_sl_points = float(abs(sl - entry))
+        entry_to_tp_points = float(abs(entry - tp))
+        entry_rr = (
+            entry_to_tp_points / entry_to_sl_points
+            if entry_to_sl_points > 0
+            else 0.0
+        )
+
+        v5_premium_micro_bos = bool(recent_micro_bos_down)
+        v5_premium_reclaim = bool(recent_sell_reclaim)
+        v5_premium_sweep_ha = bool(recent_sweep_above_100 and ha_bearish)
+        v5_premium_any = bool(
+            v5_premium_micro_bos
+            or v5_premium_reclaim
+            or v5_premium_sweep_ha
+        )
+
+        v5_basis_parts = []
+        if v5_premium_micro_bos:
+            v5_basis_parts.append("MICRO_BOS")
+        if v5_premium_reclaim:
+            v5_basis_parts.append("RECLAIM")
+        if v5_premium_sweep_ha:
+            v5_basis_parts.append("SWEEP_HA")
+
+        v5_basis = "|".join(v5_basis_parts) if v5_basis_parts else "BASE"
+
+        v5_quality_score = 0
+        if v5_premium_micro_bos:
+            v5_quality_score += 2
+        if v5_premium_reclaim:
+            v5_quality_score += 2
+        if v5_premium_sweep_ha:
+            v5_quality_score += 1
+        if close_below_ema20:
+            v5_quality_score += 1
+        if close_below_bb_mid:
+            v5_quality_score += 1
+
+        if v5_quality_score >= 4:
+            v5_quality_grade = "PREMIUM"
+        elif v5_quality_score >= 2:
+            v5_quality_grade = "GOOD"
+        else:
+            v5_quality_grade = "BASE"
+
+        if session_state.session in {"ASIA", "LONDON"} and exit_mode == "V4_BB_LOWER":
+            session_quality_gate = "ASIA_LONDON_HA_EMA20_OR_MICRO_BOS"
+        elif session_state.session == "NY":
+            session_quality_gate = "NY_BASELINE"
+        else:
+            session_quality_gate = "DEFAULT"
+
+        be_policy = "CURRENT_BBMID_LOW"
+        trail_policy = "NONE"
+        sell_dot_reason = (
+            "HA_BEARISH_CLOSE_BELOW_EMA20"
+            if bool(ha_bearish and close_below_ema20)
+            else "NONE"
+        )
+
         return {
             'direction': 'SELL',
             'entry': entry,
@@ -116,5 +196,26 @@ class SellSignalEngine(BaseEngine):
             'v4_session_confirmed': v4_session_confirmed,
             'ha_bearish': ha_bearish,
             'sell_dot_proxy': bool(ha_bearish and row['close'] < row['EMA20']),
+            'be_policy': be_policy,
+            'trail_policy': trail_policy,
+            'v5_quality_score': v5_quality_score,
+            'v5_quality_grade': v5_quality_grade,
+            'v5_basis': v5_basis,
+            'v5_premium_any': v5_premium_any,
+            'v5_premium_micro_bos': v5_premium_micro_bos,
+            'v5_premium_reclaim': v5_premium_reclaim,
+            'v5_premium_sweep_ha': v5_premium_sweep_ha,
+            'close_below_ema20': close_below_ema20,
+            'close_below_bb_mid': close_below_bb_mid,
+            'ema20_below_ema50': ema20_below_ema50,
+            'bb_upper_touch_strength': bb_upper_touch_strength,
+            'sell_rejection_wick_ratio': sell_rejection_wick_ratio,
+            'candle_body_ratio': candle_body_ratio,
+            'atr14_at_entry': float(row['ATR14']),
+            'entry_to_sl_points': entry_to_sl_points,
+            'entry_to_tp_points': entry_to_tp_points,
+            'entry_rr': entry_rr,
+            'session_quality_gate': session_quality_gate,
+            'sell_dot_reason': sell_dot_reason,
             'max_bars': 40
         }
