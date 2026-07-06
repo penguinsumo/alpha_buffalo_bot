@@ -56,6 +56,16 @@ class TradeEvidence:
     micro_sweep_price: float = 0.0
     micro_reclaim_price: float = 0.0
     entry_mode: str = "NONE"
+    exit_mode: str = "NONE"
+    exit_reason: str = ""
+    v4_session_confirmed: bool = False
+    sell_dot_proxy: bool = False
+    v5_exit_qualified: bool = False
+    recent_micro_bos_down: bool = False
+    recent_sweep_above_100: bool = False
+    recent_sell_reclaim: bool = False
+    ha_bearish: bool = False
+    buy_obstacle_policy: str = ""
     entry_quality: str = "LOW"
     sl_hunt_risk: str = "UNKNOWN"
     sl_reference: str = "NONE"
