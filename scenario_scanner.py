@@ -33,10 +33,36 @@ class ScenarioScanner:
         tunnel_lower = float(df_15m["low"].tail(30).min())
         tunnel_mid = float((tunnel_upper + tunnel_lower) / 2)
 
+        prior_window = df_15m.iloc[-60:-30] if len(df_15m) >= 60 else df_15m.tail(30)
+        prior_tunnel_upper = float(prior_window["high"].max())
+        prior_tunnel_lower = float(prior_window["low"].min())
+        prior_tunnel_mid = float((prior_tunnel_upper + prior_tunnel_lower) / 2)
+
         gz_low, gz_high = self._golden_zone(df_4h)
 
         atr_15m = self._atr(df_15m)
         atr_1h = self._atr(df_1h)
+
+        tunnel_slope = tunnel_mid - prior_tunnel_mid
+        tunnel_width = max(tunnel_upper - tunnel_lower, 0.0)
+        tunnel_tolerance = max(atr_15m * 0.35, tunnel_width * 0.08)
+        slope_threshold = max(atr_15m * 0.10, 0.1)
+
+        if tunnel_slope > slope_threshold:
+            tunnel_state = "UPTREND"
+        elif tunnel_slope < -slope_threshold:
+            tunnel_state = "DOWNTREND"
+        else:
+            tunnel_state = "FLAT"
+
+        inside_tunnel = tunnel_lower <= current_price <= tunnel_upper
+        near_tunnel_upper = abs(current_price - tunnel_upper) <= tunnel_tolerance
+        near_tunnel_mid = abs(current_price - tunnel_mid) <= tunnel_tolerance
+        near_tunnel_lower = abs(current_price - tunnel_lower) <= tunnel_tolerance
+        tunnel_retest_valid = (
+            (trend_h4 == "UP" and tunnel_state in ("UPTREND", "FLAT") and (near_tunnel_lower or near_tunnel_mid))
+            or (trend_h4 == "DOWN" and tunnel_state in ("DOWNTREND", "FLAT") and (near_tunnel_upper or near_tunnel_mid))
+        )
 
         smc_confirmed = self._smc_proxy(df_15m, current_price)
         vsa_confirmed = self._vsa_proxy(df_15m, atr_15m)
@@ -57,6 +83,38 @@ class ScenarioScanner:
             self._inside_zone(current_price, micro_support_low, micro_support_high)
             or self._inside_zone(current_price, micro_resistance_low, micro_resistance_high)
         )
+
+        previous_close = float(df_15m["close"].iloc[-2]) if len(df_15m) > 1 else current_price
+
+        if trend_h4 == "UP":
+            micro_prz_broken = current_price < micro_support_low
+            micro_prz_reclaimed = previous_close < micro_support_low and self._inside_zone(current_price, micro_support_low, micro_support_high)
+        elif trend_h4 == "DOWN":
+            micro_prz_broken = current_price > micro_resistance_high
+            micro_prz_reclaimed = previous_close > micro_resistance_high and self._inside_zone(current_price, micro_resistance_low, micro_resistance_high)
+        else:
+            micro_prz_broken = False
+            micro_prz_reclaimed = False
+
+        if micro_prz_broken:
+            prz_state = "BROKEN"
+        elif micro_prz_reclaimed:
+            prz_state = "RECLAIMED"
+        elif inside_micro_prz:
+            prz_state = "ACTIVE"
+        else:
+            prz_state = "OUTSIDE"
+
+        reversal_allowed = prz_state in ("ACTIVE", "RECLAIMED") and not micro_prz_broken
+
+        if micro_prz_broken and tunnel_state in ("UPTREND", "DOWNTREND"):
+            trade_plan = "TUNNEL_WATCH"
+        elif micro_prz_broken:
+            trade_plan = "NO_TRADE"
+        elif reversal_allowed:
+            trade_plan = "PRZ_REVERSAL_WATCH"
+        else:
+            trade_plan = "NONE"
 
         base_score = 0
         if bos_triggered:
@@ -113,7 +171,7 @@ class ScenarioScanner:
             tunnel_upper=tunnel_upper,
             tunnel_lower=tunnel_lower,
             tunnel_mid=tunnel_mid,
-            tunnel_slope=0.0,
+            tunnel_slope=round(tunnel_slope, 3),
             tunnel_valid=True,
             golden_zone_low=gz_low,
             golden_zone_high=gz_high,
@@ -156,8 +214,19 @@ class ScenarioScanner:
             micro_prz_high=round(micro_resistance_high, 3),
             inside_htf_prz=bool(inside_htf_prz),
             inside_micro_prz=bool(inside_micro_prz),
-            zone_validated=bool(inside_htf_prz or inside_micro_prz),
-            trade_plan="PRZ_WATCH" if inside_htf_prz or inside_micro_prz else "NONE",
+            zone_validated=bool(reversal_allowed),
+            zone_invalidated=bool(micro_prz_broken),
+            prz_state=prz_state,
+            micro_prz_broken=bool(micro_prz_broken),
+            micro_prz_reclaimed=bool(micro_prz_reclaimed),
+            reversal_allowed=bool(reversal_allowed),
+            tunnel_state=tunnel_state,
+            inside_tunnel=bool(inside_tunnel),
+            near_tunnel_upper=bool(near_tunnel_upper),
+            near_tunnel_mid=bool(near_tunnel_mid),
+            near_tunnel_lower=bool(near_tunnel_lower),
+            tunnel_retest_valid=bool(tunnel_retest_valid),
+            trade_plan=trade_plan,
             execution_state="WATCH",
             is_valid=len(errors) == 0,
             validation_errors=errors,
