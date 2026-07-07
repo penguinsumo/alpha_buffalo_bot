@@ -205,6 +205,15 @@ class ScenarioBlueprint:
                     "zone_validated": self.zone_validated,
                     "zone_invalidated": self.zone_invalidated,
                 },
+                "bb_15m": {
+                    "upper": self.bb_upper,
+                    "middle": self.bb_middle,
+                    "lower": self.bb_lower,
+                    "width": round(self.bb_upper - self.bb_lower, 3) if self.bb_upper and self.bb_lower else 0.0,
+                    "width_pct": round(((self.bb_upper - self.bb_lower) / self.current_price) * 100, 4) if self.current_price and self.bb_upper and self.bb_lower else 0.0,
+                    "touch_side": "UPPER" if self.current_price >= self.bb_upper else "LOWER" if self.current_price <= self.bb_lower else "NONE",
+                    "position": round((self.current_price - self.bb_lower) / (self.bb_upper - self.bb_lower), 4) if self.bb_upper and self.bb_lower and self.bb_upper != self.bb_lower else 0.0,
+                },
                 "routing": {
                     "trade_plan": self.trade_plan,
                     "execution_state": self.execution_state,

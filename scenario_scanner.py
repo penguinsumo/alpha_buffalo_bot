@@ -43,6 +43,21 @@ class ScenarioScanner:
 
         prz_support_bottom, prz_support_top, prz_current, prz_next = self._prz(df_15m, trend_h4)
 
+        htf_support_low, htf_support_high, htf_resistance_low, htf_resistance_high = self._prz_zone(df_1h)
+        micro_support_low, micro_support_high, micro_resistance_low, micro_resistance_high = self._prz_zone(df_15m)
+
+        harmonic_prz_low = min(prz_current, prz_next) if prz_current and prz_next else 0.0
+        harmonic_prz_high = max(prz_current, prz_next) if prz_current and prz_next else 0.0
+
+        inside_htf_prz = (
+            self._inside_zone(current_price, htf_support_low, htf_support_high)
+            or self._inside_zone(current_price, htf_resistance_low, htf_resistance_high)
+        )
+        inside_micro_prz = (
+            self._inside_zone(current_price, micro_support_low, micro_support_high)
+            or self._inside_zone(current_price, micro_resistance_low, micro_resistance_high)
+        )
+
         base_score = 0
         if bos_triggered:
             base_score += 2
@@ -131,6 +146,19 @@ class ScenarioScanner:
             vsa_confirmed=bool(vsa_confirmed),
             prz_support_top=round(prz_support_top, 3),
             prz_support_bottom=round(prz_support_bottom, 3),
+            htf_prz_support_low=round(htf_support_low, 3),
+            htf_prz_support_high=round(htf_support_high, 3),
+            htf_prz_resistance_low=round(htf_resistance_low, 3),
+            htf_prz_resistance_high=round(htf_resistance_high, 3),
+            harmonic_prz_low=round(harmonic_prz_low, 3),
+            harmonic_prz_high=round(harmonic_prz_high, 3),
+            micro_prz_low=round(micro_support_low, 3),
+            micro_prz_high=round(micro_resistance_high, 3),
+            inside_htf_prz=bool(inside_htf_prz),
+            inside_micro_prz=bool(inside_micro_prz),
+            zone_validated=bool(inside_htf_prz or inside_micro_prz),
+            trade_plan="PRZ_WATCH" if inside_htf_prz or inside_micro_prz else "NONE",
+            execution_state="WATCH",
             is_valid=len(errors) == 0,
             validation_errors=errors,
         )
@@ -191,6 +219,24 @@ class ScenarioScanner:
         rng = float(last["high"] - last["low"])
         body = abs(float(last["close"] - last["open"]))
         return atr > 0 and rng > atr * 1.5 and body > rng * 0.6
+
+    def _inside_zone(self, price: float, low: float, high: float) -> bool:
+        return low > 0 and high > 0 and low <= price <= high
+
+    def _prz_zone(self, df: pd.DataFrame) -> Tuple[float, float, float, float]:
+        lookback = df.tail(80)
+        high = float(lookback["high"].max())
+        low = float(lookback["low"].min())
+        diff = high - low
+
+        if diff <= 0:
+            return 0.0, 0.0, 0.0, 0.0
+
+        support_low = low
+        support_high = low + diff * 0.382
+        resistance_low = high - diff * 0.382
+        resistance_high = high
+        return support_low, support_high, resistance_low, resistance_high
 
     def _prz(self, df: pd.DataFrame, trend: str) -> Tuple[float, float, float, float]:
         high = float(df["high"].tail(50).max())
