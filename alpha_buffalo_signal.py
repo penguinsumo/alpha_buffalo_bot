@@ -17,9 +17,17 @@ from session_clock import SessionClock
 
 app = FastAPI(title="Alpha Buffalo v12 API Adapter", version="12.0.0")
 
-SIGNAL_LOOP_INTERVAL_SECONDS = int(os.getenv("SIGNAL_LOOP_INTERVAL_SECONDS", "360"))
+SIGNAL_LOOP_INTERVAL_SECONDS = int(os.getenv("SIGNAL_LOOP_INTERVAL_SECONDS", "60"))
 LATEST_SIGNAL_CACHE: dict = {}
 LATEST_SIGNAL_LOCK = threading.Lock()
+
+TF_FETCH_TTL_SECONDS = {
+    "15min": int(os.getenv("TF_15M_TTL_SECONDS", "180")),
+    "1h": int(os.getenv("TF_1H_TTL_SECONDS", "900")),
+    "4h": int(os.getenv("TF_4H_TTL_SECONDS", "1800")),
+}
+TF_DATA_CACHE: dict = {}
+TF_CACHE_LOCK = threading.Lock()
 _SIGNAL_LOOP_STARTED = False
 
 SYMBOL_DEFAULT = os.getenv("ALPHA_SYMBOL", "XAU/USD")
@@ -89,12 +97,46 @@ def fetch_twelvedata(symbol: str, interval: str, outputsize: int = 200) -> pd.Da
     return df
 
 
+def _fetch_cached_tf(symbol: str, interval: str, outputsize: int = 200) -> pd.DataFrame:
+    ttl = TF_FETCH_TTL_SECONDS.get(interval, 180)
+    key = f"{symbol}:{interval}"
+    now = time.time()
+
+    stale_df = None
+    stale_age = None
+
+    with TF_CACHE_LOCK:
+        cached = TF_DATA_CACHE.get(key)
+        if cached:
+            stale_df = cached.get("df")
+            cached_ts = float(cached.get("ts", 0))
+            stale_age = now - cached_ts
+            if stale_df is not None and stale_age < ttl:
+                return stale_df.copy()
+
+    try:
+        df = fetch_twelvedata(symbol, interval, outputsize=outputsize)
+    except Exception as exc:
+        if stale_df is not None:
+            print(
+                f"AlphaBuffalo TF cache fallback | interval={interval} age={int(stale_age or 0)}s error={type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return stale_df.copy()
+        raise
+
+    with TF_CACHE_LOCK:
+        TF_DATA_CACHE[key] = {"df": df.copy(), "ts": time.time()}
+
+    print(f"AlphaBuffalo TF fetch | interval={interval} ttl={ttl}s rows={len(df)}", flush=True)
+    return df
+
+
 def fetch_multi_tf(symbol: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    return (
-        fetch_twelvedata(symbol, "4h"),
-        fetch_twelvedata(symbol, "1h"),
-        fetch_twelvedata(symbol, "15min"),
-    )
+    df_4h = _fetch_cached_tf(symbol, "4h")
+    df_1h = _fetch_cached_tf(symbol, "1h")
+    df_15m = _fetch_cached_tf(symbol, "15min")
+    return df_4h, df_1h, df_15m
 
 
 def _safe_float(value, default: float = 0.0) -> float:
