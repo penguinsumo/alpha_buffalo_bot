@@ -326,6 +326,40 @@ class ScenarioScanner:
             validation_errors=errors,
         )
 
+    def _heikin_ashi_state(self, df: pd.DataFrame) -> Tuple[bool, bool]:
+        if len(df) < 3:
+            return False, False
+
+        ha_close = (df["open"] + df["high"] + df["low"] + df["close"]) / 4
+        ha_open = [float((df["open"].iloc[0] + df["close"].iloc[0]) / 2)]
+
+        for i in range(1, len(df)):
+            ha_open.append(float((ha_open[i - 1] + ha_close.iloc[i - 1]) / 2))
+
+        last_ha_open = float(ha_open[-1])
+        last_ha_close = float(ha_close.iloc[-1])
+        prev_ha_close = float(ha_close.iloc[-2])
+
+        bullish = last_ha_close > last_ha_open and last_ha_close >= prev_ha_close
+        bearish = last_ha_close < last_ha_open and last_ha_close <= prev_ha_close
+
+        return bool(bullish), bool(bearish)
+
+    def _is_impulse(self, df: pd.DataFrame, delta_state: str, atr_value: float) -> bool:
+        if len(df) < 5:
+            return False
+
+        if delta_state not in ("UP", "DOWN", "DELTA_PLUS", "DELTA_MINUS"):
+            return False
+
+        body = abs(float(df["close"].iloc[-1]) - float(df["open"].iloc[-1]))
+        recent_move = abs(float(df["close"].iloc[-1]) - float(df["close"].iloc[-4]))
+        avg_range = float((df["high"] - df["low"]).tail(20).mean())
+        threshold = max(float(atr_value) * 0.35, avg_range * 0.55, 0.01)
+
+        return bool(body >= threshold or recent_move >= threshold)
+
+
     def _validate_df(self, df: pd.DataFrame, label: str) -> None:
         required = {"open", "high", "low", "close"}
         if df is None or df.empty:
