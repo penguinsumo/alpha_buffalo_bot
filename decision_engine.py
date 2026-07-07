@@ -47,7 +47,7 @@ class DecisionEngine:
         if bp.watch_bias in ("BUY", "SELL"):
             score += 1
 
-        if bp.delta_alignment in ("M15_H1_BUY", "M15_H1_SELL"):
+        if bp.delta_alignment in ("M15_H1_BUY", "M15_H1_SELL", "BULLISH", "BEARISH"):
             score += 1
 
         if bp.impulse_direction in ("BUY", "SELL"):
@@ -123,9 +123,9 @@ class DecisionEngine:
         if bp.impulse_direction in ("BUY", "SELL"):
             return bp.impulse_direction
 
-        if bp.delta_alignment == "M15_H1_BUY":
+        if bp.delta_alignment in ("M15_H1_BUY", "BULLISH"):
             return "BUY"
-        if bp.delta_alignment == "M15_H1_SELL":
+        if bp.delta_alignment in ("M15_H1_SELL", "BEARISH"):
             return "SELL"
 
         return self._trend_to_action(bp.trend_h4)
