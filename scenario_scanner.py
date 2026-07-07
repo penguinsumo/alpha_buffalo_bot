@@ -57,6 +57,31 @@ class ScenarioScanner:
         m15_impulse = self._is_impulse(df_15m, m15_delta, atr_15m)
         h1_impulse = self._is_impulse(df_1h, h1_delta, atr_1h)
 
+        previous_close = float(df_15m["close"].iloc[-2]) if len(df_15m) > 1 else current_price
+        price_reclaimed_bb_middle = previous_close <= bb_middle <= current_price
+        price_reclaimed_tunnel_mid = previous_close <= tunnel_mid <= current_price
+        price_above_mid_support = (
+            current_price >= bb_middle
+            and current_price >= tunnel_mid
+            and (previous_close <= bb_middle or previous_close <= tunnel_mid)
+        )
+
+        early_buy_reclaim_watch = (
+            trend_h4 == "UP"
+            and ha_m15_bullish
+            and m15_delta in ("NEUTRAL", "UP")
+            and h1_delta != "DOWN"
+            and not (h1_phase == "IMPULSE_DOWN" and ha_h1_bearish)
+            and (
+                price_reclaimed_bb_middle
+                or price_reclaimed_tunnel_mid
+                or (
+                    price_above_mid_support
+                    and m15_phase in ("PULLBACK_UP", "IMPULSE_UP")
+                )
+            )
+        )
+
         if m15_delta == "UP" and h1_delta == "UP":
             delta_alignment = "BULLISH"
         elif m15_delta == "DOWN" and h1_delta == "DOWN":
@@ -72,6 +97,9 @@ class ScenarioScanner:
         ):
             watch_bias = "BUY"
             impulse_direction = "BUY" if m15_impulse else "NONE"
+        elif early_buy_reclaim_watch:
+            watch_bias = "BUY_WATCH"
+            impulse_direction = "NONE"
         elif (
             m15_delta == "DOWN"
             and ha_m15_bearish
@@ -125,8 +153,6 @@ class ScenarioScanner:
             or self._inside_zone(current_price, micro_resistance_low, micro_resistance_high)
         )
 
-        previous_close = float(df_15m["close"].iloc[-2]) if len(df_15m) > 1 else current_price
-
         if trend_h4 == "UP":
             micro_prz_broken = current_price < micro_support_low
             micro_prz_reclaimed = previous_close < micro_support_low and self._inside_zone(current_price, micro_support_low, micro_support_high)
@@ -154,6 +180,8 @@ class ScenarioScanner:
             trade_plan = "NO_TRADE"
         elif reversal_allowed:
             trade_plan = "PRZ_REVERSAL_WATCH"
+        elif early_buy_reclaim_watch:
+            trade_plan = "EARLY_BUY_RECLAIM_WATCH"
         else:
             trade_plan = "NONE"
 
@@ -248,7 +276,11 @@ class ScenarioScanner:
             f"ha_h1_bull={ha_h1_bullish} ha_h1_bear={ha_h1_bearish} "
             f"watch_bias={watch_bias} delta_alignment={delta_alignment} "
             f"impulse_direction={impulse_direction} "
-            f"trade_plan={trade_plan} prz_state={prz_state} "
+            f"trade_plan={trade_plan} early_buy_reclaim={early_buy_reclaim_watch} "
+            f"price_reclaimed_bb_mid={price_reclaimed_bb_middle} "
+            f"price_reclaimed_tunnel_mid={price_reclaimed_tunnel_mid} "
+            f"price_above_mid_support={price_above_mid_support} "
+            f"prz_state={prz_state} "
             f"micro_broken={micro_prz_broken} micro_reclaimed={micro_prz_reclaimed}",
             flush=True,
         )
