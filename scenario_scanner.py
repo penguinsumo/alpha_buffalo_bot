@@ -360,6 +360,70 @@ class ScenarioScanner:
         return bool(body >= threshold or recent_move >= threshold)
 
 
+    def _delta_state(self, df: pd.DataFrame, lookback: int = 3) -> str:
+        """
+        Short-horizon price delta heuristic.
+        คืนค่า: UP / DOWN / NEUTRAL
+        """
+        if len(df) < lookback + 2:
+            return "NEUTRAL"
+
+        avg_range = float((df["high"] - df["low"]).tail(20).mean())
+        threshold = max(avg_range * 0.12, 0.01)
+
+        close_now = float(df["close"].iloc[-1])
+        close_prev = float(df["close"].iloc[-lookback - 1])
+        body = float(df["close"].iloc[-1]) - float(df["open"].iloc[-1])
+        delta = close_now - close_prev
+
+        if delta > threshold and body >= 0:
+            return "UP"
+        if delta < -threshold and body <= 0:
+            return "DOWN"
+        return "NEUTRAL"
+
+    def _phase_state(self, df: pd.DataFrame) -> str:
+        """
+        EMA regime classifier.
+        คืนค่า: IMPULSE_UP / IMPULSE_DOWN / PULLBACK_UP / PULLBACK_DOWN / UNKNOWN
+        """
+        if len(df) < 50:
+            return "UNKNOWN"
+
+        close = df["close"].astype(float)
+        ema20 = close.ewm(span=20, adjust=False).mean()
+        ema50 = close.ewm(span=50, adjust=False).mean()
+
+        last_close = float(close.iloc[-1])
+        prev_close = float(close.iloc[-4])
+        ema20_last = float(ema20.iloc[-1])
+        ema50_last = float(ema50.iloc[-1])
+
+        if last_close > ema20_last > ema50_last and last_close > prev_close:
+            return "IMPULSE_UP"
+        if last_close < ema20_last < ema50_last and last_close < prev_close:
+            return "IMPULSE_DOWN"
+        if last_close > ema50_last:
+            return "PULLBACK_UP"
+        if last_close < ema50_last:
+            return "PULLBACK_DOWN"
+        return "UNKNOWN"
+
+    def _is_impulse(self, df: pd.DataFrame, delta_state: str, atr_value: float) -> bool:
+        """
+        ATR/range expansion gate.
+        """
+        if len(df) < 5 or delta_state not in ("UP", "DOWN", "DELTA_PLUS", "DELTA_MINUS"):
+            return False
+
+        body = abs(float(df["close"].iloc[-1]) - float(df["open"].iloc[-1]))
+        recent_move = abs(float(df["close"].iloc[-1]) - float(df["close"].iloc[-4]))
+        avg_range = float((df["high"] - df["low"]).tail(20).mean())
+        threshold = max(float(atr_value) * 0.35, avg_range * 0.55, 0.01)
+
+        return bool(body >= threshold or recent_move >= threshold)
+
+
     def _validate_df(self, df: pd.DataFrame, label: str) -> None:
         required = {"open", "high", "low", "close"}
         if df is None or df.empty:
