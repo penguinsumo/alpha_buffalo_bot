@@ -136,13 +136,51 @@ class ScenarioScanner:
             decision_bias = "WEAK"
 
         plan_a_entry = current_price
-        plan_a_sl = current_price - atr_15m if trend_h4 == "UP" else current_price + atr_15m
-        plan_a_tp = current_price + (atr_15m * 2) if trend_h4 == "UP" else current_price - (atr_15m * 2)
+        sl_buffer = max(atr_15m * 0.35, 1.0)
 
-        plan_b_entry = swing_H if trend_h4 == "UP" else swing_L
-        plan_b_sl = swing_L if trend_h4 == "UP" else swing_H
-        plan_b_tp1 = plan_b_entry + (atr_15m * 2) if trend_h4 == "UP" else plan_b_entry - (atr_15m * 2)
-        plan_b_tp2 = plan_b_entry + (atr_15m * 3) if trend_h4 == "UP" else plan_b_entry - (atr_15m * 3)
+        if trend_h4 == "UP":
+            buy_sl_candidates = [
+                swing_L,
+                bb_lower,
+                tunnel_lower,
+                micro_support_low,
+                htf_support_low,
+            ]
+            buy_sl_candidates = [x for x in buy_sl_candidates if x and x > 0]
+            sl_invalidation = min(buy_sl_candidates) if buy_sl_candidates else current_price - atr_15m
+
+            plan_a_sl = sl_invalidation - sl_buffer
+            plan_a_tp = current_price + (atr_15m * 2)
+            plan_b_entry = swing_H
+            plan_b_sl = plan_a_sl
+            plan_b_tp1 = plan_b_entry + (atr_15m * 2)
+            plan_b_tp2 = plan_b_entry + (atr_15m * 3)
+
+        elif trend_h4 == "DOWN":
+            sell_sl_candidates = [
+                swing_H,
+                bb_upper,
+                tunnel_upper,
+                micro_resistance_high,
+                htf_resistance_high,
+            ]
+            sell_sl_candidates = [x for x in sell_sl_candidates if x and x > 0]
+            sl_invalidation = max(sell_sl_candidates) if sell_sl_candidates else current_price + atr_15m
+
+            plan_a_sl = sl_invalidation + sl_buffer
+            plan_a_tp = current_price - (atr_15m * 2)
+            plan_b_entry = swing_L
+            plan_b_sl = plan_a_sl
+            plan_b_tp1 = plan_b_entry - (atr_15m * 2)
+            plan_b_tp2 = plan_b_entry - (atr_15m * 3)
+
+        else:
+            plan_a_sl = current_price - atr_15m
+            plan_a_tp = current_price + (atr_15m * 2)
+            plan_b_entry = swing_H
+            plan_b_sl = swing_L
+            plan_b_tp1 = plan_b_entry + (atr_15m * 2)
+            plan_b_tp2 = plan_b_entry + (atr_15m * 3)
 
         errors = []
         if current_price <= 0:
