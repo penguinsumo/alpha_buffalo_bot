@@ -104,6 +104,20 @@ class ScenarioBlueprint:
     zone_validated: bool = False
     zone_invalidated: bool = False
 
+    # PRZ / Harmonic state
+    prz_state: str = "UNKNOWN"
+    micro_prz_broken: bool = False
+    micro_prz_reclaimed: bool = False
+    reversal_allowed: bool = True
+
+    # Tunnel / Parallel channel state
+    tunnel_state: str = "FLAT"
+    inside_tunnel: bool = False
+    near_tunnel_upper: bool = False
+    near_tunnel_mid: bool = False
+    near_tunnel_lower: bool = False
+    tunnel_retest_valid: bool = False
+
     # Plan routing
     trade_plan: str = "NONE"
     execution_state: str = "WATCH"
@@ -204,6 +218,24 @@ class ScenarioBlueprint:
                     "choch_confirmed": self.choch_confirmed,
                     "zone_validated": self.zone_validated,
                     "zone_invalidated": self.zone_invalidated,
+                },
+                "state": {
+                    "prz_state": self.prz_state,
+                    "micro_prz_broken": self.micro_prz_broken,
+                    "micro_prz_reclaimed": self.micro_prz_reclaimed,
+                    "reversal_allowed": self.reversal_allowed,
+                },
+                "tunnel_state": {
+                    "state": self.tunnel_state,
+                    "inside_tunnel": self.inside_tunnel,
+                    "near_upper": self.near_tunnel_upper,
+                    "near_mid": self.near_tunnel_mid,
+                    "near_lower": self.near_tunnel_lower,
+                    "retest_valid": self.tunnel_retest_valid,
+                    "upper": self.tunnel_upper,
+                    "middle": self.tunnel_mid,
+                    "lower": self.tunnel_lower,
+                    "slope": self.tunnel_slope,
                 },
                 "bb_15m": {
                     "upper": self.bb_upper,
