@@ -14,6 +14,29 @@ class ScenarioBlueprint:
     trend_h1: str = "NEUTRAL"
     market_mode: str = "SIDEWAYS"
 
+    # ─────────────────────────────
+    # Price Action / HA / Delta v12+
+    # ─────────────────────────────
+    m15_phase: str = "UNKNOWN"
+    h1_phase: str = "UNKNOWN"
+    h4_phase: str = "UNKNOWN"
+
+    m15_delta: str = "NEUTRAL"
+    h1_delta: str = "NEUTRAL"
+    h4_delta: str = "NEUTRAL"
+
+    m15_impulse: bool = False
+    h1_impulse: bool = False
+
+    ha_m15_bullish: bool = False
+    ha_m15_bearish: bool = False
+    ha_h1_bullish: bool = False
+    ha_h1_bearish: bool = False
+
+    watch_bias: str = "NONE"
+    delta_alignment: str = "NONE"
+    impulse_direction: str = "NONE"
+
     current_price: float = 0.0
 
     bb_upper: float = 0.0
@@ -133,6 +156,23 @@ class ScenarioBlueprint:
             "trend_h4": self.trend_h4,
             "trend_h1": self.trend_h1,
             "market_mode": self.market_mode,
+            "price_action": {
+                "m15_phase": self.m15_phase,
+                "h1_phase": self.h1_phase,
+                "h4_phase": self.h4_phase,
+                "m15_delta": self.m15_delta,
+                "h1_delta": self.h1_delta,
+                "h4_delta": self.h4_delta,
+                "m15_impulse": self.m15_impulse,
+                "h1_impulse": self.h1_impulse,
+                "ha_m15_bullish": self.ha_m15_bullish,
+                "ha_m15_bearish": self.ha_m15_bearish,
+                "ha_h1_bullish": self.ha_h1_bullish,
+                "ha_h1_bearish": self.ha_h1_bearish,
+                "watch_bias": self.watch_bias,
+                "delta_alignment": self.delta_alignment,
+                "impulse_direction": self.impulse_direction,
+            },
             "current_price": self.current_price,
             "bb": {
                 "upper": self.bb_upper,
