@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+import threading
 from typing import Dict, Tuple
 
 import pandas as pd
@@ -15,6 +16,11 @@ from session_clock import SessionClock
 
 
 app = FastAPI(title="Alpha Buffalo v12 API Adapter", version="12.0.0")
+
+SIGNAL_LOOP_INTERVAL_SECONDS = int(os.getenv("SIGNAL_LOOP_INTERVAL_SECONDS", "360"))
+LATEST_SIGNAL_CACHE: dict = {}
+LATEST_SIGNAL_LOCK = threading.Lock()
+_SIGNAL_LOOP_STARTED = False
 
 SYMBOL_DEFAULT = os.getenv("ALPHA_SYMBOL", "XAU/USD")
 PUBLIC_SYMBOL_DEFAULT = os.getenv("ALPHA_PUBLIC_SYMBOL", "XAUUSD")
@@ -242,6 +248,46 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
     }
 
 
+def _set_latest_signal(payload: dict) -> None:
+    with LATEST_SIGNAL_LOCK:
+        LATEST_SIGNAL_CACHE.clear()
+        LATEST_SIGNAL_CACHE.update(payload)
+
+
+def _get_latest_signal() -> dict:
+    with LATEST_SIGNAL_LOCK:
+        return dict(LATEST_SIGNAL_CACHE)
+
+
+def _cloud_signal_loop() -> None:
+    print(f"AlphaBuffalo cloud signal loop started | interval={SIGNAL_LOOP_INTERVAL_SECONDS}s", flush=True)
+    while True:
+        try:
+            payload = run_pipeline()
+            _set_latest_signal(payload)
+            decision = payload.get("signal", {}).get("decision", {})
+            ea = payload.get("ea", {})
+            print(
+                f"AlphaBuffalo cloud scan | action={decision.get('action')} "
+                f"grade={decision.get('grade')} score={decision.get('score')} "
+                f"ea={ea.get('action')} state={ea.get('execution_state')}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"AlphaBuffalo cloud scan error | {type(exc).__name__}: {exc}", flush=True)
+        time.sleep(SIGNAL_LOOP_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+def _start_cloud_signal_loop() -> None:
+    global _SIGNAL_LOOP_STARTED
+    if _SIGNAL_LOOP_STARTED:
+        return
+    _SIGNAL_LOOP_STARTED = True
+    worker = threading.Thread(target=_cloud_signal_loop, name="alpha-cloud-signal-loop", daemon=True)
+    worker.start()
+
+
 
 @app.head("/")
 def root_head():
@@ -276,7 +322,13 @@ def signal_latest(key: str = "", symbol: str = SYMBOL_DEFAULT):
         raise HTTPException(status_code=403, detail="INVALID_LICENSE")
 
     public_symbol = symbol.replace("/", "")
-    return run_pipeline(symbol=symbol, public_symbol=public_symbol)
+    cached = _get_latest_signal()
+    if cached and cached.get("symbol") == public_symbol:
+        return cached
+
+    payload = run_pipeline(symbol=symbol, public_symbol=public_symbol)
+    _set_latest_signal(payload)
+    return payload
 
 
 @app.get("/signal/scenarios")
