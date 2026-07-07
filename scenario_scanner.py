@@ -43,6 +43,47 @@ class ScenarioScanner:
         atr_15m = self._atr(df_15m)
         atr_1h = self._atr(df_1h)
 
+        ha_m15_bullish, ha_m15_bearish = self._heikin_ashi_state(df_15m)
+        ha_h1_bullish, ha_h1_bearish = self._heikin_ashi_state(df_1h)
+
+        m15_delta = self._delta_state(df_15m)
+        h1_delta = self._delta_state(df_1h)
+        h4_delta = self._delta_state(df_4h)
+
+        m15_phase = self._phase_state(df_15m)
+        h1_phase = self._phase_state(df_1h)
+        h4_phase = self._phase_state(df_4h)
+
+        m15_impulse = self._is_impulse(df_15m, m15_delta, atr_15m)
+        h1_impulse = self._is_impulse(df_1h, h1_delta, atr_1h)
+
+        if m15_delta == "UP" and h1_delta == "UP":
+            delta_alignment = "BULLISH"
+        elif m15_delta == "DOWN" and h1_delta == "DOWN":
+            delta_alignment = "BEARISH"
+        else:
+            delta_alignment = "MIXED"
+
+        if (
+            m15_delta == "UP"
+            and ha_m15_bullish
+            and current_price >= bb_middle
+            and (h1_delta == "UP" or trend_h4 == "UP")
+        ):
+            watch_bias = "BUY"
+            impulse_direction = "BUY" if m15_impulse else "NONE"
+        elif (
+            m15_delta == "DOWN"
+            and ha_m15_bearish
+            and current_price <= bb_middle
+            and (h1_delta == "DOWN" or trend_h4 == "DOWN")
+        ):
+            watch_bias = "SELL"
+            impulse_direction = "SELL" if m15_impulse else "NONE"
+        else:
+            watch_bias = "NONE"
+            impulse_direction = "NONE"
+
         tunnel_slope = tunnel_mid - prior_tunnel_mid
         tunnel_width = max(tunnel_upper - tunnel_lower, 0.0)
         tunnel_tolerance = max(atr_15m * 0.35, tunnel_width * 0.08)
@@ -202,6 +243,21 @@ class ScenarioScanner:
             trend_h4=trend_h4,
             trend_h1=trend_h1,
             market_mode=market_mode,
+            m15_phase=m15_phase,
+            h1_phase=h1_phase,
+            h4_phase=h4_phase,
+            m15_delta=m15_delta,
+            h1_delta=h1_delta,
+            h4_delta=h4_delta,
+            m15_impulse=bool(m15_impulse),
+            h1_impulse=bool(h1_impulse),
+            ha_m15_bullish=bool(ha_m15_bullish),
+            ha_m15_bearish=bool(ha_m15_bearish),
+            ha_h1_bullish=bool(ha_h1_bullish),
+            ha_h1_bearish=bool(ha_h1_bearish),
+            watch_bias=watch_bias,
+            delta_alignment=delta_alignment,
+            impulse_direction=impulse_direction,
             current_price=current_price,
             bb_upper=bb_upper,
             bb_middle=bb_middle,
