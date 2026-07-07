@@ -41,18 +41,56 @@ class DecisionEngine:
         elif bp.decision_bias == "MODERATE":
             score += 1
 
-        if score >= 8:
+        # ─────────────────────────────
+        # Price Action / HA / Delta / Impulse boosts
+        # ─────────────────────────────
+        if bp.watch_bias in ("BUY", "SELL"):
+            score += 1
+
+        if bp.delta_alignment in ("M15_H1_BUY", "M15_H1_SELL"):
+            score += 1
+
+        if bp.impulse_direction in ("BUY", "SELL"):
+            score += 1
+
+        if bp.m15_impulse:
+            score += 1
+
+        if bp.h1_impulse:
+            score += 1
+
+        # ─────────────────────────────
+        # Routing / PRZ / Tunnel controls
+        # ─────────────────────────────
+        if bp.trade_plan == "PRZ_REVERSAL_WATCH" and bp.reversal_allowed:
+            score += 1
+
+        if bp.trade_plan == "TUNNEL_WATCH" and bp.tunnel_retest_valid:
+            score += 1
+
+        if bp.trade_plan == "NO_TRADE":
+            score -= 3
+
+        if bp.zone_invalidated:
+            score -= 2
+
+        if bp.micro_prz_broken and not bp.micro_prz_reclaimed:
+            score -= 2
+
+        preferred_action = self._resolve_action(bp)
+
+        if score >= 9 and preferred_action in ("BUY", "SELL"):
             grade = "STRONG_TRADE"
-            action = self._trend_to_action(bp.trend_h4)
+            action = preferred_action
             confidence = 0.85
-        elif score >= 5:
+        elif score >= 6 and preferred_action in ("BUY", "SELL"):
             grade = "VALID_TRADE"
-            action = self._trend_to_action(bp.trend_h4)
-            confidence = 0.65
-        elif score >= 3:
+            action = preferred_action
+            confidence = 0.68
+        elif score >= 4:
             grade = "WAIT"
             action = "NONE"
-            confidence = 0.40
+            confidence = 0.42
         else:
             grade = "NONE"
             action = "NONE"
@@ -64,6 +102,9 @@ class DecisionEngine:
         reason = (
             f"score={score}|base={bp.base_score}|bias={bp.decision_bias}"
             f"|trend_h4={bp.trend_h4}|trend_h1={bp.trend_h1}"
+            f"|watch_bias={bp.watch_bias}|delta_align={bp.delta_alignment}"
+            f"|impulse={bp.impulse_direction}|m15_imp={bp.m15_impulse}|h1_imp={bp.h1_impulse}"
+            f"|plan={bp.trade_plan}|prz={bp.prz_state}|broken={bp.micro_prz_broken}"
             f"|bos={bp.bos_triggered}|smc={bp.smc_confirmed}|vsa={bp.vsa_confirmed}"
         )
 
@@ -74,6 +115,20 @@ class DecisionEngine:
             reason=reason,
             grade=grade,
         )
+
+    def _resolve_action(self, bp: ScenarioBlueprint) -> str:
+        if bp.watch_bias in ("BUY", "SELL"):
+            return bp.watch_bias
+
+        if bp.impulse_direction in ("BUY", "SELL"):
+            return bp.impulse_direction
+
+        if bp.delta_alignment == "M15_H1_BUY":
+            return "BUY"
+        if bp.delta_alignment == "M15_H1_SELL":
+            return "SELL"
+
+        return self._trend_to_action(bp.trend_h4)
 
     def _trend_to_action(self, trend: str) -> str:
         if trend == "UP":
