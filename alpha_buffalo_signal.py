@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Request, Response, Response
 from decision_engine import DecisionEngine
 from scenario_scanner import ScenarioScanner
 from signal_composer import SignalComposer
+from session_clock import SessionClock
 
 
 app = FastAPI(title="Alpha Buffalo v12 API Adapter", version="12.0.0")
@@ -219,10 +220,14 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
     scanner = ScenarioScanner()
     blueprint = scanner.scan(df_4h, df_1h, df_15m, symbol=public_symbol)
 
+    session_clock = SessionClock()
+    session_state = session_clock.get()
+    blueprint.session = session_state.session
+
     engine = DecisionEngine()
     decision = engine.evaluate(blueprint)
 
-    composer = SignalComposer()
+    composer = SignalComposer(session_clock=session_clock)
     signal = composer.compose(
         blueprint=blueprint,
         decision=decision,
