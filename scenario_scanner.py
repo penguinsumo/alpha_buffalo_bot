@@ -237,6 +237,22 @@ class ScenarioScanner:
         expected_value = round((0.61 * risk_reward_ratio) - (1 - 0.61), 4) if risk_reward_ratio else 0.0
         confidence = "HIGH" if base_score >= 6 else "MEDIUM" if base_score >= 3 else "LOW"
 
+        print(
+            "AlphaBuffalo scanner state | "
+            f"symbol={symbol} price={round(current_price, 3)} "
+            f"trend_h4={trend_h4} trend_h1={trend_h1} mode={market_mode} "
+            f"m15_phase={m15_phase} h1_phase={h1_phase} h4_phase={h4_phase} "
+            f"m15_delta={m15_delta} h1_delta={h1_delta} h4_delta={h4_delta} "
+            f"m15_impulse={m15_impulse} h1_impulse={h1_impulse} "
+            f"ha_m15_bull={ha_m15_bullish} ha_m15_bear={ha_m15_bearish} "
+            f"ha_h1_bull={ha_h1_bullish} ha_h1_bear={ha_h1_bearish} "
+            f"watch_bias={watch_bias} delta_alignment={delta_alignment} "
+            f"impulse_direction={impulse_direction} "
+            f"trade_plan={trade_plan} prz_state={prz_state} "
+            f"micro_broken={micro_prz_broken} micro_reclaimed={micro_prz_reclaimed}",
+            flush=True,
+        )
+
         return ScenarioBlueprint(
             timestamp=datetime.now(timezone.utc).isoformat(),
             symbol=symbol,
