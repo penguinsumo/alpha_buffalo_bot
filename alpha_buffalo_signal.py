@@ -156,6 +156,153 @@ def _first_float(*values, default: float = 0.0) -> float:
     return default
 
 
+
+def _df_with_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize TwelveData dataframe for engine_v4 without changing fetch contract."""
+    out = df.copy()
+
+    if isinstance(out.index, pd.DatetimeIndex):
+        out = out.sort_index()
+        return out
+
+    if "datetime" not in out.columns:
+        raise ValueError("ENGINE_V4_REQUIRES_DATETIME_COLUMN")
+
+    out["datetime"] = pd.to_datetime(out["datetime"], errors="coerce")
+    out = out.dropna(subset=["datetime"]).set_index("datetime").sort_index()
+
+    if out.index.tz is None:
+        out.index = out.index.tz_localize("UTC")
+    else:
+        out.index = out.index.tz_convert("UTC")
+
+    return out
+
+
+def _iso_timestamp(value) -> str:
+    try:
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value or "")
+    except Exception:
+        return ""
+
+
+def _run_engine_v4_baseline(df_15m: pd.DataFrame) -> Dict | None:
+    """
+    Restore proven BUY/SELL baseline from sell-micro-v4-2.
+
+    Root lifecycle preserved:
+    - Harmonic/PRZ remains context, not score/bucket here.
+    - This engine only produces V4/V5 trading baseline signal when confirmed.
+    - EA payload mapping remains adapter-only in build_ea_payload().
+    """
+    try:
+        from engine_v4.indicators import add_indicators
+        from engine_v4.router import SignalRouter
+        from engine_v4.final_gate import FinalGate
+        from engine_v4.buy_engine import BuySignalEngine
+        from engine_v4.sell_engine import SellSignalEngine
+
+        df = _df_with_datetime_index(df_15m)
+        df = add_indicators(df).dropna()
+
+        if len(df) < 60:
+            return None
+
+        clock = SessionClock()
+        router = SignalRouter(
+            clock=clock,
+            gate=FinalGate(clock),
+            buy_engine=BuySignalEngine(),
+            sell_engine=SellSignalEngine(),
+        )
+        signals = router.process(df)
+        if not signals:
+            return None
+
+        def rank(sig: Dict) -> tuple:
+            direction_rank = 1 if str(sig.get("direction", "")).upper() == "SELL" else 0
+            quality = int(sig.get("v5_quality_score", 0) or 0)
+            rr = _safe_float(sig.get("entry_rr"), 0.0)
+            return (quality, direction_rank, rr)
+
+        return max(signals, key=rank)
+
+    except Exception as exc:
+        print(f"AlphaBuffalo engine_v4 baseline error | {type(exc).__name__}: {exc}", flush=True)
+        return None
+
+
+def _apply_engine_v4_signal(signal: Dict, engine_signal: Dict | None) -> Dict:
+    """Overlay v4 baseline trade output onto v12 composed payload."""
+    if not engine_signal:
+        return signal
+
+    direction = str(engine_signal.get("direction", "NONE")).upper()
+    if direction not in {"BUY", "SELL"}:
+        return signal
+
+    entry = _safe_float(engine_signal.get("entry"))
+    sl = _safe_float(engine_signal.get("sl"))
+    tp_final = _safe_float(engine_signal.get("tp"))
+
+    if entry <= 0 or sl <= 0 or tp_final <= 0:
+        return signal
+
+    if direction == "BUY" and not (sl < entry < tp_final):
+        return signal
+    if direction == "SELL" and not (tp_final < entry < sl):
+        return signal
+
+    entry_mode = engine_signal.get("entry_mode") or f"V4_{direction}_BASE"
+    exit_mode = engine_signal.get("exit_mode") or ("V4_BB_UPPER" if direction == "BUY" else "V4_BB_LOWER")
+
+    quality_score = int(engine_signal.get("v5_quality_score", 0) or 0)
+    confidence = 0.78 if quality_score >= 4 else 0.70
+    score = 8 if quality_score >= 4 else 6
+    grade = "STRONG_TRADE" if quality_score >= 4 else "VALID_TRADE"
+
+    reason_parts = [
+        "ENGINE_V4_BASELINE",
+        f"direction={direction}",
+        f"entry_mode={entry_mode}",
+        f"exit_mode={exit_mode}",
+    ]
+    if engine_signal.get("v5_basis"):
+        reason_parts.append(f"v5_basis={engine_signal.get('v5_basis')}")
+    if engine_signal.get("session_quality_gate"):
+        reason_parts.append(f"session_gate={engine_signal.get('session_quality_gate')}")
+
+    signal["decision"] = {
+        "action": direction,
+        "confidence": confidence,
+        "score": score,
+        "reason": "|".join(reason_parts),
+        "grade": grade,
+    }
+    signal["timestamp"] = _iso_timestamp(engine_signal.get("timestamp") or signal.get("timestamp"))
+    signal["entry"] = entry
+    signal["sl"] = sl
+    signal["tp_final"] = tp_final
+    signal["entry_mode"] = entry_mode
+    signal["exit_mode"] = exit_mode
+    signal["be_policy"] = engine_signal.get("be_policy") or ("PROFIT_0_15" if direction == "BUY" else "CURRENT_BBMID_LOW")
+    signal["trail_policy"] = engine_signal.get("trail_policy") or ("TRAIL_FACTOR_0_9995" if direction == "BUY" else "NONE")
+    signal["max_bars"] = int(engine_signal.get("max_bars", 40) or 40)
+    signal["v5_quality_score"] = quality_score
+    signal["v5_quality_grade"] = engine_signal.get("v5_quality_grade", "BASE")
+    signal["v5_basis"] = engine_signal.get("v5_basis", "BASE")
+    signal["session_quality_gate"] = engine_signal.get("session_quality_gate", "BUY_TIMING_GATE" if direction == "BUY" else "UNKNOWN")
+    signal["sell_dot_reason"] = engine_signal.get("sell_dot_reason", "UNKNOWN")
+    signal["engine_v4"] = {
+        key: _safe_float(value) if isinstance(value, float) else value
+        for key, value in engine_signal.items()
+        if key != "timestamp"
+    }
+
+    return signal
+
 def build_ea_payload(symbol: str, signal: Dict) -> Dict:
     """
     EA execution payload.
@@ -281,6 +428,12 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
         decision=decision,
         symbol=public_symbol,
     )
+
+    # Production baseline overlay:
+    # v12 scanner/blueprint stays intact, but proven engine_v4 BUY/SELL baseline
+    # becomes the actual trade source when it produces confirmed levels.
+    engine_v4_signal = _run_engine_v4_baseline(df_15m)
+    signal = _apply_engine_v4_signal(signal, engine_v4_signal)
 
     return {
         "status": "ok",
