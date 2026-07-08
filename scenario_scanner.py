@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Tuple
+from typing import Any, Dict, Tuple
 
 import pandas as pd
 
 from scenario_blueprint import ScenarioBlueprint
+
+try:
+    from harmonic_detector import run_harmonic
+except Exception as exc:
+    run_harmonic = None
+    HARMONIC_IMPORT_ERROR = str(exc)
+else:
+    HARMONIC_IMPORT_ERROR = ""
 
 
 class ScenarioScanner:
@@ -141,8 +149,16 @@ class ScenarioScanner:
         htf_support_low, htf_support_high, htf_resistance_low, htf_resistance_high = self._prz_zone(df_1h)
         micro_support_low, micro_support_high, micro_resistance_low, micro_resistance_high = self._prz_zone(df_15m)
 
-        harmonic_prz_low = min(prz_current, prz_next) if prz_current and prz_next else 0.0
-        harmonic_prz_high = max(prz_current, prz_next) if prz_current and prz_next else 0.0
+        selected_harmonic = self._select_harmonic_prz(
+            df_4h=df_4h,
+            df_1h=df_1h,
+            current_price=current_price,
+        )
+        real_harmonic = bool(selected_harmonic.get("found"))
+
+        harmonic_prz_low = float(selected_harmonic.get("prz_low", 0.0)) if real_harmonic else 0.0
+        harmonic_prz_high = float(selected_harmonic.get("prz_high", 0.0)) if real_harmonic else 0.0
+        harmonic_d_point = float(selected_harmonic.get("d_point", 0.0)) if real_harmonic else 0.0
 
         inside_htf_prz = (
             self._inside_zone(current_price, htf_support_low, htf_support_high)
@@ -194,7 +210,7 @@ class ScenarioScanner:
             base_score += 2
         if trend_h4 == trend_h1 and trend_h4 in ("UP", "DOWN"):
             base_score += 1
-        if prz_support_top > 0 and prz_support_bottom > 0:
+        if real_harmonic:
             base_score += 1
 
         if base_score >= 6:
@@ -284,7 +300,11 @@ class ScenarioScanner:
             f"bb_middle={round(bb_middle, 3)} "
             f"tunnel_mid={round(tunnel_mid, 3)} "
             f"prz_state={prz_state} "
-            f"micro_broken={micro_prz_broken} micro_reclaimed={micro_prz_reclaimed}",
+            f"micro_broken={micro_prz_broken} micro_reclaimed={micro_prz_reclaimed} "
+            f"harmonic_pattern={selected_harmonic.get('pattern', 'NONE')} "
+            f"harmonic_tf={selected_harmonic.get('source_tf', 'NONE')} "
+            f"harmonic_state={selected_harmonic.get('state', 'NONE')} "
+            f"real_harmonic={real_harmonic}",
             flush=True,
         )
 
@@ -334,9 +354,18 @@ class ScenarioScanner:
             plan_b_tp1=round(plan_b_tp1, 3),
             plan_b_tp2=round(plan_b_tp2, 3),
             plan_b_sl=round(plan_b_sl, 3),
-            harmonic_pattern="AUTO_RANGE_618" if prz_current else "",
-            prz_current=round(prz_current, 3) if prz_current else None,
-            prz_next=round(prz_next, 3) if prz_next else None,
+            harmonic_pattern=str(selected_harmonic.get("pattern", "")) if real_harmonic else "",
+            harmonic_state=str(selected_harmonic.get("state", "NONE")) if real_harmonic else "NONE",
+            harmonic_source_tf=str(selected_harmonic.get("source_tf", "NONE")) if real_harmonic else "NONE",
+            harmonic_source=str(selected_harmonic.get("source", "NONE")) if real_harmonic else "NONE",
+            harmonic_direction=str(selected_harmonic.get("direction", "NONE")) if real_harmonic else "NONE",
+            harmonic_pattern_state=str(selected_harmonic.get("state", "NONE")) if real_harmonic else "NONE",
+            harmonic_is_real=bool(real_harmonic),
+            harmonic_d_point=round(harmonic_d_point, 3) if real_harmonic else 0.0,
+            harmonic_prz_timeframe=str(selected_harmonic.get("source_tf", "NONE")) if real_harmonic else "NONE",
+            harmonic_prz_source=str(selected_harmonic.get("source", "NONE")) if real_harmonic else "NONE",
+            prz_current=round(harmonic_d_point, 3) if real_harmonic else None,
+            prz_next=round(harmonic_prz_high, 3) if real_harmonic else None,
             atr_15m=round(atr_15m, 3),
             atr_1h=round(atr_1h, 3),
             win_rate_est=0.61,
@@ -376,6 +405,113 @@ class ScenarioScanner:
             is_valid=len(errors) == 0,
             validation_errors=errors,
         )
+
+    def _select_harmonic_prz(
+        self,
+        df_4h: pd.DataFrame,
+        df_1h: pd.DataFrame,
+        current_price: float,
+    ) -> Dict[str, Any]:
+        """
+        เลือก harmonic PRZ จริงจาก HTF เท่านั้น
+        4H มีน้ำหนักก่อน 1H
+        M15 ห้ามเป็น harmonic authority
+        """
+        candidates = []
+        candidates.extend(self._scan_harmonic_tf(df_4h, current_price, "4H"))
+        candidates.extend(self._scan_harmonic_tf(df_1h, current_price, "1H"))
+
+        if not candidates:
+            return {
+                "found": False,
+                "pattern": "",
+                "state": "NONE",
+                "source_tf": "NONE",
+                "source": "NONE",
+                "direction": "NONE",
+                "prz_low": 0.0,
+                "prz_high": 0.0,
+                "d_point": 0.0,
+                "score": 0,
+            }
+
+        tf_rank = {"4H": 0, "1H": 1}
+
+        def sort_key(item: Dict[str, Any]):
+            return (
+                0 if item.get("in_prz") else 1,
+                tf_rank.get(str(item.get("source_tf")), 9),
+                int(item.get("priority", 9)),
+                float(item.get("distance_pct", 999.0)),
+                -int(item.get("score", 0)),
+            )
+
+        candidates.sort(key=sort_key)
+        selected = candidates[0]
+
+        if selected.get("in_prz"):
+            selected["state"] = "ACTIVE"
+        elif float(selected.get("distance_pct", 999.0)) <= 0.005:
+            selected["state"] = "ARMED"
+        else:
+            selected["state"] = "DISCOVERED"
+
+        selected["found"] = True
+        return selected
+
+    def _scan_harmonic_tf(
+        self,
+        df: pd.DataFrame,
+        current_price: float,
+        source_tf: str,
+    ) -> list[Dict[str, Any]]:
+        if run_harmonic is None:
+            return []
+
+        try:
+            zones = run_harmonic(df)
+        except Exception as exc:
+            print(
+                "AlphaBuffalo harmonic scan failed | "
+                f"tf={source_tf} error={exc}",
+                flush=True,
+            )
+            return []
+
+        out = []
+        for z in zones or []:
+            prz_low = float(getattr(z, "prz_low", 0.0) or 0.0)
+            prz_high = float(getattr(z, "prz_high", 0.0) or 0.0)
+            d_point = float(getattr(z, "d_point", 0.0) or 0.0)
+
+            if prz_low <= 0 or prz_high <= 0 or d_point <= 0:
+                continue
+
+            in_prz = bool(prz_low <= current_price <= prz_high)
+            distance = abs(float(current_price) - d_point)
+            distance_pct = distance / d_point if d_point else 999.0
+
+            out.append(
+                {
+                    "found": True,
+                    "pattern": str(getattr(z, "pattern_name", "")),
+                    "direction": str(getattr(z, "direction", "NONE")),
+                    "priority": int(getattr(z, "priority", 9) or 9),
+                    "reliability": str(getattr(z, "reliability", "UNKNOWN")),
+                    "prz_low": prz_low,
+                    "prz_high": prz_high,
+                    "d_point": d_point,
+                    "score": int(getattr(z, "confluence_score", 0) or 0),
+                    "in_prz": in_prz,
+                    "distance": distance,
+                    "distance_pct": distance_pct,
+                    "source_tf": source_tf,
+                    "source": "harmonic_detector.run_harmonic",
+                    "state": "ACTIVE" if in_prz else "DISCOVERED",
+                }
+            )
+
+        return out
 
     def _heikin_ashi_state(self, df: pd.DataFrame) -> Tuple[bool, bool]:
         if len(df) < 3:
