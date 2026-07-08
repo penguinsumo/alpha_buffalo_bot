@@ -41,9 +41,6 @@ class DecisionEngine:
         elif bp.decision_bias == "MODERATE":
             score += 1
 
-        # ─────────────────────────────
-        # Price Action / HA / Delta / Impulse boosts
-        # ─────────────────────────────
         if bp.watch_bias in ("BUY", "SELL"):
             score += 1
 
@@ -59,9 +56,6 @@ class DecisionEngine:
         if bp.h1_impulse:
             score += 1
 
-        # ─────────────────────────────
-        # Routing / PRZ / Tunnel controls
-        # ─────────────────────────────
         if bp.trade_plan == "PRZ_REVERSAL_WATCH" and bp.reversal_allowed:
             score += 1
 
@@ -77,16 +71,23 @@ class DecisionEngine:
         if bp.micro_prz_broken and not bp.micro_prz_reclaimed:
             score -= 2
 
-        preferred_action = self._resolve_action(bp)
+        score = max(0, min(10, score))
 
-        if score >= 9 and preferred_action in ("BUY", "SELL"):
+        preferred_action = self._resolve_watch_direction(bp)
+        executable = self._is_executable(bp)
+
+        if score >= 9 and preferred_action in ("BUY", "SELL") and executable:
             grade = "STRONG_TRADE"
             action = preferred_action
             confidence = 0.85
-        elif score >= 6 and preferred_action in ("BUY", "SELL"):
+        elif score >= 7 and preferred_action in ("BUY", "SELL") and executable:
             grade = "VALID_TRADE"
             action = preferred_action
             confidence = 0.68
+        elif score >= 5 and preferred_action in ("BUY", "SELL"):
+            grade = f"WATCH_{preferred_action}"
+            action = "NONE"
+            confidence = 0.52
         elif score >= 4:
             grade = "WAIT"
             action = "NONE"
@@ -96,16 +97,14 @@ class DecisionEngine:
             action = "NONE"
             confidence = 0.20
 
-        if action not in ("BUY", "SELL"):
-            action = "NONE"
-
         reason = (
             f"score={score}|base={bp.base_score}|bias={bp.decision_bias}"
             f"|trend_h4={bp.trend_h4}|trend_h1={bp.trend_h1}"
             f"|watch_bias={bp.watch_bias}|delta_align={bp.delta_alignment}"
             f"|impulse={bp.impulse_direction}|m15_imp={bp.m15_impulse}|h1_imp={bp.h1_impulse}"
-            f"|plan={bp.trade_plan}|prz={bp.prz_state}|broken={bp.micro_prz_broken}"
-            f"|bos={bp.bos_triggered}|smc={bp.smc_confirmed}|vsa={bp.vsa_confirmed}"
+            f"|plan={bp.trade_plan}|executable={executable}|prz={bp.prz_state}"
+            f"|broken={bp.micro_prz_broken}|bos={bp.bos_triggered}"
+            f"|smc={bp.smc_confirmed}|vsa={bp.vsa_confirmed}"
         )
 
         return Decision(
@@ -116,7 +115,7 @@ class DecisionEngine:
             grade=grade,
         )
 
-    def _resolve_action(self, bp: ScenarioBlueprint) -> str:
+    def _resolve_watch_direction(self, bp: ScenarioBlueprint) -> str:
         if bp.watch_bias in ("BUY", "SELL"):
             return bp.watch_bias
 
@@ -125,17 +124,41 @@ class DecisionEngine:
 
         if bp.delta_alignment in ("M15_H1_BUY", "BULLISH"):
             return "BUY"
+
         if bp.delta_alignment in ("M15_H1_SELL", "BEARISH"):
             return "SELL"
 
-        return self._trend_to_action(bp.trend_h4)
-
-    def _trend_to_action(self, trend: str) -> str:
-        if trend == "UP":
-            return "BUY"
-        if trend == "DOWN":
-            return "SELL"
         return "NONE"
+
+    def _is_executable(self, bp: ScenarioBlueprint) -> bool:
+        trade_plan = str(bp.trade_plan or "").upper()
+
+        if "WATCH" in trade_plan:
+            return False
+
+        if trade_plan in ("NO_TRADE", "NONE", ""):
+            return False
+
+        if bp.zone_invalidated:
+            return False
+
+        if bp.micro_prz_broken and not bp.micro_prz_reclaimed:
+            return False
+
+        has_trigger = (
+            bp.bos_triggered
+            or bp.vsa_confirmed
+            or bp.watch_bias in ("BUY", "SELL")
+            or bp.impulse_direction in ("BUY", "SELL")
+        )
+
+        has_ready_plan = (
+            "READY" in trade_plan
+            or "EXECUTE" in trade_plan
+            or "BREAKOUT" in trade_plan
+        )
+
+        return bool(has_ready_plan and has_trigger)
 
 
 engine = DecisionEngine()
