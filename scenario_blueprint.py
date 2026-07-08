@@ -140,6 +140,52 @@ class ScenarioBlueprint:
     micro_prz_low: float = 0.0
     micro_prz_high: float = 0.0
 
+    # ─────────────────────────────
+    # PRZ Forecast Grid / OTE Map
+    # ─────────────────────────────
+    prz_forecast_timeframe: str = "NONE"
+    prz_forecast_source: str = "NONE"
+    prz_forecast_swing_high: float = 0.0
+    prz_forecast_swing_low: float = 0.0
+    prz_forecast_status: str = "NONE"
+
+    prz_a_resistance_low: float = 0.0
+    prz_a_resistance_high: float = 0.0
+    prz_a_support_low: float = 0.0
+    prz_a_support_high: float = 0.0
+
+    prz_b_resistance_low: float = 0.0
+    prz_b_resistance_high: float = 0.0
+    prz_b_support_low: float = 0.0
+    prz_b_support_high: float = 0.0
+
+    nearest_prz_name: str = "NONE"
+    nearest_prz_role: str = "NONE"
+    nearest_prz_direction: str = "NONE"
+    nearest_prz_low: float = 0.0
+    nearest_prz_high: float = 0.0
+    nearest_prz_distance: float = 0.0
+    nearest_prz_distance_pct: float = 0.0
+
+    active_prz_name: str = "NONE"
+    active_prz_tier: str = "NONE"
+
+    next_upside_prz_name: str = "NONE"
+    next_upside_prz_low: float = 0.0
+    next_upside_prz_high: float = 0.0
+
+    next_downside_prz_name: str = "NONE"
+    next_downside_prz_low: float = 0.0
+    next_downside_prz_high: float = 0.0
+
+    extended_upside_prz_name: str = "NONE"
+    extended_upside_prz_low: float = 0.0
+    extended_upside_prz_high: float = 0.0
+
+    extended_downside_prz_name: str = "NONE"
+    extended_downside_prz_low: float = 0.0
+    extended_downside_prz_high: float = 0.0
+
     # PRZ validation
     inside_htf_prz: bool = False
     inside_micro_prz: bool = False
@@ -298,6 +344,76 @@ class ScenarioBlueprint:
                     "source": self.micro_prz_source,
                     "low": self.micro_prz_low,
                     "high": self.micro_prz_high,
+                },
+                "forecast": {
+                    "timeframe": self.prz_forecast_timeframe,
+                    "source": self.prz_forecast_source,
+                    "status": self.prz_forecast_status,
+                    "swing": {
+                        "high": self.prz_forecast_swing_high,
+                        "low": self.prz_forecast_swing_low,
+                    },
+                    "classic_ote": {
+                        "name": "PRZ-A",
+                        "ratio_low": 0.618,
+                        "ratio_high": 0.705,
+                        "role": "PRIMARY_WATCH",
+                        "resistance": {
+                            "low": self.prz_a_resistance_low,
+                            "high": self.prz_a_resistance_high,
+                        },
+                        "support": {
+                            "low": self.prz_a_support_low,
+                            "high": self.prz_a_support_high,
+                        },
+                    },
+                    "deep_ote": {
+                        "name": "PRZ-B",
+                        "ratio_low": 0.786,
+                        "ratio_high": 0.886,
+                        "role": "LIQUIDITY_SWEEP_WATCH",
+                        "resistance": {
+                            "low": self.prz_b_resistance_low,
+                            "high": self.prz_b_resistance_high,
+                        },
+                        "support": {
+                            "low": self.prz_b_support_low,
+                            "high": self.prz_b_support_high,
+                        },
+                    },
+                    "nearest_zone": {
+                        "name": self.nearest_prz_name,
+                        "role": self.nearest_prz_role,
+                        "direction": self.nearest_prz_direction,
+                        "low": self.nearest_prz_low,
+                        "high": self.nearest_prz_high,
+                        "distance": self.nearest_prz_distance,
+                        "distance_pct": self.nearest_prz_distance_pct,
+                    },
+                    "active_zone": {
+                        "name": self.active_prz_name,
+                        "tier": self.active_prz_tier,
+                    },
+                    "next_upside_zone": {
+                        "name": self.next_upside_prz_name,
+                        "low": self.next_upside_prz_low,
+                        "high": self.next_upside_prz_high,
+                    },
+                    "next_downside_zone": {
+                        "name": self.next_downside_prz_name,
+                        "low": self.next_downside_prz_low,
+                        "high": self.next_downside_prz_high,
+                    },
+                    "extended_upside_zone": {
+                        "name": self.extended_upside_prz_name,
+                        "low": self.extended_upside_prz_low,
+                        "high": self.extended_upside_prz_high,
+                    },
+                    "extended_downside_zone": {
+                        "name": self.extended_downside_prz_name,
+                        "low": self.extended_downside_prz_low,
+                        "high": self.extended_downside_prz_high,
+                    },
                 },
                 "validation": {
                     "inside_htf_prz": self.inside_htf_prz,
