@@ -280,6 +280,9 @@ class ScenarioScanner:
             f"price_reclaimed_bb_mid={price_reclaimed_bb_middle} "
             f"price_reclaimed_tunnel_mid={price_reclaimed_tunnel_mid} "
             f"price_above_mid_support={price_above_mid_support} "
+            f"prev_close={round(previous_close, 3)} "
+            f"bb_middle={round(bb_middle, 3)} "
+            f"tunnel_mid={round(tunnel_mid, 3)} "
             f"prz_state={prz_state} "
             f"micro_broken={micro_prz_broken} micro_reclaimed={micro_prz_reclaimed}",
             flush=True,
