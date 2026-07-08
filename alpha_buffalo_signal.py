@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import os
 import time
 import threading
@@ -40,6 +41,21 @@ TWELVEDATA_API_KEY = (
     or ""
 )
 API_LICENSE_KEY = os.getenv("ALPHA_API_KEY", os.getenv("LICENSE_KEY", "DEMO123"))
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+TELEGRAM_CHAT_IDS = [
+    chat_id.strip()
+    for chat_id in (
+        os.getenv("NOTIFY_IDS")
+        or os.getenv("TELEGRAM_CHAT_IDS")
+        or os.getenv("TELEGRAM_CHAT_ID")
+        or ""
+    ).split(",")
+    if chat_id.strip()
+]
+TELEGRAM_NOTIFY_WAIT = os.getenv("TELEGRAM_NOTIFY_WAIT", "false").lower() in {"1", "true", "yes", "on"}
+TELEGRAM_TIMEOUT_SECONDS = float(os.getenv("TELEGRAM_TIMEOUT_SECONDS", "5"))
+LAST_TELEGRAM_SIGNAL_KEY = ""
+LAST_TELEGRAM_LOCK = threading.Lock()
 
 
 def verify_license(key: str) -> bool:
@@ -155,6 +171,115 @@ def _first_float(*values, default: float = 0.0) -> float:
             return parsed
     return default
 
+
+def _fmt_price(value) -> str:
+    parsed = _safe_float(value)
+    return f"{parsed:.2f}" if parsed else "-"
+
+
+def _clean_text(value, default: str = "-") -> str:
+    text = str(value if value not in (None, "") else default)
+    return html.escape(text, quote=False)
+
+
+def _telegram_enabled() -> bool:
+    return bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_IDS)
+
+
+def _telegram_signal_key(payload: Dict) -> str:
+    ea = payload.get("ea", {}) or {}
+    signal = payload.get("signal", {}) or {}
+    return "|".join([
+        str(ea.get("signal_id", "")),
+        str(ea.get("action", "")),
+        str(ea.get("execution_state", "")),
+        str(ea.get("direction", "")),
+        str(ea.get("entry", "")),
+        str(ea.get("sl", "")),
+        str(ea.get("tp_final", "")),
+        str(signal.get("v5_quality_score", "")),
+    ])
+
+
+def format_telegram_signal(payload: Dict) -> str:
+    """Clean V5-style Telegram message, adapted to v12 nested signal + ea payload."""
+    symbol = payload.get("symbol", SYMBOL_DEFAULT.replace("/", ""))
+    signal = payload.get("signal", {}) or {}
+    ea = payload.get("ea", {}) or {}
+    decision = signal.get("decision", {}) or {}
+
+    action = str(ea.get("action", "WAIT")).upper()
+    state = str(ea.get("execution_state", "WATCH")).upper()
+    direction = str(ea.get("direction", "NONE")).upper()
+    emoji = "🟢" if direction == "BUY" else "🔴" if direction == "SELL" else "⚪"
+
+    entry_mode = ea.get("entry_mode") or signal.get("entry_mode") or "V12_DECISION"
+    exit_mode = ea.get("exit_mode") or signal.get("exit_mode") or "NONE"
+    quality_score = int(ea.get("v5_quality_score", 0) or 0)
+    quality_grade = ea.get("v5_quality_grade") or "UNKNOWN"
+    quality_basis = ea.get("v5_basis") or "UNKNOWN"
+    session_gate = ea.get("session_quality_gate") or "UNKNOWN"
+    reason = ea.get("reason") or decision.get("reason") or "-"
+
+    return "\n".join([
+        f"{emoji} <b>Alpha Buffalo</b>",
+        f"📊 <b>{_clean_text(symbol)}</b> | {_clean_text(direction)} | {_clean_text(action)}/{_clean_text(state)}",
+        f"🎯 Score: {_safe_float(ea.get('score')):.1f} | Grade: {_clean_text(ea.get('grade') or decision.get('grade'))}",
+        f"💰 Entry: {_fmt_price(ea.get('entry'))}",
+        f"📈 TP: {_fmt_price(ea.get('tp_final'))}",
+        f"🛡️ SL: {_fmt_price(ea.get('sl'))}",
+        f"🧭 Session: {_clean_text(ea.get('session'))}",
+        f"⚙️ Entry: {_clean_text(entry_mode)} | Exit: {_clean_text(exit_mode)}",
+        f"🧠 V5 Quality: {quality_score} / {_clean_text(quality_grade)} / {_clean_text(quality_basis)}",
+        f"🚦 Gate: {_clean_text(session_gate)} | Levels: {_clean_text(ea.get('directional_levels_ok'))}",
+        f"📝 {_clean_text(reason)}",
+        f"⏱️ {_clean_text(signal.get('timestamp') or ea.get('signal_id'))}",
+    ])
+
+
+def send_telegram_message(text: str) -> bool:
+    if not _telegram_enabled():
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    ok = False
+    for chat_id in TELEGRAM_CHAT_IDS:
+        try:
+            response = requests.post(
+                url,
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+                timeout=TELEGRAM_TIMEOUT_SECONDS,
+            )
+            if response.status_code == 200:
+                ok = True
+            else:
+                print(f"AlphaBuffalo Telegram send failed | chat_id={chat_id} status={response.status_code} body={response.text[:160]}", flush=True)
+        except Exception as exc:
+            print(f"AlphaBuffalo Telegram send error | chat_id={chat_id} {type(exc).__name__}: {exc}", flush=True)
+    return ok
+
+
+def maybe_broadcast_signal(payload: Dict) -> None:
+    """Send only actionable OPEN by default; WAIT can be enabled with TELEGRAM_NOTIFY_WAIT=true."""
+    global LAST_TELEGRAM_SIGNAL_KEY
+
+    ea = payload.get("ea", {}) or {}
+    action = str(ea.get("action", "WAIT")).upper()
+    if action != "OPEN" and not TELEGRAM_NOTIFY_WAIT:
+        return
+
+    signal_key = _telegram_signal_key(payload)
+    with LAST_TELEGRAM_LOCK:
+        if signal_key and signal_key == LAST_TELEGRAM_SIGNAL_KEY:
+            return
+        LAST_TELEGRAM_SIGNAL_KEY = signal_key
+
+    send_telegram_message(format_telegram_signal(payload))
 
 
 def _df_with_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -460,6 +585,7 @@ def _cloud_signal_loop() -> None:
         try:
             payload = run_pipeline()
             _set_latest_signal(payload)
+            maybe_broadcast_signal(payload)
             decision = payload.get("signal", {}).get("decision", {})
             ea = payload.get("ea", {})
             print(
