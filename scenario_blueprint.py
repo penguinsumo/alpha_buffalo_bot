@@ -113,7 +113,28 @@ class ScenarioBlueprint:
     harmonic_prz_high: float = 0.0
     harmonic_completion: float = 0.0
     harmonic_probability: float = 0.0
-    harmonic_state: str = "DISCOVERED"
+    harmonic_state: str = "NONE"
+    harmonic_source_tf: str = "NONE"
+    harmonic_source: str = "NONE"
+    harmonic_direction: str = "NONE"
+    harmonic_pattern_state: str = "NONE"
+    harmonic_is_real: bool = False
+    harmonic_d_point: float = 0.0
+    harmonic_x_price: float = 0.0
+    harmonic_a_price: float = 0.0
+    harmonic_b_price: float = 0.0
+    harmonic_c_price: float = 0.0
+    harmonic_tp1: float = 0.0
+    harmonic_tp2: float = 0.0
+    harmonic_tp3: float = 0.0
+    harmonic_invalidation: float = 0.0
+
+    htf_prz_timeframe: str = "1H"
+    htf_prz_source: str = "df_1h_prz_zone_proxy"
+    harmonic_prz_timeframe: str = "NONE"
+    harmonic_prz_source: str = "NONE"
+    micro_prz_timeframe: str = "15M"
+    micro_prz_source: str = "df_15m_prz_zone_proxy"
 
     # Micro execution PRZ
     micro_prz_low: float = 0.0
@@ -212,8 +233,25 @@ class ScenarioBlueprint:
             },
             "harmonic": {
                 "pattern": self.harmonic_pattern,
+                "state": self.harmonic_state,
+                "pattern_state": self.harmonic_pattern_state,
+                "source_tf": self.harmonic_source_tf,
+                "source": self.harmonic_source,
+                "direction": self.harmonic_direction,
+                "is_real_harmonic": self.harmonic_is_real,
+                "x": self.harmonic_x_price,
+                "a": self.harmonic_a_price,
+                "b": self.harmonic_b_price,
+                "c": self.harmonic_c_price,
+                "d": self.harmonic_d_point,
                 "prz_current": self.prz_current,
                 "prz_next": self.prz_next,
+                "prz_low": self.harmonic_prz_low,
+                "prz_high": self.harmonic_prz_high,
+                "tp1": self.harmonic_tp1,
+                "tp2": self.harmonic_tp2,
+                "tp3": self.harmonic_tp3,
+                "invalidation": self.harmonic_invalidation,
                 "support_top": self.prz_support_top,
                 "support_bottom": self.prz_support_bottom,
             },
@@ -235,19 +273,29 @@ class ScenarioBlueprint:
             },
             "prz_layers": {
                 "htf": {
+                    "timeframe": self.htf_prz_timeframe,
+                    "source": self.htf_prz_source,
                     "support_low": self.htf_prz_support_low,
                     "support_high": self.htf_prz_support_high,
                     "resistance_low": self.htf_prz_resistance_low,
                     "resistance_high": self.htf_prz_resistance_high,
                 },
                 "harmonic_forecast": {
+                    "timeframe": self.harmonic_prz_timeframe,
+                    "source": self.harmonic_prz_source,
+                    "pattern": self.harmonic_pattern,
+                    "direction": self.harmonic_direction,
+                    "is_real_harmonic": self.harmonic_is_real,
                     "low": self.harmonic_prz_low,
                     "high": self.harmonic_prz_high,
+                    "d_point": self.harmonic_d_point,
                     "completion": self.harmonic_completion,
                     "probability": self.harmonic_probability,
                     "state": self.harmonic_state,
                 },
                 "micro": {
+                    "timeframe": self.micro_prz_timeframe,
+                    "source": self.micro_prz_source,
                     "low": self.micro_prz_low,
                     "high": self.micro_prz_high,
                 },
@@ -266,6 +314,8 @@ class ScenarioBlueprint:
                     "reversal_allowed": self.reversal_allowed,
                 },
                 "tunnel_state": {
+                    "timeframe": "15M",
+                    "source": "df_15m_tunnel_proxy",
                     "state": self.tunnel_state,
                     "inside_tunnel": self.inside_tunnel,
                     "near_upper": self.near_tunnel_upper,
@@ -278,6 +328,8 @@ class ScenarioBlueprint:
                     "slope": self.tunnel_slope,
                 },
                 "bb_15m": {
+                    "timeframe": "15M",
+                    "source": "df_15m_bollinger",
                     "upper": self.bb_upper,
                     "middle": self.bb_middle,
                     "lower": self.bb_lower,
