@@ -727,6 +727,17 @@ def _apply_engine_v4_signal(signal: Dict, engine_signal: Dict | None) -> Dict:
     signal["sl"] = sl
     signal["tp_final"] = tp_final
     signal["entry_mode"] = entry_mode
+    signal["setup_state"] = engine_signal.get("setup_state", "UNKNOWN")
+    signal["scenario_state"] = engine_signal.get("scenario_state") or engine_signal.get("setup_state")
+    signal["journey_state"] = engine_signal.get("journey_state")
+    signal["entry_rr"] = engine_signal.get("entry_rr")
+    signal["rr_ok"] = engine_signal.get("rr_ok")
+    signal["zone_confluence"] = engine_signal.get("zone_confluence")
+    signal["bb_prz_confluence"] = engine_signal.get("bb_prz_confluence")
+    signal["v4_entry_zone"] = engine_signal.get("v4_entry_zone")
+    signal["vsa_gate"] = engine_signal.get("vsa_gate")
+    signal["selected_age_bars"] = engine_signal.get("selected_age_bars")
+    signal["selected_idx"] = engine_signal.get("selected_idx")
     signal["exit_mode"] = exit_mode
     signal["be_policy"] = engine_signal.get("be_policy") or ("PROFIT_0_15" if direction == "BUY" else "CURRENT_BBMID_LOW")
     signal["trail_policy"] = engine_signal.get("trail_policy") or ("TRAIL_FACTOR_0_9995" if direction == "BUY" else "NONE")
