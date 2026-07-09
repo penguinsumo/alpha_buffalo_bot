@@ -100,6 +100,21 @@ class ScenarioBlueprint:
     prz_support_bottom: float = 0.0
 
     # ─────────────────────────────
+    # Market-close framework map
+    # ─────────────────────────────
+    market_map_date: str = ""
+    market_map_source: str = "NONE"
+    lot0_price: float = 0.0
+    lot0_side: str = "NONE"
+    lot0_source: str = "NONE"
+    lot0_timeframe: str = "NONE"
+    kivanc_boundary_high: float = 0.0
+    kivanc_boundary_low: float = 0.0
+    kivanc_fibo_0618: float = 0.0
+    kivanc_fibo_0786: float = 0.0
+    kivanc_fibo_0886: float = 0.0
+
+    # ─────────────────────────────
     # PRZ LAYERS v12+
     # ─────────────────────────────
     # HTF / New Day structural PRZ
@@ -256,6 +271,23 @@ class ScenarioBlueprint:
             "golden_zone": {
                 "low": self.golden_zone_low,
                 "high": self.golden_zone_high,
+            },
+            "market_close_map": {
+                "date": self.market_map_date,
+                "source": self.market_map_source,
+                "lot0": {
+                    "price": self.lot0_price,
+                    "side": self.lot0_side,
+                    "source": self.lot0_source,
+                    "timeframe": self.lot0_timeframe,
+                },
+                "kivanc": {
+                    "boundary_high": self.kivanc_boundary_high,
+                    "boundary_low": self.kivanc_boundary_low,
+                    "fibo_0618": self.kivanc_fibo_0618,
+                    "fibo_0786": self.kivanc_fibo_0786,
+                    "fibo_0886": self.kivanc_fibo_0886,
+                },
             },
             "swing": {
                 "L": self.swing_L,

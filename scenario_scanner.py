@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Tuple
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+import json
+import os
 
 import pandas as pd
 
@@ -14,6 +17,12 @@ except Exception as exc:
     HARMONIC_IMPORT_ERROR = str(exc)
 else:
     HARMONIC_IMPORT_ERROR = ""
+
+
+INTRADAY_HARMONIC_SCAN_ENABLED = os.getenv(
+    "ALPHA_INTRADAY_HARMONIC_SCAN", "false"
+).lower() in {"1", "true", "yes", "on"}
+MARKET_MAP_DIR = os.getenv("ALPHA_MARKET_MAP_DIR", "data/market_maps")
 
 
 class ScenarioScanner:
@@ -146,6 +155,10 @@ class ScenarioScanner:
 
         prz_support_bottom, prz_support_top, prz_current, prz_next = self._prz(df_15m, trend_h4)
 
+        market_map = self._load_market_close_map(symbol)
+        map_lot0 = market_map.get("lot0", {}) if market_map else {}
+        map_kivanc = market_map.get("kivanc", {}) if market_map else {}
+
         htf_support_low, htf_support_high, htf_resistance_low, htf_resistance_high = self._prz_zone(df_1h)
         micro_support_low, micro_support_high, micro_resistance_low, micro_resistance_high = self._prz_zone(df_15m)
 
@@ -153,6 +166,8 @@ class ScenarioScanner:
             df_4h=df_4h,
             df_1h=df_1h,
             current_price=current_price,
+            symbol=symbol,
+            market_map=market_map,
         )
         real_harmonic = bool(selected_harmonic.get("found"))
 
@@ -209,8 +224,6 @@ class ScenarioScanner:
         if vsa_confirmed:
             base_score += 2
         if trend_h4 == trend_h1 and trend_h4 in ("UP", "DOWN"):
-            base_score += 1
-        if real_harmonic:
             base_score += 1
 
         if base_score >= 6:
@@ -304,6 +317,9 @@ class ScenarioScanner:
             f"harmonic_pattern={selected_harmonic.get('pattern', 'NONE')} "
             f"harmonic_tf={selected_harmonic.get('source_tf', 'NONE')} "
             f"harmonic_state={selected_harmonic.get('state', 'NONE')} "
+            f"harmonic_source={selected_harmonic.get('source', 'NONE')} "
+            f"market_map_date={market_map.get('map_date', 'NONE') if market_map else 'NONE'} "
+            f"lot0={map_lot0.get('side', 'NONE')}@{map_lot0.get('price', 0)} "
             f"real_harmonic={real_harmonic}",
             flush=True,
         )
@@ -354,6 +370,17 @@ class ScenarioScanner:
             plan_b_tp1=round(plan_b_tp1, 3),
             plan_b_tp2=round(plan_b_tp2, 3),
             plan_b_sl=round(plan_b_sl, 3),
+            market_map_date=str(market_map.get("map_date", "")) if market_map else "",
+            market_map_source=str(market_map.get("source", "NONE")) if market_map else "NONE",
+            lot0_price=round(float(map_lot0.get("price", 0.0) or 0.0), 3),
+            lot0_side=str(map_lot0.get("side", "NONE")),
+            lot0_source=str(map_lot0.get("source", "NONE")),
+            lot0_timeframe=str(map_lot0.get("timeframe", "NONE")),
+            kivanc_boundary_high=round(float(map_kivanc.get("boundary_high", 0.0) or 0.0), 3),
+            kivanc_boundary_low=round(float(map_kivanc.get("boundary_low", 0.0) or 0.0), 3),
+            kivanc_fibo_0618=round(float(map_kivanc.get("fibo_0618", 0.0) or 0.0), 3),
+            kivanc_fibo_0786=round(float(map_kivanc.get("fibo_0786", 0.0) or 0.0), 3),
+            kivanc_fibo_0886=round(float(map_kivanc.get("fibo_0886", 0.0) or 0.0), 3),
             harmonic_pattern=str(selected_harmonic.get("pattern", "")) if real_harmonic else "",
             harmonic_state=str(selected_harmonic.get("state", "NONE")) if real_harmonic else "NONE",
             harmonic_source_tf=str(selected_harmonic.get("source_tf", "NONE")) if real_harmonic else "NONE",
@@ -406,17 +433,100 @@ class ScenarioScanner:
             validation_errors=errors,
         )
 
+    def _load_market_close_map(self, symbol: str) -> Dict[str, Any]:
+        """Load latest market-close map; never fail the intraday scanner."""
+        clean_symbol = str(symbol or "XAUUSD").replace("/", "")
+        map_dir = Path(MARKET_MAP_DIR)
+        if not map_dir.is_absolute():
+            map_dir = Path.cwd() / map_dir
+
+        try:
+            files = sorted(map_dir.glob(f"{clean_symbol}_*.json"))
+            if not files:
+                return {}
+            with files[-1].open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            data.setdefault("source", "market_close_map")
+            return data
+        except Exception as exc:
+            print(f"AlphaBuffalo market map load failed | symbol={clean_symbol} error={exc}", flush=True)
+            return {}
+
+    def _harmonic_from_market_map(self, market_map: Optional[Dict[str, Any]], current_price: float) -> Dict[str, Any]:
+        if not market_map:
+            return {"found": False}
+
+        harmonic = market_map.get("harmonic_context") or market_map.get("harmonic") or {}
+        if not harmonic or not bool(harmonic.get("found", harmonic.get("completed", False))):
+            return {"found": False}
+
+        prz_low = float(harmonic.get("prz_low", 0.0) or 0.0)
+        prz_high = float(harmonic.get("prz_high", 0.0) or 0.0)
+        d_point = float(harmonic.get("d_point", 0.0) or 0.0)
+        if prz_low <= 0 or prz_high <= 0 or d_point <= 0:
+            return {"found": False}
+
+        in_prz = prz_low <= current_price <= prz_high
+        distance = abs(float(current_price) - d_point)
+        distance_pct = distance / d_point if d_point else 999.0
+        if in_prz:
+            state = "ACTIVE"
+        elif distance_pct <= 0.005:
+            state = "ARMED"
+        else:
+            state = str(harmonic.get("state", "DISCOVERED") or "DISCOVERED")
+
+        return {
+            "found": True,
+            "pattern": str(harmonic.get("pattern", "")),
+            "direction": str(harmonic.get("direction", "NONE")),
+            "priority": int(harmonic.get("priority", 5) or 5),
+            "reliability": str(harmonic.get("reliability", "MARKET_CLOSE")),
+            "prz_low": prz_low,
+            "prz_high": prz_high,
+            "d_point": d_point,
+            "score": 0,
+            "in_prz": in_prz,
+            "distance": distance,
+            "distance_pct": distance_pct,
+            "source_tf": str(harmonic.get("timeframe", "4H")),
+            "source": "market_close_map",
+            "state": state,
+        }
+
     def _select_harmonic_prz(
         self,
         df_4h: pd.DataFrame,
         df_1h: pd.DataFrame,
         current_price: float,
+        symbol: str = "XAUUSD",
+        market_map: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        เลือก harmonic PRZ จริงจาก HTF เท่านั้น
-        4H มีน้ำหนักก่อน 1H
-        M15 ห้ามเป็น harmonic authority
+        Harmonic authority order:
+        1) market-close map (Lot0/Kivanc/Harmonic framework)
+        2) optional legacy intraday scan only when ALPHA_INTRADAY_HARMONIC_SCAN=true
+
+        Harmonic remains WHAT/context only. It must not add score or open trades.
         """
+        mapped = self._harmonic_from_market_map(market_map, current_price)
+        if mapped.get("found"):
+            return mapped
+
+        if not INTRADAY_HARMONIC_SCAN_ENABLED:
+            return {
+                "found": False,
+                "pattern": "",
+                "state": "MARKET_CLOSE_MAP_MISSING",
+                "source_tf": "NONE",
+                "source": "market_close_map",
+                "direction": "NONE",
+                "prz_low": 0.0,
+                "prz_high": 0.0,
+                "d_point": 0.0,
+                "score": 0,
+            }
+
         candidates = []
         candidates.extend(self._scan_harmonic_tf(df_4h, current_price, "4H"))
         candidates.extend(self._scan_harmonic_tf(df_1h, current_price, "1H"))
