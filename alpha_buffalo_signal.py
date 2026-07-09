@@ -4,6 +4,7 @@ import html
 import os
 import time
 import threading
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Tuple
 
 import pandas as pd
@@ -185,6 +186,124 @@ def _clean_text(value, default: str = "-") -> str:
     return html.escape(text, quote=False)
 
 
+def _rr_metrics(direction: str, entry: float, sl: float, tp_final: float) -> Dict:
+    """Return risk/reward/RR and pass/fail state. Pure adapter math; no market decision."""
+    direction = str(direction or "").upper()
+    entry = _safe_float(entry)
+    sl = _safe_float(sl)
+    tp_final = _safe_float(tp_final)
+
+    if direction == "BUY":
+        risk = entry - sl
+        reward = tp_final - entry
+    elif direction == "SELL":
+        risk = sl - entry
+        reward = entry - tp_final
+    else:
+        risk = 0.0
+        reward = 0.0
+
+    rr = reward / risk if risk > 0 else 0.0
+    return {
+        "risk_points": round(risk, 3) if risk > 0 else 0.0,
+        "reward_points": round(reward, 3) if reward > 0 else 0.0,
+        "rr": round(rr, 3) if rr > 0 else 0.0,
+        "rr_ok": bool(risk > 0 and reward > 0 and rr >= TRADE_MIN_RR),
+        "min_rr": TRADE_MIN_RR,
+    }
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value > 0
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "ok", "pass", "passed", "win", "wins"}
+
+
+def _any_truthy(data: Dict, keys: list[str]) -> bool:
+    return any(_truthy(data.get(key)) for key in keys)
+
+
+def _engine_v4_gate_state(signal: Dict, direction: str) -> Dict:
+    """
+    Gate Telegram/EA OPEN using the zone-first engine_v4 setup contract.
+    If no engine_v4 overlay exists, keep gates permissive for non-engine WAIT paths.
+    """
+    engine = signal.get("engine_v4", {}) or {}
+    direction = str(direction or signal.get("decision", {}).get("action", "NONE")).upper()
+
+    if not engine:
+        return {
+            "zone_ok": True,
+            "setup_ok": True,
+            "vsa_gate_ok": True,
+            "setup_state": "NO_ENGINE_V4",
+        }
+
+    if direction == "BUY":
+        zone_ok = _any_truthy(engine, [
+            "PRZ_Support", "Pine_PRZ_Support", "Pine_PRZ_Support_Touch",
+            "In_PRZ_Support", "BB_Lower_Zone", "Near_BB_Lower",
+            "Buy_Killzone_072_088", "V4_Support_Zone",
+        ])
+        pa_ok = _any_truthy(engine, [
+            "HA_Bull", "HA_Bull_Reversal", "HA_Green_1", "HA_Green_2_CF",
+            "Bullish_Pinbar", "pa_bull_confirmed", "PA_Bull_Confirmed",
+        ])
+        vsa_ok = _any_truthy(engine, [
+            "VSA_Buy_Wins", "vsa_buy_wins", "VSA_BUY_WINS",
+            "VSA_Buy_Pressure", "vsa_buy_pressure",
+        ]) and not _any_truthy(engine, ["V4_Block_Buy_At_Upper"])
+        setup_ok = _any_truthy(engine, ["V4_Buy_Setup", "V4_BUY_SETUP", "BUY_SETUP", "cf_confirmed"]) or (zone_ok and pa_ok and vsa_ok)
+        setup_state = "BUY_SETUP" if setup_ok else "BUY_BLOCKED"
+    elif direction == "SELL":
+        zone_ok = _any_truthy(engine, [
+            "PRZ_Resistance", "Pine_PRZ_Resistance", "Pine_PRZ_Resistance_Touch",
+            "In_PRZ_Resistance", "BB_Upper_Zone", "Near_BB_Upper",
+            "V4_Resistance_Zone",
+        ])
+        pa_ok = _any_truthy(engine, [
+            "HA_Bear", "HA_Bear_Reversal", "HA_Red_1", "HA_Red_2_CF",
+            "Bearish_Pinbar", "pa_bear_confirmed", "PA_Bear_Confirmed",
+        ])
+        vsa_ok = _any_truthy(engine, [
+            "VSA_Sell_Wins", "vsa_sell_wins", "VSA_SELL_WINS",
+            "VSA_Sell_Pressure", "vsa_sell_pressure",
+        ]) and not _any_truthy(engine, ["V4_Block_Sell_At_Lower"])
+        setup_ok = _any_truthy(engine, ["V4_Sell_Setup", "V4_SELL_SETUP", "SELL_SETUP"]) or (zone_ok and pa_ok and vsa_ok)
+        setup_state = "SELL_SETUP" if setup_ok else "SELL_BLOCKED"
+    else:
+        zone_ok = setup_ok = vsa_ok = False
+        setup_state = "NO_DIRECTION"
+
+    return {
+        "zone_ok": bool(zone_ok),
+        "setup_ok": bool(setup_ok),
+        "vsa_gate_ok": bool(vsa_ok),
+        "setup_state": setup_state,
+    }
+
+
+def _format_time_pair(value) -> str:
+    raw = str(value or "").strip()
+    dt = None
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            dt = None
+    if dt is None:
+        return raw or "-"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    utc = dt.astimezone(timezone.utc)
+    bkk = utc.astimezone(timezone(timedelta(hours=7)))
+    return f"{utc:%a %d %b %Y | %H:%M UTC} / {bkk:%H:%M BKK}"
+
+
 def _telegram_enabled() -> bool:
     return bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_IDS)
 
@@ -235,36 +354,41 @@ def _format_signal_time(value: str) -> str:
         return str(value or "-")
 
 def format_telegram_signal(payload: Dict) -> str:
-    """Clean V5 Telegram message. Signal spam and low RR are filtered before send."""
+    """Clean V5 Telegram message. No raw debug/reason spam."""
     symbol = payload.get("symbol", SYMBOL_DEFAULT.replace("/", ""))
     signal = payload.get("signal", {}) or {}
     ea = payload.get("ea", {}) or {}
 
     direction = str(ea.get("direction", "NONE")).upper()
-    side_mark = "🟢 Δ+" if direction == "BUY" else "🔴 Δ-" if direction == "SELL" else "⚪ Δ"
-    entry_mode = ea.get("entry_mode") or signal.get("entry_mode") or "V12_DECISION"
+    side_icon = "🟢 Δ+" if direction == "BUY" else "🔴 Δ-" if direction == "SELL" else "⚪ Δ"
+    entry_mode = ea.get("entry_mode") or signal.get("entry_mode") or "V4_SESSION"
+    entry = _safe_float(ea.get("entry"))
+    sl = _safe_float(ea.get("sl"))
+    tp = _safe_float(ea.get("tp_final"))
+    rr = _safe_float(ea.get("rr"))
+    risk = _safe_float(ea.get("risk_points"))
+    reward = _safe_float(ea.get("reward_points"))
+
     quality_score = int(ea.get("v5_quality_score", 0) or 0)
     quality_grade = ea.get("v5_quality_grade") or "UNKNOWN"
-    quality_basis = ea.get("v5_basis") or "UNKNOWN"
-    rr = _safe_float(ea.get("rr"), 0.0)
-    risk = _safe_float(ea.get("risk_points"), 0.0)
-    reward = _safe_float(ea.get("reward_points"), 0.0)
+    quality_basis = ea.get("v5_basis") or signal.get("v5_basis") or "UNKNOWN"
+    session = ea.get("session") or "-"
     timestamp = signal.get("timestamp") or ea.get("signal_id") or ""
 
     return "\n".join([
-        f"{side_mark} <b>ALPHA BUFFALO V5</b>",
+        f"{side_icon} <b>ALPHA BUFFALO V5</b>",
         "━━━━━━━━━━━━━━━━━━━━━",
-        f"📌 Asset    : {_clean_text(symbol)}",
+        f"📌 Asset    : <b>{_clean_text(symbol)}</b>",
         f"📊 Side     : {_clean_text(direction)}",
         f"📊 Type     : {_clean_text(entry_mode)}",
         f"🎯 Score    : {_safe_float(ea.get('score')):.1f}",
-        f"🎯 Entry    : ~{_fmt_price(ea.get('entry'))}",
-        f"🛡️ SL       : {_fmt_price(ea.get('sl'))}",
-        f"🎯 TP       : {_fmt_price(ea.get('tp_final'))}",
+        f"🎯 Entry    : ~{entry:,.2f}",
+        f"🛡️ SL       : {sl:,.2f}",
+        f"🎯 TP       : {tp:,.2f}",
         f"⚖️ RR       : {rr:.2f}R | Risk {risk:.2f} | Reward {reward:.2f}",
-        f"🕐 Session  : {_clean_text(ea.get('session'))}",
+        f"🕐 Session  : {_clean_text(session)}",
         f"🧠 Quality  : {quality_score} / {_clean_text(quality_grade)} / {_clean_text(quality_basis)}",
-        f"⏰ Time     : {_clean_text(_format_signal_time(timestamp))}",
+        f"⏰ Time     : {_clean_text(_format_time_pair(timestamp))}",
         "━━━━━━━━━━━━━━━━━━━━━",
         "✅ EA Executing",
         "⚠️ Not financial advice. Trade at your own risk.",
@@ -298,12 +422,32 @@ def send_telegram_message(text: str) -> bool:
 
 
 def maybe_broadcast_signal(payload: Dict) -> None:
-    """Send only actionable OPEN by default; WAIT can be enabled with TELEGRAM_NOTIFY_WAIT=true."""
+    """Broadcast only Clean V5 OPEN signals that passed RR/levels/setup/VSA gates."""
     global LAST_TELEGRAM_SIGNAL_KEY
 
     ea = payload.get("ea", {}) or {}
+    signal = payload.get("signal", {}) or {}
     action = str(ea.get("action", "WAIT")).upper()
-    if action != "OPEN" and not TELEGRAM_NOTIFY_WAIT:
+
+    # No Telegram for WAIT by default. Even if TELEGRAM_NOTIFY_WAIT=true, never send invalid low-quality trade alerts.
+    if action != "OPEN":
+        return
+
+    rr = _safe_float(ea.get("rr"))
+    if rr < TELEGRAM_MIN_RR:
+        return
+
+    if not bool(ea.get("directional_levels_ok")):
+        return
+    if not bool(ea.get("levels_ready")):
+        return
+    if not bool(ea.get("rr_ok")):
+        return
+    if not bool(ea.get("setup_ok", True)):
+        return
+    if not bool(ea.get("zone_ok", True)):
+        return
+    if not bool(ea.get("vsa_gate_ok", True)):
         return
 
     signal_key = _telegram_signal_key(payload)
@@ -313,7 +457,6 @@ def maybe_broadcast_signal(payload: Dict) -> None:
         LAST_TELEGRAM_SIGNAL_KEY = signal_key
 
     send_telegram_message(format_telegram_signal(payload))
-
 
 def _df_with_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize TwelveData dataframe for engine_v4 without changing fetch contract."""
@@ -466,6 +609,7 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
     """
     EA execution payload.
     Adapter-only: ไม่ตัดสินใจตลาดใหม่ ไม่คำนวณ PRZ/BOS/TP/SL เอง
+    RR/setup/VSA gates only convert low-quality candidates to WAIT before EA/Telegram.
     """
     decision = signal.get("decision", {}) or {}
     gates = signal.get("gates", {}) or {}
@@ -479,7 +623,6 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
 
     current_price = _safe_float(blueprint.get("current_price"))
 
-    # อ่านทั้ง v12 nested plan และ legacy flat fields
     entry = _first_float(
         signal.get("entry"),
         blueprint.get("entry"),
@@ -523,13 +666,41 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
     else:
         directional_levels_ok = False
 
+    rr_info = _rr_metrics(direction, entry, sl, tp_final)
+    setup_info = _engine_v4_gate_state(signal, direction)
+
+    rr_ok = bool(rr_info["rr_ok"])
+    setup_ok = bool(setup_info["setup_ok"])
+    zone_ok = bool(setup_info["zone_ok"])
+    vsa_gate_ok = bool(setup_info["vsa_gate_ok"])
+
     execution_state = (
         "READY"
-        if blueprint_valid and trade_direction_ok and levels_ready and directional_levels_ok
+        if blueprint_valid
+        and trade_direction_ok
+        and levels_ready
+        and directional_levels_ok
+        and rr_ok
+        and setup_ok
+        and zone_ok
+        and vsa_gate_ok
         else "WATCH"
     )
 
     action = "OPEN" if execution_state == "READY" else "WAIT"
+
+    reason = str(decision.get("reason", "") or "")
+    blocked_reasons = []
+    if not rr_ok and trade_direction_ok and levels_ready and directional_levels_ok:
+        blocked_reasons.append(f"rr={rr_info['rr']:.2f}<min_rr={TRADE_MIN_RR:.2f}")
+    if not setup_ok:
+        blocked_reasons.append(f"setup={setup_info['setup_state']}")
+    if not zone_ok:
+        blocked_reasons.append("zone_not_confirmed")
+    if not vsa_gate_ok:
+        blocked_reasons.append("vsa_gate_not_confirmed")
+    if blocked_reasons:
+        reason = "|".join([part for part in [reason, *blocked_reasons] if part])
 
     signal_id = f"{symbol}-{timestamp}-{direction}".replace(":", "").replace("/", "")
 
@@ -548,6 +719,17 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
         "directional_levels_ok": directional_levels_ok,
         "max_bars": int(signal.get("max_bars", 40)),
 
+        "rr": rr_info["rr"],
+        "rr_ok": rr_ok,
+        "risk_points": rr_info["risk_points"],
+        "reward_points": rr_info["reward_points"],
+        "min_rr": rr_info["min_rr"],
+
+        "zone_ok": zone_ok,
+        "setup_ok": setup_ok,
+        "vsa_gate_ok": vsa_gate_ok,
+        "setup_state": setup_info["setup_state"],
+
         "session": gates.get("session", ""),
         "entry_mode": signal.get("entry_mode", "V12_DECISION"),
         "exit_mode": signal.get("exit_mode", "NONE"),
@@ -564,9 +746,8 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
         "confidence": _safe_float(decision.get("confidence")),
         "score": _safe_float(decision.get("score")),
         "grade": decision.get("grade", ""),
-        "reason": decision.get("reason", ""),
+        "reason": reason,
     }
-
 
 def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBOL_DEFAULT) -> Dict:
     df_4h, df_1h, df_15m = fetch_multi_tf(symbol)
