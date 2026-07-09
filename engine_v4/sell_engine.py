@@ -62,8 +62,16 @@ class SellSignalEngine(BaseEngine):
 
         micro_high = float(row.get("Micro_Lot0_High", row.get("high", entry)) or row.get("high", entry))
         prz_high = float(row.get("Pine_PRZ_Resistance_High", micro_high) or micro_high)
-        sl_anchor = max(float(row["high"]), micro_high, prz_high if upper_setup or pine_valid else float(row["high"]))
-        sl = sl_anchor + atr * 0.25
+        bb_prz_confluence = bool(row.get("BB_PRZ_Resistance_Confluence", False))
+
+        # V4 BB+PRZ confluence uses local sweep/reaction high for SL.
+        # Do not use the far side of the whole PRZ for scalp SL; it destroys RR.
+        if bb_prz_confluence or bool(row.get("V4_Sell_Entry_Zone", False)):
+            sl_anchor = max(float(row["high"]), micro_high)
+            sl = sl_anchor + max(atr * 0.12, entry * 0.00015)
+        else:
+            sl_anchor = max(float(row["high"]), micro_high, prz_high if upper_setup or pine_valid else float(row["high"]))
+            sl = sl_anchor + atr * 0.25
 
         signal_tp = float(row.get("Fib_072", 0.0) or 0.0)
         bb_lower_tp = float(row.get("BB_Lower", 0.0) or 0.0)
@@ -131,13 +139,16 @@ class SellSignalEngine(BaseEngine):
 
         return {
             "direction": "SELL",
+            "zone_confluence": bb_prz_confluence,
+            "bb_prz_confluence": bb_prz_confluence,
+            "v4_entry_zone": bool(row.get("V4_Sell_Entry_Zone", False)),
             "entry": entry,
             "sl": sl,
             "tp": tp,
             "session": session_state.session,
             "timestamp": row.name,
             "visual_sl_mid": row["BB_Mid"],
-            "entry_mode": "V4_SELL_PINE_PRZ_VSA" if upper_setup or pine_valid else "V5_SELL_CONTINUATION",
+            "entry_mode": "V4_SELL_BB_PRZ_CONFLUENCE" if bb_prz_confluence else "V4_SELL_PINE_PRZ_VSA" if upper_setup or pine_valid else "V5_SELL_CONTINUATION",
             "exit_mode": exit_mode,
             "setup_state": "SELL_SETUP" if not recent_micro_bos_down else "SELL_CF_READY",
             "signal_tp": signal_tp,

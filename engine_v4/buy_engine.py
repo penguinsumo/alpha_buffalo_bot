@@ -47,8 +47,16 @@ class BuySignalEngine(BaseEngine):
 
         micro_low = float(row.get("Micro_Lot0_Low", row.get("low", entry)) or row.get("low", entry))
         prz_low = float(row.get("Pine_PRZ_Support_Low", micro_low) or micro_low)
-        sl_anchor = min(float(row["low"]), micro_low, prz_low)
-        sl = sl_anchor - atr * 0.25
+        bb_prz_confluence = bool(row.get("BB_PRZ_Support_Confluence", False))
+
+        # V4 BB+PRZ confluence uses local sweep/reaction low for SL.
+        # Do not use the far side of the whole PRZ for scalp SL; it destroys RR.
+        if bb_prz_confluence or bool(row.get("V4_Buy_Entry_Zone", False)):
+            sl_anchor = min(float(row["low"]), micro_low)
+            sl = sl_anchor - max(atr * 0.12, entry * 0.00015)
+        else:
+            sl_anchor = min(float(row["low"]), micro_low, prz_low)
+            sl = sl_anchor - atr * 0.25
 
         # V4 cashflow path: lower → mid → upper. EA gets final TP.
         tp1 = float(row.get("BB_Mid", 0.0) or 0.0)
@@ -101,13 +109,16 @@ class BuySignalEngine(BaseEngine):
 
         return {
             "direction": "BUY",
+            "zone_confluence": bb_prz_confluence,
+            "bb_prz_confluence": bb_prz_confluence,
+            "v4_entry_zone": bool(row.get("V4_Buy_Entry_Zone", False)),
             "entry": entry,
             "sl": sl,
             "tp": tp,
             "tp1": tp1,
             "session": session_state.session,
             "timestamp": row.name,
-            "entry_mode": "V4_BUY_PINE_PRZ_VSA",
+            "entry_mode": "V4_BUY_BB_PRZ_CONFLUENCE" if bb_prz_confluence else "V4_BUY_PINE_PRZ_VSA",
             "exit_mode": "V4_BB_UPPER",
             "setup_state": "BUY_SETUP" if not choch else "BUY_CF_READY",
             "be_trigger": tp1 if tp1 > entry else entry * 1.0015,

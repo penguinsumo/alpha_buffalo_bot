@@ -215,15 +215,23 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["Micro_Lot0_Low"] = df["low"].where(lower_zone_touch).rolling(12, min_periods=1).min().ffill()
     df["Micro_Lot0_High"] = df["high"].where(upper_zone_touch).rolling(12, min_periods=1).max().ffill()
 
-    df["V4_Buy_Setup"] = lower_zone_touch & df["Pine_PA_Bull_Confirmed"] & df["VSA_Buy_Wins"]
-    df["V4_Sell_Setup"] = upper_zone_touch & df["Pine_PA_Bear_Confirmed"] & df["VSA_Sell_Wins"]
+    # BB edge + Pine PRZ overlap is the strongest V4 entry location.
+    # This is a SETUP zone, not a BOS condition.
+    df["BB_PRZ_Support_Confluence"] = df["Near_BB_Lower"] & df["In_Pine_PRZ_Support"]
+    df["BB_PRZ_Resistance_Confluence"] = df["Near_BB_Upper"] & df["In_Pine_PRZ_Resistance"]
+
+    df["V4_Buy_Entry_Zone"] = lower_zone_touch | df["BB_PRZ_Support_Confluence"]
+    df["V4_Sell_Entry_Zone"] = upper_zone_touch | df["BB_PRZ_Resistance_Confluence"]
+
+    df["V4_Buy_Setup"] = df["V4_Buy_Entry_Zone"] & df["Pine_PA_Bull_Confirmed"] & df["VSA_Buy_Wins"]
+    df["V4_Sell_Setup"] = df["V4_Sell_Entry_Zone"] & df["Pine_PA_Bear_Confirmed"] & df["VSA_Sell_Wins"]
 
     # Pine valid signal equivalents. These promote quality, not direct HTF trend.
     df["Pine_Valid_Buy"] = df["In_Pine_PRZ_Support"] & df["Pine_PA_Bull_Confirmed"] & df["VSA_Buy_Wins"] & (df["CHoCH_Bull"] | df["Bull_OB"] | df["HA_Green_2_CF"])
     df["Pine_Valid_Sell"] = df["In_Pine_PRZ_Resistance"] & df["Pine_PA_Bear_Confirmed"] & df["VSA_Sell_Wins"] & (df["CHoCH_Bear"] | df["Bear_OB"] | df["HA_Red_2_CF"])
 
-    df["V4_Block_Sell_At_Lower"] = df["V4_Buy_Setup"] | (lower_zone_touch & df["Pine_PA_Bull_Confirmed"] & df["VSA_Buy_Wins"])
-    df["V4_Block_Buy_At_Upper"] = df["V4_Sell_Setup"] | (upper_zone_touch & df["Pine_PA_Bear_Confirmed"] & df["VSA_Sell_Wins"])
+    df["V4_Block_Sell_At_Lower"] = df["V4_Buy_Setup"] | (df.get("V4_Buy_Entry_Zone", lower_zone_touch) & df["Pine_PA_Bull_Confirmed"] & df["VSA_Buy_Wins"])
+    df["V4_Block_Buy_At_Upper"] = df["V4_Sell_Setup"] | (df.get("V4_Sell_Entry_Zone", upper_zone_touch) & df["Pine_PA_Bear_Confirmed"] & df["VSA_Sell_Wins"])
 
     # Legacy micro structure fields retained for SELL evidence compatibility.
     df["Micro_Swing_H"] = df["high"].rolling(5, min_periods=5).max().shift(1)
