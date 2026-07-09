@@ -652,6 +652,44 @@ def _log_engine_v4_debug(message: str) -> None:
     except Exception:
         pass
 
+
+
+def _ensure_engine_v4_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Return OHLC dataframe with DatetimeIndex for engine_v4/session logic."""
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+
+    if isinstance(out.index, pd.DatetimeIndex):
+        out = out.sort_index()
+        return out
+
+    dt_series = None
+    for col in ("datetime", "timestamp", "time", "date", "date_time"):
+        if col in out.columns:
+            dt_series = pd.to_datetime(out[col], errors="coerce", utc=True)
+            break
+
+    if dt_series is None:
+        parsed_index = pd.to_datetime(out.index, errors="coerce", utc=True)
+        if not pd.isna(parsed_index).all():
+            dt_series = parsed_index
+
+    if dt_series is None or pd.isna(dt_series).all():
+        # Last-resort runtime fallback: preserve row order and let engine_v4 run.
+        # Real TwelveData payloads should normally have datetime/timestamp columns.
+        dt_series = pd.date_range(
+            end=pd.Timestamp.now(tz="UTC").floor("15min"),
+            periods=len(out),
+            freq="15min",
+        )
+
+    out.index = pd.DatetimeIndex(dt_series)
+    out = out[~out.index.isna()].sort_index()
+    out.index.name = "datetime"
+    return out
+
 def _run_engine_v4_baseline(df_15m: pd.DataFrame) -> Dict | None:
 
     if add_indicators is None or SignalRouter is None or FinalGate is None or BuySignalEngine is None or SellSignalEngine is None:
@@ -676,7 +714,8 @@ def _run_engine_v4_baseline(df_15m: pd.DataFrame) -> Dict | None:
             _log_engine_v4_debug("none reason=EMPTY_DF")
             return None
 
-        df = add_indicators(df_15m.copy())
+        df = _ensure_engine_v4_datetime_index(df_15m)
+        df = add_indicators(df)
         session_state = SessionGate().evaluate(df)
         signal = SignalRouter(
             buy_engine=BuySignalEngine(),
