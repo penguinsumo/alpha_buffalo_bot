@@ -628,50 +628,76 @@ def _iso_timestamp(value) -> str:
         return ""
 
 
-def _run_engine_v4_baseline(df_15m: pd.DataFrame) -> Dict | None:
-    """
-    Restore proven BUY/SELL baseline from sell-micro-v4-2.
 
-    Root lifecycle preserved:
-    - Harmonic/PRZ remains context, not score/bucket here.
-    - This engine only produces V4/V5 trading baseline signal when confirmed.
-    - EA payload mapping remains adapter-only in build_ea_payload().
-    """
+def _log_engine_v4_debug(message: str) -> None:
+    """Best-effort runtime trace for engine_v4 selection. Never blocks trading loop."""
     try:
-        from engine_v4.indicators import add_indicators
-        from engine_v4.router import SignalRouter
-        from engine_v4.final_gate import FinalGate
-        from engine_v4.buy_engine import BuySignalEngine
-        from engine_v4.sell_engine import SellSignalEngine
+        print(f"AlphaBuffalo engine_v4 | {message}", flush=True)
+    except Exception:
+        pass
 
-        df = _df_with_datetime_index(df_15m)
-        df = add_indicators(df).dropna()
-
-        if len(df) < 60:
+def _run_engine_v4_baseline(df_15m: pd.DataFrame) -> Dict | None:
+    """Run engine_v4 and log why it did/did not produce a V4 entry."""
+    ENGINE_V4_TRACE_FIELDS = [
+        "close", "BB_Lower", "BB_Upper", "Near_BB_Lower", "Near_BB_Upper",
+        "In_Pine_PRZ_Support", "In_Pine_PRZ_Resistance",
+        "BB_PRZ_Support_Confluence", "BB_PRZ_Resistance_Confluence",
+        "Pine_PA_Bull_Confirmed", "Pine_PA_Bear_Confirmed",
+        "VSA_Buy_Pressure", "VSA_Sell_Pressure", "VSA_Buy_Wins", "VSA_Sell_Wins",
+        "V4_Buy_Entry_Zone", "V4_Sell_Entry_Zone", "V4_Buy_Setup", "V4_Sell_Setup",
+        "V4_Block_Sell_At_Lower", "V4_Block_Buy_At_Upper", "CHoCH_Bull", "CHoCH_Bear",
+    ]
+    try:
+        if df_15m is None or getattr(df_15m, "empty", True):
+            _log_engine_v4_debug("none reason=EMPTY_DF")
             return None
 
-        clock = SessionClock()
-        router = SignalRouter(
-            clock=clock,
-            gate=FinalGate(clock),
+        df = add_indicators(df_15m.copy())
+        session_state = SessionGate().evaluate(df)
+        signal = SignalRouter(
             buy_engine=BuySignalEngine(),
             sell_engine=SellSignalEngine(),
-        )
-        signals = router.process(df)
-        if not signals:
-            return None
+            final_gate=FinalGate(),
+        ).route(df, session_state)
 
-        def rank(sig: Dict) -> tuple:
-            pine_valid = 1 if sig.get("pine_valid") else 0
-            setup_ready = 1 if str(sig.get("setup_state", "")).endswith("CF_READY") else 0
-            quality = int(sig.get("v5_quality_score", 0) or 0)
-            rr = _safe_float(sig.get("entry_rr"), 0.0)
-            return (pine_valid, setup_ready, quality, rr)
+        tail = df.tail(int(os.getenv("ENGINE_V4_LOOKBACK_BARS", "6")))
+        last = tail.iloc[-1]
+        flags = {}
+        for field in ENGINE_V4_TRACE_FIELDS:
+            if field in last:
+                value = last.get(field)
+                try:
+                    if hasattr(value, "item"):
+                        value = value.item()
+                except Exception:
+                    pass
+                flags[field] = value
 
-        return max(signals, key=rank)
+        counts = {}
+        for field in [
+            "BB_PRZ_Support_Confluence", "BB_PRZ_Resistance_Confluence",
+            "V4_Buy_Entry_Zone", "V4_Sell_Entry_Zone", "V4_Buy_Setup", "V4_Sell_Setup",
+            "Pine_PA_Bull_Confirmed", "Pine_PA_Bear_Confirmed", "VSA_Buy_Wins", "VSA_Sell_Wins",
+        ]:
+            if field in tail:
+                try:
+                    counts[field] = int(tail[field].fillna(False).astype(bool).sum())
+                except Exception:
+                    counts[field] = "ERR"
 
+        if signal:
+            _log_engine_v4_debug(
+                "selected "
+                f"direction={signal.get('direction')} entry_mode={signal.get('entry_mode')} "
+                f"setup={signal.get('setup_state')} journey={signal.get('journey_state')} "
+                f"age={signal.get('selected_age_bars')} bb_prz={signal.get('bb_prz_confluence')} "
+                f"counts={counts} last={flags}"
+            )
+        else:
+            _log_engine_v4_debug(f"none reason=NO_RECENT_V4_SETUP counts={counts} last={flags}")
+        return signal
     except Exception as exc:
-        print(f"AlphaBuffalo engine_v4 baseline error | {type(exc).__name__}: {exc}", flush=True)
+        _log_engine_v4_debug(f"none reason=EXCEPTION type={type(exc).__name__} error={exc}")
         return None
 
 
