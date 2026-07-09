@@ -59,6 +59,7 @@ TRADE_MIN_RR = float(os.getenv("TRADE_MIN_RR", "1.5"))
 TELEGRAM_MIN_RR = float(os.getenv("TELEGRAM_MIN_RR", str(TRADE_MIN_RR)))
 TELEGRAM_NOTIFY_TREND_UPDATE = os.getenv("TELEGRAM_NOTIFY_TREND_UPDATE", "true").lower() in {"1", "true", "yes", "on"}
 LAST_TELEGRAM_SIGNAL_KEY = ""
+LAST_TELEGRAM_H1_UPDATE_KEY = ""
 LAST_TELEGRAM_LOCK = threading.Lock()
 
 
@@ -421,6 +422,144 @@ def send_telegram_message(text: str) -> bool:
     return ok
 
 
+
+def _deep_get(data: Dict, path: list[str], default=None):
+    cur = data
+    for key in path:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(key)
+    return default if cur in (None, "") else cur
+
+
+def _h1_update_key(payload: Dict) -> str:
+    signal = payload.get("signal", {}) or {}
+    raw = str(signal.get("timestamp") or payload.get("generated_at") or "")
+    dt = None
+    try:
+        if raw:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        dt = None
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    h1 = dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    symbol = payload.get("symbol", SYMBOL_DEFAULT.replace("/", ""))
+    return f"{symbol}-{h1.isoformat()}"
+
+
+def _trend_zone_label(signal: Dict, ea: Dict) -> str:
+    engine = signal.get("engine_v4", {}) or {}
+    blueprint = signal.get("blueprint", {}) or {}
+    reason = str(ea.get("reason") or "")
+
+    if _truthy(engine.get("In_Pine_PRZ_Support")) or _truthy(engine.get("V4_Buy_Setup")) or _truthy(engine.get("V4_Block_Sell_At_Lower")):
+        return "PRZ Support / BB Lower"
+    if _truthy(engine.get("In_Pine_PRZ_Resistance")) or _truthy(engine.get("V4_Sell_Setup")) or _truthy(engine.get("V4_Block_Buy_At_Upper")):
+        return "PRZ Resistance / BB Upper"
+
+    prz_state = _deep_get(blueprint, ["prz_layers", "state"], "") or blueprint.get("prz_state") or ""
+    if str(prz_state).upper() == "ACTIVE" or "prz=ACTIVE" in reason:
+        return "PRZ Active"
+    if str(prz_state):
+        return str(prz_state)
+    return "No Man's Land"
+
+
+def _trend_setup_label(signal: Dict, ea: Dict) -> str:
+    engine = signal.get("engine_v4", {}) or {}
+    setup = ea.get("scenario_state") or ea.get("setup_state") or signal.get("scenario_state") or signal.get("setup_state")
+    if setup:
+        return str(setup)
+    if _truthy(engine.get("V4_Buy_Setup")):
+        return "BUY_SETUP"
+    if _truthy(engine.get("V4_Sell_Setup")):
+        return "SELL_SETUP"
+    watch_bias = _deep_get(signal, ["blueprint", "watch_bias"], "") or _deep_get(signal, ["blueprint", "prz_layers", "routing"], "")
+    return str(watch_bias or "WAIT")
+
+
+def _trend_vsa_label(signal: Dict, ea: Dict) -> str:
+    engine = signal.get("engine_v4", {}) or {}
+    if _truthy(engine.get("VSA_Buy_Wins")):
+        return "BUY > SELL"
+    if _truthy(engine.get("VSA_Sell_Wins")):
+        return "SELL > BUY"
+    gate = ea.get("vsa_gate") or ("PASS" if ea.get("vsa_gate_ok") else "WAIT")
+    return str(gate)
+
+
+def _trend_line(signal: Dict, key: str, fallback: str = "-") -> str:
+    blueprint = signal.get("blueprint", {}) or {}
+    price_action = blueprint.get("price_action", {}) or {}
+    value = price_action.get(key) or blueprint.get(key) or fallback
+    return str(value).replace("_", " ")
+
+
+def format_telegram_trend_update(payload: Dict) -> str:
+    signal = payload.get("signal", {}) or {}
+    ea = payload.get("ea", {}) or {}
+    symbol = payload.get("symbol", SYMBOL_DEFAULT.replace("/", ""))
+    blueprint = signal.get("blueprint", {}) or {}
+
+    price = _safe_float(
+        blueprint.get("current_price")
+        or _deep_get(blueprint, ["price_action", "current_price"])
+        or ea.get("entry")
+    )
+    session = ea.get("session") or _deep_get(signal, ["gates", "session"], "-")
+    zone = _trend_zone_label(signal, ea)
+    setup = _trend_setup_label(signal, ea)
+    vsa = _trend_vsa_label(signal, ea)
+    bos = ea.get("break_prediction") or ea.get("journey_state") or ("CONFIRMED" if ea.get("bos_confirmed") else "Waiting")
+
+    watch = "Wait"
+    if str(setup).upper().startswith("BUY") or "SUPPORT" in zone.upper():
+        watch = "Δ+ BUY if CF/BOS confirms"
+    elif str(setup).upper().startswith("SELL") or "RESISTANCE" in zone.upper():
+        watch = "Δ- SELL if CF/BOS confirms"
+
+    timestamp = signal.get("timestamp") or payload.get("generated_at") or ""
+
+    return "\n".join([
+        "📊 <b>XAUUSD TREND UPDATE</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"🕐 Session : {_clean_text(session)}",
+        f"💰 Price   : {price:,.2f}",
+        "",
+        f"🧭 Zone    : {_clean_text(zone)}",
+        f"⚡ Setup   : {_clean_text(setup)}",
+        f"🧠 VSA     : {_clean_text(vsa)}",
+        f"🚦 BOS     : {_clean_text(bos)}",
+        "",
+        f"➡️ M15     : {_clean_text(_trend_line(signal, 'm15_phase', 'Reaction/Watch'))}",
+        f"📈 H1      : {_clean_text(_trend_line(signal, 'h1_phase', blueprint.get('trend_h1', '-')))}",
+        f"📉 H4      : {_clean_text(_trend_line(signal, 'h4_phase', blueprint.get('trend_h4', '-')))}",
+        "",
+        f"👀 Watch   : {_clean_text(watch)}",
+        f"⏰ Time    : {_clean_text(_format_time_pair(timestamp))}",
+        "━━━━━━━━━━━━━━━━━━━━━",
+    ])
+
+
+def maybe_broadcast_trend_update(payload: Dict) -> None:
+    """Send one compact market-state update per H1 hour. Never opens or bypasses trade gates."""
+    global LAST_TELEGRAM_H1_UPDATE_KEY
+    if not TELEGRAM_NOTIFY_TREND_UPDATE:
+        return
+    if not _telegram_enabled():
+        return
+
+    key = _h1_update_key(payload)
+    with LAST_TELEGRAM_LOCK:
+        if key == LAST_TELEGRAM_H1_UPDATE_KEY:
+            return
+        LAST_TELEGRAM_H1_UPDATE_KEY = key
+
+    send_telegram_message(format_telegram_trend_update(payload))
+
 def maybe_broadcast_signal(payload: Dict) -> None:
     """Broadcast only Clean V5 OPEN signals that passed RR/levels/setup/VSA gates."""
     global LAST_TELEGRAM_SIGNAL_KEY
@@ -597,6 +736,14 @@ def _apply_engine_v4_signal(signal: Dict, engine_signal: Dict | None) -> Dict:
     signal["v5_basis"] = engine_signal.get("v5_basis", "BASE")
     signal["session_quality_gate"] = engine_signal.get("session_quality_gate", "BUY_TIMING_GATE" if direction == "BUY" else "UNKNOWN")
     signal["sell_dot_reason"] = engine_signal.get("sell_dot_reason", "UNKNOWN")
+
+    for _key in (
+        "scenario_state", "journey_state", "trade_management", "break_prediction",
+        "bos_confirmed", "vsa_gate", "vsa_pressure_delta", "checkpoint_price",
+        "approach_break_zone", "setup_state",
+    ):
+        if engine_signal.get(_key) is not None:
+            signal[_key] = engine_signal.get(_key)
     signal["engine_v4"] = {
         key: _safe_float(value) if isinstance(value, float) else value
         for key, value in engine_signal.items()
@@ -729,6 +876,13 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
         "setup_ok": setup_ok,
         "vsa_gate_ok": vsa_gate_ok,
         "setup_state": setup_info["setup_state"],
+        "scenario_state": signal.get("scenario_state") or (signal.get("engine_v4", {}) or {}).get("scenario_state"),
+        "journey_state": signal.get("journey_state") or (signal.get("engine_v4", {}) or {}).get("journey_state"),
+        "trade_management": signal.get("trade_management") or (signal.get("engine_v4", {}) or {}).get("trade_management"),
+        "break_prediction": signal.get("break_prediction") or (signal.get("engine_v4", {}) or {}).get("break_prediction"),
+        "bos_confirmed": bool(signal.get("bos_confirmed") or (signal.get("engine_v4", {}) or {}).get("bos_confirmed")),
+        "vsa_gate": signal.get("vsa_gate") or (signal.get("engine_v4", {}) or {}).get("vsa_gate"),
+        "checkpoint_price": _safe_float(signal.get("checkpoint_price") or (signal.get("engine_v4", {}) or {}).get("checkpoint_price")),
 
         "session": gates.get("session", ""),
         "entry_mode": signal.get("entry_mode", "V12_DECISION"),
@@ -801,6 +955,7 @@ def _cloud_signal_loop() -> None:
             payload = run_pipeline()
             _set_latest_signal(payload)
             maybe_broadcast_signal(payload)
+            maybe_broadcast_trend_update(payload)
             decision = payload.get("signal", {}).get("decision", {})
             ea = payload.get("ea", {})
             print(
