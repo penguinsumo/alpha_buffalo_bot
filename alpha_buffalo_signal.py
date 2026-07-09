@@ -717,7 +717,7 @@ def _run_engine_v4_baseline(df_15m: pd.DataFrame) -> Dict | None:
 
         df = _ensure_engine_v4_datetime_index(df_15m)
         df = add_indicators(df)
-        session_state = SessionGate().evaluate(df)
+        session_state = SessionGate(SessionClock()).evaluate(df)
         signal = SignalRouter(
             buy_engine=BuySignalEngine(),
             sell_engine=SellSignalEngine(),
