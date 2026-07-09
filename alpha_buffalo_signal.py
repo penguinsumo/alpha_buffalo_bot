@@ -15,6 +15,7 @@ from decision_engine import DecisionEngine
 from scenario_scanner import ScenarioScanner
 from signal_composer import SignalComposer
 from session_clock import SessionClock
+from engine_v4.session_gate import SessionGate
 
 # Engine V4 baseline imports. Keep these globals available for _run_engine_v4_baseline().
 ENGINE_V4_IMPORT_ERROR = None
