@@ -16,6 +16,22 @@ from scenario_scanner import ScenarioScanner
 from signal_composer import SignalComposer
 from session_clock import SessionClock
 
+# Engine V4 baseline imports. Keep these globals available for _run_engine_v4_baseline().
+ENGINE_V4_IMPORT_ERROR = None
+try:
+    from engine_v4.indicators import add_indicators
+    from engine_v4.router import SignalRouter
+    from engine_v4.final_gate import FinalGate
+    from engine_v4.buy_engine import BuySignalEngine
+    from engine_v4.sell_engine import SellSignalEngine
+except Exception as exc:  # pragma: no cover - runtime diagnostic path
+    ENGINE_V4_IMPORT_ERROR = exc
+    add_indicators = None
+    SignalRouter = None
+    FinalGate = None
+    BuySignalEngine = None
+    SellSignalEngine = None
+
 
 app = FastAPI(title="Alpha Buffalo v12 API Adapter", version="12.0.0")
 
@@ -637,6 +653,14 @@ def _log_engine_v4_debug(message: str) -> None:
         pass
 
 def _run_engine_v4_baseline(df_15m: pd.DataFrame) -> Dict | None:
+
+    if add_indicators is None or SignalRouter is None or FinalGate is None or BuySignalEngine is None or SellSignalEngine is None:
+        print(
+            "AlphaBuffalo engine_v4 | none reason=IMPORT_ERROR "
+            f"type={type(ENGINE_V4_IMPORT_ERROR).__name__ if ENGINE_V4_IMPORT_ERROR else 'Unknown'} "
+            f"error={ENGINE_V4_IMPORT_ERROR}"
+        )
+        return None
     """Run engine_v4 and log why it did/did not produce a V4 entry."""
     ENGINE_V4_TRACE_FIELDS = [
         "close", "BB_Lower", "BB_Upper", "Near_BB_Lower", "Near_BB_Upper",
