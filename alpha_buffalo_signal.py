@@ -54,6 +54,9 @@ TELEGRAM_CHAT_IDS = [
 ]
 TELEGRAM_NOTIFY_WAIT = os.getenv("TELEGRAM_NOTIFY_WAIT", "false").lower() in {"1", "true", "yes", "on"}
 TELEGRAM_TIMEOUT_SECONDS = float(os.getenv("TELEGRAM_TIMEOUT_SECONDS", "5"))
+TRADE_MIN_RR = float(os.getenv("TRADE_MIN_RR", "1.5"))
+TELEGRAM_MIN_RR = float(os.getenv("TELEGRAM_MIN_RR", str(TRADE_MIN_RR)))
+TELEGRAM_NOTIFY_TREND_UPDATE = os.getenv("TELEGRAM_NOTIFY_TREND_UPDATE", "true").lower() in {"1", "true", "yes", "on"}
 LAST_TELEGRAM_SIGNAL_KEY = ""
 LAST_TELEGRAM_LOCK = threading.Lock()
 
@@ -201,41 +204,71 @@ def _telegram_signal_key(payload: Dict) -> str:
     ])
 
 
+
+def _calc_rr(direction: str, entry: float, sl: float, tp: float) -> Dict[str, float | bool]:
+    direction = str(direction or "").upper()
+    if direction == "BUY":
+        risk = entry - sl
+        reward = tp - entry
+    elif direction == "SELL":
+        risk = sl - entry
+        reward = entry - tp
+    else:
+        risk = 0.0
+        reward = 0.0
+    rr = reward / risk if risk > 0 else 0.0
+    return {
+        "risk_points": float(risk),
+        "reward_points": float(reward),
+        "rr": float(rr),
+        "rr_ok": bool(rr >= TRADE_MIN_RR),
+        "min_rr": float(TRADE_MIN_RR),
+    }
+
+
+def _format_signal_time(value: str) -> str:
+    try:
+        ts = pd.to_datetime(value, utc=True)
+        bkk = ts.tz_convert("Asia/Bangkok")
+        return f"{ts.strftime('%a %d %b %Y | %H:%M UTC')} / {bkk.strftime('%H:%M BKK')}"
+    except Exception:
+        return str(value or "-")
+
 def format_telegram_signal(payload: Dict) -> str:
-    """Clean V5-style Telegram message, adapted to v12 nested signal + ea payload."""
+    """Clean V5 Telegram message. Signal spam and low RR are filtered before send."""
     symbol = payload.get("symbol", SYMBOL_DEFAULT.replace("/", ""))
     signal = payload.get("signal", {}) or {}
     ea = payload.get("ea", {}) or {}
-    decision = signal.get("decision", {}) or {}
 
-    action = str(ea.get("action", "WAIT")).upper()
-    state = str(ea.get("execution_state", "WATCH")).upper()
     direction = str(ea.get("direction", "NONE")).upper()
-    emoji = "🟢" if direction == "BUY" else "🔴" if direction == "SELL" else "⚪"
-
+    side_mark = "🟢 Δ+" if direction == "BUY" else "🔴 Δ-" if direction == "SELL" else "⚪ Δ"
     entry_mode = ea.get("entry_mode") or signal.get("entry_mode") or "V12_DECISION"
-    exit_mode = ea.get("exit_mode") or signal.get("exit_mode") or "NONE"
     quality_score = int(ea.get("v5_quality_score", 0) or 0)
     quality_grade = ea.get("v5_quality_grade") or "UNKNOWN"
     quality_basis = ea.get("v5_basis") or "UNKNOWN"
-    session_gate = ea.get("session_quality_gate") or "UNKNOWN"
-    reason = ea.get("reason") or decision.get("reason") or "-"
+    rr = _safe_float(ea.get("rr"), 0.0)
+    risk = _safe_float(ea.get("risk_points"), 0.0)
+    reward = _safe_float(ea.get("reward_points"), 0.0)
+    timestamp = signal.get("timestamp") or ea.get("signal_id") or ""
 
     return "\n".join([
-        f"{emoji} <b>Alpha Buffalo</b>",
-        f"📊 <b>{_clean_text(symbol)}</b> | {_clean_text(direction)} | {_clean_text(action)}/{_clean_text(state)}",
-        f"🎯 Score: {_safe_float(ea.get('score')):.1f} | Grade: {_clean_text(ea.get('grade') or decision.get('grade'))}",
-        f"💰 Entry: {_fmt_price(ea.get('entry'))}",
-        f"📈 TP: {_fmt_price(ea.get('tp_final'))}",
-        f"🛡️ SL: {_fmt_price(ea.get('sl'))}",
-        f"🧭 Session: {_clean_text(ea.get('session'))}",
-        f"⚙️ Entry: {_clean_text(entry_mode)} | Exit: {_clean_text(exit_mode)}",
-        f"🧠 V5 Quality: {quality_score} / {_clean_text(quality_grade)} / {_clean_text(quality_basis)}",
-        f"🚦 Gate: {_clean_text(session_gate)} | Levels: {_clean_text(ea.get('directional_levels_ok'))}",
-        f"📝 {_clean_text(reason)}",
-        f"⏱️ {_clean_text(signal.get('timestamp') or ea.get('signal_id'))}",
+        f"{side_mark} <b>ALPHA BUFFALO V5</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"📌 Asset    : {_clean_text(symbol)}",
+        f"📊 Side     : {_clean_text(direction)}",
+        f"📊 Type     : {_clean_text(entry_mode)}",
+        f"🎯 Score    : {_safe_float(ea.get('score')):.1f}",
+        f"🎯 Entry    : ~{_fmt_price(ea.get('entry'))}",
+        f"🛡️ SL       : {_fmt_price(ea.get('sl'))}",
+        f"🎯 TP       : {_fmt_price(ea.get('tp_final'))}",
+        f"⚖️ RR       : {rr:.2f}R | Risk {risk:.2f} | Reward {reward:.2f}",
+        f"🕐 Session  : {_clean_text(ea.get('session'))}",
+        f"🧠 Quality  : {quality_score} / {_clean_text(quality_grade)} / {_clean_text(quality_basis)}",
+        f"⏰ Time     : {_clean_text(_format_signal_time(timestamp))}",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        "✅ EA Executing",
+        "⚠️ Not financial advice. Trade at your own risk.",
     ])
-
 
 def send_telegram_message(text: str) -> bool:
     if not _telegram_enabled():
@@ -347,10 +380,11 @@ def _run_engine_v4_baseline(df_15m: pd.DataFrame) -> Dict | None:
             return None
 
         def rank(sig: Dict) -> tuple:
-            direction_rank = 1 if str(sig.get("direction", "")).upper() == "SELL" else 0
+            pine_valid = 1 if sig.get("pine_valid") else 0
+            setup_ready = 1 if str(sig.get("setup_state", "")).endswith("CF_READY") else 0
             quality = int(sig.get("v5_quality_score", 0) or 0)
             rr = _safe_float(sig.get("entry_rr"), 0.0)
-            return (quality, direction_rank, rr)
+            return (pine_valid, setup_ready, quality, rr)
 
         return max(signals, key=rank)
 
