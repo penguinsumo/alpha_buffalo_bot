@@ -294,34 +294,23 @@ class ScenarioScanner:
         expected_value = round((0.61 * risk_reward_ratio) - (1 - 0.61), 4) if risk_reward_ratio else 0.0
         confidence = "HIGH" if base_score >= 6 else "MEDIUM" if base_score >= 3 else "LOW"
 
-        print(
-            "AlphaBuffalo scanner state | "
-            f"symbol={symbol} price={round(current_price, 3)} "
-            f"trend_h4={trend_h4} trend_h1={trend_h1} mode={market_mode} "
-            f"m15_phase={m15_phase} h1_phase={h1_phase} h4_phase={h4_phase} "
-            f"m15_delta={m15_delta} h1_delta={h1_delta} h4_delta={h4_delta} "
-            f"m15_impulse={m15_impulse} h1_impulse={h1_impulse} "
-            f"ha_m15_bull={ha_m15_bullish} ha_m15_bear={ha_m15_bearish} "
-            f"ha_h1_bull={ha_h1_bullish} ha_h1_bear={ha_h1_bearish} "
-            f"watch_bias={watch_bias} delta_alignment={delta_alignment} "
-            f"impulse_direction={impulse_direction} "
-            f"trade_plan={trade_plan} early_buy_reclaim={early_buy_reclaim_watch} "
-            f"price_reclaimed_bb_mid={price_reclaimed_bb_middle} "
-            f"price_reclaimed_tunnel_mid={price_reclaimed_tunnel_mid} "
-            f"price_above_mid_support={price_above_mid_support} "
-            f"prev_close={round(previous_close, 3)} "
-            f"bb_middle={round(bb_middle, 3)} "
-            f"tunnel_mid={round(tunnel_mid, 3)} "
-            f"prz_state={prz_state} "
-            f"micro_broken={micro_prz_broken} micro_reclaimed={micro_prz_reclaimed} "
-            f"harmonic_pattern={selected_harmonic.get('pattern', 'NONE')} "
-            f"harmonic_tf={selected_harmonic.get('source_tf', 'NONE')} "
-            f"harmonic_state={selected_harmonic.get('state', 'NONE')} "
-            f"harmonic_source={selected_harmonic.get('source', 'NONE')} "
-            f"market_map_date={market_map.get('map_date', 'NONE') if market_map else 'NONE'} "
-            f"lot0={map_lot0.get('side', 'NONE')}@{map_lot0.get('price', 0)} "
-            f"real_harmonic={real_harmonic}",
-            flush=True,
+        self._log_scan_state(
+            symbol=symbol,
+            current_price=current_price,
+            trend_h4=trend_h4,
+            trend_h1=trend_h1,
+            market_mode=market_mode,
+            m15_phase=m15_phase,
+            h1_phase=h1_phase,
+            h4_phase=h4_phase,
+            watch_bias=watch_bias,
+            trade_plan=trade_plan,
+            prz_state=prz_state,
+            micro_prz_broken=micro_prz_broken,
+            micro_prz_reclaimed=micro_prz_reclaimed,
+            selected_harmonic=selected_harmonic,
+            market_map=market_map,
+            map_lot0=map_lot0,
         )
 
         return ScenarioBlueprint(
@@ -737,6 +726,69 @@ class ScenarioScanner:
         if ema20 < ema50:
             return "DOWN"
         return "NEUTRAL"
+
+    def _log_scan_state(
+        self,
+        *,
+        symbol: str,
+        current_price: float,
+        trend_h4: str,
+        trend_h1: str,
+        market_mode: str,
+        m15_phase: str,
+        h1_phase: str,
+        h4_phase: str,
+        watch_bias: str,
+        trade_plan: str,
+        prz_state: str,
+        micro_prz_broken: bool,
+        micro_prz_reclaimed: bool,
+        selected_harmonic: Dict[str, Any],
+        market_map: Optional[Dict[str, Any]],
+        map_lot0: Dict[str, Any],
+    ) -> None:
+        """Print compact scanner state only when state changes.
+
+        ALPHA_SCANNER_STATE_LOG=compact (default): compact + dedupe
+        ALPHA_SCANNER_STATE_LOG=full: print every scan in compact format
+        ALPHA_SCANNER_STATE_LOG=off: no scanner-state log
+        """
+        mode = os.getenv("ALPHA_SCANNER_STATE_LOG", "compact").strip().lower()
+        if mode in {"0", "false", "no", "off", "none"}:
+            return
+
+        harmonic = selected_harmonic or {}
+        lot0_side = str(map_lot0.get("side", "NONE"))
+        lot0_price = float(map_lot0.get("price", 0) or 0)
+        map_date = str((market_map or {}).get("map_date", "NONE"))
+        harmonic_label = str(harmonic.get("pattern", "NONE") or "NONE")
+        harmonic_tf = str(harmonic.get("source_tf", harmonic.get("timeframe", "NONE")) or "NONE")
+        harmonic_state = str(harmonic.get("state", "NONE") or "NONE")
+
+        state_key = (
+            symbol, trend_h4, trend_h1, market_mode,
+            m15_phase, h1_phase, h4_phase,
+            watch_bias, trade_plan, prz_state,
+            bool(micro_prz_broken), bool(micro_prz_reclaimed),
+            harmonic_label, harmonic_tf, harmonic_state,
+            map_date, lot0_side, round(lot0_price, 3),
+        )
+
+        if mode != "full" and getattr(self, "_last_scan_state_key", None) == state_key:
+            return
+        self._last_scan_state_key = state_key
+
+        print(
+            "AlphaBuffalo scanner state | "
+            f"symbol={symbol} price={round(current_price, 3)} "
+            f"h4={trend_h4} h1={trend_h1} mode={market_mode} "
+            f"m15={m15_phase} h1p={h1_phase} h4p={h4_phase} "
+            f"watch={watch_bias} plan={trade_plan} prz={prz_state} "
+            f"bos={int(bool(micro_prz_broken))} reclaim={int(bool(micro_prz_reclaimed))} "
+            f"harmonic={harmonic_label}/{harmonic_tf}/{harmonic_state} "
+            f"map={map_date} lot0={lot0_side}@{round(lot0_price, 3)}",
+            flush=True,
+        )
 
     def _bollinger(self, df: pd.DataFrame) -> Tuple[float, float, float]:
         mid = df["close"].rolling(20).mean().iloc[-1]
