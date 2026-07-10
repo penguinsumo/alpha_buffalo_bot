@@ -13,4 +13,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: python -m pip install -r requirements.txt
       - run: python -m py_compile alpha_buffalo_signal.py scenario_blueprint.py scenario_scanner.py decision_engine.py signal_composer.py session_clock.py
+      - run: python -m py_compile engine_v4/*.py scripts/alpha_regression_suite.py
+      - run: python scripts/alpha_regression_suite.py
