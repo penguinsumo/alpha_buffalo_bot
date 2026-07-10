@@ -112,6 +112,38 @@ def test_upper_sell_not_blocked_by_bullish_context() -> None:
     assert_true(sig["rr_ok"], "fixture should be executable RR")
 
 
+def test_lower_buy_not_blocked_by_bearish_context() -> None:
+    row = base_row()
+    row.update(
+        {
+            "EMA20": 80.0,
+            "EMA50": 100.0,
+            "Trend_1H_Up": False,
+            "V4_Buy_Setup": True,
+            "V4_Sell_Setup": False,
+            "VSA_Buy_Wins": True,
+            "VSA_Sell_Wins": False,
+            "VSA_Buy_Pressure": 0.8,
+            "VSA_Sell_Pressure": 0.2,
+            "Pine_PA_Bull_Confirmed": True,
+            "Pine_PA_Bear_Confirmed": False,
+            "HA_Bullish": True,
+            "HA_Bearish": False,
+            "BB_PRZ_Support_Confluence": True,
+            "BB_PRZ_Resistance_Confluence": False,
+            "V4_Buy_Entry_Zone": True,
+            "V4_Sell_Entry_Zone": False,
+            "V4_Block_Buy_At_Upper": False,
+        }
+    )
+    sig = BuySignalEngine().evaluate(frame([row]), 0, NY_SESSION, ALLOWED)
+
+    assert_true(sig is not None, "lower-zone V4 BUY must not be blocked by H1/EMA bearish context")
+    assert_equal(sig["direction"], "BUY", "lower-zone direction")
+    assert_true(sig["entry_mode"].startswith("V4_BUY"), "lower-zone BUY must stay V4")
+    assert_true(sig["rr_ok"], "fixture should be executable RR")
+
+
 def test_lower_zone_blocks_fresh_sell() -> None:
     row = base_row()
     row.update(
@@ -317,6 +349,7 @@ def test_telegram_public_output_hides_engine_internals() -> None:
 
 TESTS = [
     test_upper_sell_not_blocked_by_bullish_context,
+    test_lower_buy_not_blocked_by_bearish_context,
     test_lower_zone_blocks_fresh_sell,
     test_upper_zone_blocks_fresh_buy,
     test_low_rr_candidate_waits_in_ea_payload,
@@ -344,4 +377,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

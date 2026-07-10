@@ -100,3 +100,12 @@ Known baseline evidence is recorded in `BASELINE_TESTS.md`.
 - It must not be treated as deterministic CI until the candle fixture is frozen.
 - `trade_evidence.json` is a separate performance evidence snapshot, not the
   same test as the 41-trade Risk Gate proof.
+
+## Fusion Contract
+
+`ALPHA_FUSION_CONTRACT.md` defines how older branches should be mined into
+v12-core.
+
+- Port proof harness, risk accounting, and evidence fields from older baselines.
+- Do not port trend-first PRZ entry gates.
+- Any future merge must preserve PRZ/location-first V4 entry behavior.

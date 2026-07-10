@@ -152,3 +152,9 @@ Use them as references only.
 - records the old Risk Gate `811 -> 770 -> 41` baseline
 - separates it from `trade_evidence.json`
 - documents why the old live-data scripts must be frozen into fixtures before CI
+
+`ALPHA_FUSION_CONTRACT.md`
+
+- records what to mine from older branches
+- locks the final PRZ/location-first strategy spine
+- lists red lines that must not return to production
