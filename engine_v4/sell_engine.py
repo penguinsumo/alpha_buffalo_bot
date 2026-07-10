@@ -90,8 +90,7 @@ class SellSignalEngine(BaseEngine):
         risk = sl - entry
         reward = entry - tp
         rr = reward / risk if risk > 0 else 0.0
-        if rr < min_rr:
-            return None
+        rr_ok = rr >= min_rr
 
         close_below_ema20 = bool(row["close"] < row["EMA20"])
         close_below_bb_mid = bool(row["close"] < row["BB_Mid"])
@@ -181,7 +180,7 @@ class SellSignalEngine(BaseEngine):
             "entry_to_sl_points": risk,
             "entry_to_tp_points": reward,
             "entry_rr": rr,
-            "rr_ok": True,
+            "rr_ok": rr_ok,
             "min_rr": min_rr,
             "session_quality_gate": "PINE_PRZ_RESISTANCE_PA_VSA" if upper_setup or pine_valid else "BOS_CONTINUATION",
             "sell_dot_reason": "PINE_PRZ_PA_VSA" if pine_valid else "MICRO_BOS_CONTINUATION",

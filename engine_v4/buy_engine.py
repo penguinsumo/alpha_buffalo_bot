@@ -69,8 +69,7 @@ class BuySignalEngine(BaseEngine):
         risk = entry - sl
         reward = tp - entry
         rr = reward / risk if risk > 0 else 0.0
-        if rr < min_rr:
-            return None
+        rr_ok = rr >= min_rr
 
         pine_valid = bool(row.get("Pine_Valid_Buy", False))
         choch = bool(row.get("CHoCH_Bull", False))
@@ -140,6 +139,6 @@ class BuySignalEngine(BaseEngine):
             "entry_rr": rr,
             "entry_to_sl_points": risk,
             "entry_to_tp_points": reward,
-            "rr_ok": True,
+            "rr_ok": rr_ok,
             "min_rr": min_rr,
         }

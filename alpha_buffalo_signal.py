@@ -266,6 +266,7 @@ def _engine_v4_gate_state(signal: Dict, direction: str) -> Dict:
             "PRZ_Support", "Pine_PRZ_Support", "Pine_PRZ_Support_Touch",
             "In_PRZ_Support", "BB_Lower_Zone", "Near_BB_Lower",
             "Buy_Killzone_072_088", "V4_Support_Zone",
+            "v4_entry_zone", "zone_confluence", "bb_prz_confluence",
         ])
         pa_ok = _any_truthy(engine, [
             "HA_Bull", "HA_Bull_Reversal", "HA_Green_1", "HA_Green_2_CF",
@@ -275,13 +276,14 @@ def _engine_v4_gate_state(signal: Dict, direction: str) -> Dict:
             "VSA_Buy_Wins", "vsa_buy_wins", "VSA_BUY_WINS",
             "VSA_Buy_Pressure", "vsa_buy_pressure",
         ]) and not _any_truthy(engine, ["V4_Block_Buy_At_Upper"])
-        setup_ok = _any_truthy(engine, ["V4_Buy_Setup", "V4_BUY_SETUP", "BUY_SETUP", "cf_confirmed"]) or (zone_ok and pa_ok and vsa_ok)
+        setup_ok = _any_truthy(engine, ["V4_Buy_Setup", "V4_BUY_SETUP", "BUY_SETUP", "cf_confirmed"]) or str(engine.get("setup_state", "")).upper() in {"BUY_SETUP", "BUY_CF_READY"} or (zone_ok and pa_ok and vsa_ok)
         setup_state = "BUY_SETUP" if setup_ok else "BUY_BLOCKED"
     elif direction == "SELL":
         zone_ok = _any_truthy(engine, [
             "PRZ_Resistance", "Pine_PRZ_Resistance", "Pine_PRZ_Resistance_Touch",
             "In_PRZ_Resistance", "BB_Upper_Zone", "Near_BB_Upper",
             "V4_Resistance_Zone",
+            "v4_entry_zone", "zone_confluence", "bb_prz_confluence",
         ])
         pa_ok = _any_truthy(engine, [
             "HA_Bear", "HA_Bear_Reversal", "HA_Red_1", "HA_Red_2_CF",
@@ -291,7 +293,7 @@ def _engine_v4_gate_state(signal: Dict, direction: str) -> Dict:
             "VSA_Sell_Wins", "vsa_sell_wins", "VSA_SELL_WINS",
             "VSA_Sell_Pressure", "vsa_sell_pressure",
         ]) and not _any_truthy(engine, ["V4_Block_Sell_At_Lower"])
-        setup_ok = _any_truthy(engine, ["V4_Sell_Setup", "V4_SELL_SETUP", "SELL_SETUP"]) or (zone_ok and pa_ok and vsa_ok)
+        setup_ok = _any_truthy(engine, ["V4_Sell_Setup", "V4_SELL_SETUP", "SELL_SETUP"]) or str(engine.get("setup_state", "")).upper() in {"SELL_SETUP", "SELL_CF_READY"} or (zone_ok and pa_ok and vsa_ok)
         setup_state = "SELL_SETUP" if setup_ok else "SELL_BLOCKED"
     else:
         zone_ok = setup_ok = vsa_ok = False
