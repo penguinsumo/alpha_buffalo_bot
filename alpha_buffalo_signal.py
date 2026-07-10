@@ -373,42 +373,74 @@ def _format_signal_time(value: str) -> str:
     except Exception:
         return str(value or "-")
 
+
+def _format_public_trade_time(value: str) -> str:
+    try:
+        ts = pd.to_datetime(value, utc=True).tz_convert("Asia/Bangkok")
+        return ts.strftime("%a %d %b %Y | %H:%M")
+    except Exception:
+        return str(value or "-")
+
+
+def _public_side(direction: str) -> tuple[str, str]:
+    direction = str(direction or "NONE").upper()
+    if direction == "BUY":
+        return "🟢", "BUY"
+    if direction == "SELL":
+        return "🔴", "SELL"
+    return "⚪", "WAIT"
+
+
+def _price_zone(center: float, direction: str) -> str:
+    if center <= 0:
+        return "-"
+    width = max(0.8, center * 0.00025)
+    if str(direction).upper() == "SELL":
+        low, high = center - width * 0.35, center + width * 0.65
+    else:
+        low, high = center - width * 0.65, center + width * 0.35
+    return f"{low:.1f} - {high:.1f}"
+
+
+def _public_targets(direction: str, entry: float, tp_final: float, engine: Dict) -> tuple[float, float]:
+    direction = str(direction or "").upper()
+    tp1 = _first_float(engine.get("tp1"), engine.get("signal_tp"), engine.get("bb_lower_tp"))
+    if direction == "BUY":
+        if tp1 <= entry or tp1 > tp_final:
+            tp1 = entry + (tp_final - entry) * 0.5
+    elif direction == "SELL":
+        if tp1 >= entry or tp1 < tp_final:
+            tp1 = entry - (entry - tp_final) * 0.5
+    else:
+        tp1 = 0.0
+    return tp1, tp_final
+
+
 def format_telegram_signal(payload: Dict) -> str:
-    """Clean V5 Telegram message. No raw debug/reason spam."""
+    """Public Telegram trade alert. Keep engine internals out of customer messages."""
     symbol = payload.get("symbol", SYMBOL_DEFAULT.replace("/", ""))
     signal = payload.get("signal", {}) or {}
     ea = payload.get("ea", {}) or {}
+    engine = signal.get("engine_v4", {}) or {}
 
     direction = str(ea.get("direction", "NONE")).upper()
-    side_icon = "🟢 Δ+" if direction == "BUY" else "🔴 Δ-" if direction == "SELL" else "⚪ Δ"
-    entry_mode = ea.get("entry_mode") or signal.get("entry_mode") or "V4_SESSION"
+    side_icon, side_label = _public_side(direction)
     entry = _safe_float(ea.get("entry"))
     sl = _safe_float(ea.get("sl"))
     tp = _safe_float(ea.get("tp_final"))
-    rr = _safe_float(ea.get("rr"))
-    risk = _safe_float(ea.get("risk_points"))
-    reward = _safe_float(ea.get("reward_points"))
-
-    quality_score = int(ea.get("v5_quality_score", 0) or 0)
-    quality_grade = ea.get("v5_quality_grade") or "UNKNOWN"
-    quality_basis = ea.get("v5_basis") or signal.get("v5_basis") or "UNKNOWN"
-    session = ea.get("session") or "-"
+    tp1, tp2 = _public_targets(direction, entry, tp, engine)
     timestamp = signal.get("timestamp") or ea.get("signal_id") or ""
 
     return "\n".join([
-        f"{side_icon} <b>ALPHA BUFFALO V5</b>",
+        f"{side_icon} <b>Alpha Buffalo.</b> {_clean_text(side_label)}",
         "━━━━━━━━━━━━━━━━━━━━━",
         f"📌 Asset    : <b>{_clean_text(symbol)}</b>",
-        f"📊 Side     : {_clean_text(direction)}",
-        f"📊 Type     : {_clean_text(entry_mode)}",
-        f"🎯 Score    : {_safe_float(ea.get('score')):.1f}",
+        "📊 Type     : V4_SESSION",
         f"🎯 Entry    : ~{entry:,.2f}",
-        f"🛡️ SL       : {sl:,.2f}",
-        f"🎯 TP       : {tp:,.2f}",
-        f"⚖️ RR       : {rr:.2f}R | Risk {risk:.2f} | Reward {reward:.2f}",
-        f"🕐 Session  : {_clean_text(session)}",
-        f"🧠 Quality  : {quality_score} / {_clean_text(quality_grade)} / {_clean_text(quality_basis)}",
-        f"⏰ Time     : {_clean_text(_format_time_pair(timestamp))}",
+        f"🛡️ SL Zone  : {_price_zone(sl, direction)}",
+        f"🎯 TP1      : {tp1:,.1f}  (M15 ~30min)",
+        f"🎯 TP2      : {tp2:,.1f}  (H1  ~2hr)",
+        f"⏰ {_clean_text(_format_public_trade_time(timestamp))}",
         "━━━━━━━━━━━━━━━━━━━━━",
         "✅ EA Executing",
         "⚠️ Not financial advice. Trade at your own risk.",
@@ -487,17 +519,49 @@ def _trend_zone_label(signal: Dict, ea: Dict) -> str:
     return "No Man's Land"
 
 
+def _zone_range(low: float, high: float) -> str:
+    if low > 0 and high > 0:
+        lo, hi = sorted([low, high])
+        return f"{lo:,.1f} - {hi:,.1f}"
+    return "-"
+
+
+def _public_zone_line(signal: Dict) -> str:
+    engine = signal.get("engine_v4", {}) or {}
+    resist = _zone_range(
+        _safe_float(engine.get("prz_resistance_low") or engine.get("Pine_PRZ_Resistance_Low")),
+        _safe_float(engine.get("prz_resistance_high") or engine.get("Pine_PRZ_Resistance_High")),
+    )
+    support = _zone_range(
+        _safe_float(engine.get("prz_support_low") or engine.get("Pine_PRZ_Support_Low")),
+        _safe_float(engine.get("prz_support_high") or engine.get("Pine_PRZ_Support_High")),
+    )
+    return f"Resist = {resist}     Support = {support}"
+
+
 def _trend_setup_label(signal: Dict, ea: Dict) -> str:
     engine = signal.get("engine_v4", {}) or {}
+    direction = str(ea.get("direction") or signal.get("decision", {}).get("action") or "").upper()
+    if direction in {"BUY", "SELL"}:
+        return direction
     setup = ea.get("scenario_state") or ea.get("setup_state") or signal.get("scenario_state") or signal.get("setup_state")
-    if setup:
-        return str(setup)
     if _truthy(engine.get("V4_Buy_Setup")):
-        return "BUY_SETUP"
+        return "BUY"
     if _truthy(engine.get("V4_Sell_Setup")):
-        return "SELL_SETUP"
+        return "SELL"
+    if setup:
+        raw = str(setup).upper()
+        if "BUY" in raw:
+            return "BUY"
+        if "SELL" in raw:
+            return "SELL"
     watch_bias = _deep_get(signal, ["blueprint", "watch_bias"], "") or _deep_get(signal, ["blueprint", "prz_layers", "routing"], "")
-    return str(watch_bias or "WAIT")
+    raw_bias = str(watch_bias or "").upper()
+    if "BUY" in raw_bias:
+        return "BUY"
+    if "SELL" in raw_bias:
+        return "SELL"
+    return "BUY / SELL"
 
 
 def _trend_vsa_label(signal: Dict, ea: Dict) -> str:
@@ -529,15 +593,13 @@ def format_telegram_trend_update(payload: Dict) -> str:
         or ea.get("entry")
     )
     session = ea.get("session") or _deep_get(signal, ["gates", "session"], "-")
-    zone = _trend_zone_label(signal, ea)
+    zone = _public_zone_line(signal)
     setup = _trend_setup_label(signal, ea)
-    vsa = _trend_vsa_label(signal, ea)
-    bos = ea.get("break_prediction") or ea.get("journey_state") or ("CONFIRMED" if ea.get("bos_confirmed") else "Waiting")
 
     watch = "Wait"
-    if str(setup).upper().startswith("BUY") or "SUPPORT" in zone.upper():
+    if str(setup).upper().startswith("BUY"):
         watch = "Δ+ BUY if CF/BOS confirms"
-    elif str(setup).upper().startswith("SELL") or "RESISTANCE" in zone.upper():
+    elif str(setup).upper().startswith("SELL"):
         watch = "Δ- SELL if CF/BOS confirms"
 
     timestamp = signal.get("timestamp") or payload.get("generated_at") or ""
@@ -550,8 +612,6 @@ def format_telegram_trend_update(payload: Dict) -> str:
         "",
         f"🧭 Zone    : {_clean_text(zone)}",
         f"⚡ Setup   : {_clean_text(setup)}",
-        f"🧠 VSA     : {_clean_text(vsa)}",
-        f"🚦 BOS     : {_clean_text(bos)}",
         "",
         f"➡️ M15     : {_clean_text(_trend_line(signal, 'm15_phase', 'Reaction/Watch'))}",
         f"📈 H1      : {_clean_text(_trend_line(signal, 'h1_phase', blueprint.get('trend_h1', '-')))}",
@@ -560,6 +620,7 @@ def format_telegram_trend_update(payload: Dict) -> str:
         f"👀 Watch   : {_clean_text(watch)}",
         f"⏰ Time    : {_clean_text(_format_time_pair(timestamp))}",
         "━━━━━━━━━━━━━━━━━━━━━",
+        "⚠️ Not financial advice. Trade at your own risk.",
     ])
 
 
