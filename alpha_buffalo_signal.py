@@ -523,7 +523,7 @@ def _zone_range(low: float, high: float) -> str:
     if low > 0 and high > 0:
         lo, hi = sorted([low, high])
         return f"{lo:,.1f} - {hi:,.1f}"
-    return "-"
+    return "Waiting"
 
 
 def _public_zone_line(signal: Dict) -> str:
@@ -564,6 +564,24 @@ def _trend_setup_label(signal: Dict, ea: Dict) -> str:
     return "BUY / SELL"
 
 
+def _public_setup_label(setup: str) -> str:
+    setup = str(setup or "").upper()
+    if setup.startswith("BUY"):
+        return "🟢 BUY"
+    if setup.startswith("SELL"):
+        return "🔴 SELL"
+    return "🟢/🔴 WAIT"
+
+
+def _public_watch_label(setup: str) -> str:
+    setup = str(setup or "").upper()
+    if setup.startswith("BUY"):
+        return "WAIT SETUP 🟢 BUY"
+    if setup.startswith("SELL"):
+        return "WAIT SETUP 🔴 SELL"
+    return "WAIT SETUP"
+
+
 def _trend_vsa_label(signal: Dict, ea: Dict) -> str:
     engine = signal.get("engine_v4", {}) or {}
     if _truthy(engine.get("VSA_Buy_Wins")):
@@ -595,12 +613,8 @@ def format_telegram_trend_update(payload: Dict) -> str:
     session = ea.get("session") or _deep_get(signal, ["gates", "session"], "-")
     zone = _public_zone_line(signal)
     setup = _trend_setup_label(signal, ea)
-
-    watch = "Wait"
-    if str(setup).upper().startswith("BUY"):
-        watch = "Δ+ BUY if CF/BOS confirms"
-    elif str(setup).upper().startswith("SELL"):
-        watch = "Δ- SELL if CF/BOS confirms"
+    setup_public = _public_setup_label(setup)
+    watch = _public_watch_label(setup)
 
     timestamp = signal.get("timestamp") or payload.get("generated_at") or ""
 
@@ -611,7 +625,7 @@ def format_telegram_trend_update(payload: Dict) -> str:
         f"💰 Price   : {price:,.2f}",
         "",
         f"🧭 Zone    : {_clean_text(zone)}",
-        f"⚡ Setup   : {_clean_text(setup)}",
+        f"⚡ Setup   : {_clean_text(setup_public)}",
         "",
         f"➡️ M15     : {_clean_text(_trend_line(signal, 'm15_phase', 'Reaction/Watch'))}",
         f"📈 H1      : {_clean_text(_trend_line(signal, 'h1_phase', blueprint.get('trend_h1', '-')))}",
