@@ -717,12 +717,14 @@ def _run_engine_v4_baseline(df_15m: pd.DataFrame) -> Dict | None:
 
         df = _ensure_engine_v4_datetime_index(df_15m)
         df = add_indicators(df)
-        session_state = SessionGate(SessionClock()).evaluate(df)
-        signal = SignalRouter(
+        session_clock = SessionClock()
+        routed = SignalRouter(
+            clock=session_clock,
+            gate=FinalGate(session_clock),
             buy_engine=BuySignalEngine(),
             sell_engine=SellSignalEngine(),
-            final_gate=FinalGate(),
-        ).route(df, session_state)
+        ).process(df)
+        signal = routed[0] if routed else None
 
         tail = df.tail(int(os.getenv("ENGINE_V4_LOOKBACK_BARS", "6")))
         last = tail.iloc[-1]

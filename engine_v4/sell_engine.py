@@ -36,12 +36,6 @@ class SellSignalEngine(BaseEngine):
         if bool(row.get("V4_Block_Sell_At_Lower", False)):
             return None
 
-        # Keep bearish context, but do not let it beat location.
-        if bool(row.get("Trend_1H_Up", False)):
-            return None
-        if not (row.get("EMA20", 0) < row.get("EMA50", 0)):
-            return None
-
         lookback = df.iloc[max(0, idx - 5):idx + 1]
         recent_sweep_above_100 = bool(lookback.get("Sweep_Above_100", False).any())
         recent_sell_reclaim = bool(lookback.get("Sell_Reclaim", False).any())
@@ -51,6 +45,14 @@ class SellSignalEngine(BaseEngine):
         upper_setup = bool(row.get("V4_Sell_Setup", False))
         pine_valid = bool(row.get("Pine_Valid_Sell", False))
         sell_continuation = bool(recent_micro_bos_down and row.get("VSA_Sell_Wins", False))
+
+        # Keep bearish trend context for continuation only. V4 upper-zone
+        # location setups must not be blocked by H1/EMA trend bias.
+        if not (upper_setup or pine_valid):
+            if bool(row.get("Trend_1H_Up", False)):
+                return None
+            if not (row.get("EMA20", 0) < row.get("EMA50", 0)):
+                return None
 
         if not (upper_setup or pine_valid or sell_continuation):
             return None
