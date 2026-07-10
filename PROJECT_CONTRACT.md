@@ -92,3 +92,11 @@ Before porting any old module:
 4. Run py_compile and regression suite.
 5. Deploy only after production payload shape is unchanged or intentionally versioned.
 
+## Baseline Evidence
+
+Known baseline evidence is recorded in `BASELINE_TESTS.md`.
+
+- The `811 -> 770 -> 41` Risk Gate result is a historical live-data baseline.
+- It must not be treated as deterministic CI until the candle fixture is frozen.
+- `trade_evidence.json` is a separate performance evidence snapshot, not the
+  same test as the 41-trade Risk Gate proof.
