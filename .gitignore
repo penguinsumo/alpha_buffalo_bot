@@ -21,3 +21,6 @@ body
 bot.log
 *.bak
 .venv/
+.env
+.env.*
+!.env.example

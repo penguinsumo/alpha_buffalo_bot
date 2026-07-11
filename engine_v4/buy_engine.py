@@ -107,7 +107,14 @@ class BuySignalEngine(BaseEngine):
         v5_basis = "|".join(basis_parts) if basis_parts else "LOWER_REACTION"
 
         return {
+            "status": "SIGNAL",
             "direction": "BUY",
+            "entry_price": entry,
+            "sl_price": sl,
+            "tp1_price": tp1,
+            "tp2_price": tp,
+            "score": quality_score,
+            "reason": f"V4 Engine: {session_state.session} BUY",
             "zone_confluence": bb_prz_confluence,
             "bb_prz_confluence": bb_prz_confluence,
             "v4_entry_zone": bool(row.get("V4_Buy_Entry_Zone", False)),

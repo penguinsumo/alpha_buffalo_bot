@@ -18,6 +18,7 @@ from session_clock import SessionClock
 from engine_v4.final_gate import FinalGate
 from engine_v4.buy_engine import BuySignalEngine
 from engine_v4.sell_engine import SellSignalEngine
+from signal_schema import SIGNAL, normalize_engine_candidate
 
 
 class SignalRouter:
@@ -68,8 +69,9 @@ class SignalRouter:
                 daily_dd_ok=daily_dd_ok,
                 consec_loss_ok=consec_loss_ok,
             )
-            buy = self.buy_engine.evaluate(df, idx, session_state, gate_buy)
-            if buy:
+            buy_raw = self.buy_engine.evaluate(df, idx, session_state, gate_buy)
+            if buy_raw:
+                buy = normalize_engine_candidate(buy_raw)
                 self._enrich_signal(buy, idx, age_bars, row)
                 signals.append(buy)
 
@@ -81,8 +83,9 @@ class SignalRouter:
                 daily_dd_ok=daily_dd_ok,
                 consec_loss_ok=consec_loss_ok,
             )
-            sell = self.sell_engine.evaluate(df, idx, session_state, gate_sell)
-            if sell:
+            sell_raw = self.sell_engine.evaluate(df, idx, session_state, gate_sell)
+            if sell_raw:
+                sell = normalize_engine_candidate(sell_raw)
                 self._enrich_signal(sell, idx, age_bars, row)
                 signals.append(sell)
 
@@ -114,10 +117,11 @@ class SignalRouter:
 
     def _rank(self, sig: dict) -> tuple:
         # Location first. Do not add SELL/BUY bias here.
+        contract_valid = 1 if sig.get("status") == SIGNAL else 0
         confluence = 1 if sig.get("bb_prz_confluence") or sig.get("zone_confluence") else 0
         pine_valid = 1 if sig.get("pine_valid") else 0
         cf_ready = 1 if str(sig.get("setup_state", "")).upper().endswith("CF_READY") else 0
         quality = int(sig.get("v5_quality_score", 0) or 0)
         rr = float(sig.get("entry_rr", 0.0) or 0.0)
         age_score = -int(sig.get("selected_age_bars", 99) or 99)
-        return (confluence, pine_valid, cf_ready, quality, rr, age_score)
+        return (contract_valid, confluence, pine_valid, cf_ready, quality, rr, age_score)

@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Request, Response, Response
 from decision_engine import DecisionEngine
 from scenario_scanner import ScenarioScanner
 from signal_composer import SignalComposer
+from signal_schema import BLOCKED, ERROR, NO_SIGNAL, SIGNAL, create_signal
 from session_clock import SessionClock
 from engine_v4.session_gate import SessionGate
 
@@ -446,7 +447,27 @@ def format_telegram_signal(payload: Dict) -> str:
         "⚠️ Not financial advice. Trade at your own risk.",
     ])
 
+
+def _telegram_market_is_open(payload: Dict | None = None) -> bool:
+    """Fail closed when either runtime clock or payload reports CLOSED."""
+    try:
+        current_session = str(SessionClock().get().session or "CLOSED").upper()
+    except Exception:
+        return False
+
+    payload = payload or {}
+    signal = payload.get("signal", {}) or {}
+    ea = payload.get("ea", {}) or {}
+    payload_session = str(
+        ea.get("session") or _deep_get(signal, ["gates", "session"], "") or ""
+    ).upper()
+
+    return current_session != "CLOSED" and payload_session != "CLOSED"
+
+
 def send_telegram_message(text: str) -> bool:
+    if not _telegram_market_is_open():
+        return False
     if not _telegram_enabled():
         return False
 
@@ -641,6 +662,8 @@ def format_telegram_trend_update(payload: Dict) -> str:
 def maybe_broadcast_trend_update(payload: Dict) -> None:
     """Send one compact market-state update per H1 hour. Never opens or bypasses trade gates."""
     global LAST_TELEGRAM_H1_UPDATE_KEY
+    if not _telegram_market_is_open(payload):
+        return
     if not TELEGRAM_NOTIFY_TREND_UPDATE:
         return
     if not _telegram_enabled():
@@ -657,6 +680,9 @@ def maybe_broadcast_trend_update(payload: Dict) -> None:
 def maybe_broadcast_signal(payload: Dict) -> None:
     """Broadcast only Clean V5 OPEN signals that passed RR/levels/setup/VSA gates."""
     global LAST_TELEGRAM_SIGNAL_KEY
+
+    if not _telegram_market_is_open(payload):
+        return
 
     ea = payload.get("ea", {}) or {}
     signal = payload.get("signal", {}) or {}
@@ -847,22 +873,54 @@ def _run_engine_v4_baseline(df_15m: pd.DataFrame) -> Dict | None:
 def _apply_engine_v4_signal(signal: Dict, engine_signal: Dict | None) -> Dict:
     """Overlay v4 baseline trade output onto v12 composed payload."""
     if not engine_signal:
+        signal["status"] = NO_SIGNAL
+        signal["direction"] = None
+        signal["reason"] = "No BUY or SELL engine conditions met"
         return signal
 
+    engine_status = str(engine_signal.get("status", SIGNAL)).upper()
     direction = str(engine_signal.get("direction", "NONE")).upper()
-    if direction not in {"BUY", "SELL"}:
+    entry = _safe_float(engine_signal.get("entry_price", engine_signal.get("entry")))
+    sl = _safe_float(engine_signal.get("sl_price", engine_signal.get("sl")))
+    tp1 = _safe_float(engine_signal.get("tp1_price", engine_signal.get("tp1")))
+    tp_final = _safe_float(engine_signal.get("tp2_price", engine_signal.get("tp")))
+
+    if engine_status != SIGNAL:
+        signal["status"] = BLOCKED
+        signal["direction"] = direction if direction in {"BUY", "SELL"} else None
+        signal["entry_price"] = entry or None
+        signal["sl_price"] = sl or None
+        signal["tp1_price"] = tp1 or None
+        signal["tp2_price"] = tp_final or None
+        signal["reason"] = str(engine_signal.get("reason", "Engine candidate blocked"))
+        signal["engine_v4"] = {
+            key: _safe_float(value) if isinstance(value, float) else value
+            for key, value in engine_signal.items()
+            if key != "timestamp"
+        }
         return signal
 
-    entry = _safe_float(engine_signal.get("entry"))
-    sl = _safe_float(engine_signal.get("sl"))
-    tp_final = _safe_float(engine_signal.get("tp"))
+    if direction not in {"BUY", "SELL"}:
+        signal["status"] = BLOCKED
+        signal["direction"] = None
+        signal["reason"] = "INVALID_ENGINE_DIRECTION"
+        return signal
 
     if entry <= 0 or sl <= 0 or tp_final <= 0:
+        signal["status"] = BLOCKED
+        signal["direction"] = direction
+        signal["reason"] = "MISSING_ENGINE_PRICE_LEVELS"
         return signal
 
     if direction == "BUY" and not (sl < entry < tp_final):
+        signal["status"] = BLOCKED
+        signal["direction"] = direction
+        signal["reason"] = "INVALID_BUY_LEVELS"
         return signal
     if direction == "SELL" and not (tp_final < entry < sl):
+        signal["status"] = BLOCKED
+        signal["direction"] = direction
+        signal["reason"] = "INVALID_SELL_LEVELS"
         return signal
 
     entry_mode = engine_signal.get("entry_mode") or f"V4_{direction}_BASE"
@@ -891,6 +949,14 @@ def _apply_engine_v4_signal(signal: Dict, engine_signal: Dict | None) -> Dict:
         "reason": "|".join(reason_parts),
         "grade": grade,
     }
+    signal["status"] = SIGNAL
+    signal["direction"] = direction
+    signal["entry_price"] = entry
+    signal["sl_price"] = sl
+    signal["tp1_price"] = tp1 or tp_final
+    signal["tp2_price"] = tp_final
+    signal["score"] = score
+    signal["reason"] = "|".join(reason_parts)
     signal["timestamp"] = _iso_timestamp(engine_signal.get("timestamp") or signal.get("timestamp"))
     signal["entry"] = entry
     signal["sl"] = sl
@@ -1066,12 +1132,14 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
     plan_a = blueprint.get("plan_a", {}) or {}
     plan_b = blueprint.get("plan_b", {}) or {}
 
-    direction = str(decision.get("action", "NONE")).upper()
+    signal_status = str(signal.get("status", NO_SIGNAL)).upper()
+    direction = str(signal.get("direction") or decision.get("action", "NONE")).upper()
     timestamp = str(signal.get("timestamp") or blueprint.get("timestamp") or "")
 
     current_price = _safe_float(blueprint.get("current_price"))
 
     entry = _first_float(
+        signal.get("entry_price"),
         signal.get("entry"),
         blueprint.get("entry"),
         plan_a.get("entry"),
@@ -1082,6 +1150,7 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
     )
 
     sl = _first_float(
+        signal.get("sl_price"),
         signal.get("sl"),
         blueprint.get("sl"),
         plan_a.get("sl"),
@@ -1091,6 +1160,7 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
     )
 
     tp_final = _first_float(
+        signal.get("tp2_price"),
         signal.get("tp_final"),
         signal.get("tp"),
         blueprint.get("tp_final"),
@@ -1104,7 +1174,7 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
     )
 
     blueprint_valid = bool(gates.get("blueprint_valid", blueprint.get("is_valid", False)))
-    trade_direction_ok = direction in {"BUY", "SELL"}
+    trade_direction_ok = signal_status == SIGNAL and direction in {"BUY", "SELL"}
     levels_ready = entry > 0 and sl > 0 and tp_final > 0
 
     if direction == "BUY":
@@ -1226,38 +1296,101 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
         "reason": reason,
     }
 
-def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBOL_DEFAULT) -> Dict:
-    df_4h, df_1h, df_15m = fetch_multi_tf(symbol)
 
-    scanner = ScenarioScanner()
-    blueprint = scanner.scan(df_4h, df_1h, df_15m, symbol=public_symbol)
+def build_api_signal_response(symbol: str, signal: Dict, ea: Dict) -> Dict:
+    """Expose one API schema for BUY, SELL, no-signal, blocked, and error states."""
+    signal_status = str(signal.get("status", NO_SIGNAL)).upper()
+    direction = str(signal.get("direction") or ea.get("direction") or "").upper()
+    if direction not in {"BUY", "SELL"}:
+        direction = None
 
-    session_clock = SessionClock()
-    session_state = session_clock.get()
-    blueprint.session = session_state.session
-
-    engine = DecisionEngine()
-    decision = engine.evaluate(blueprint)
-
-    composer = SignalComposer(session_clock=session_clock)
-    signal = composer.compose(
-        blueprint=blueprint,
-        decision=decision,
-        symbol=public_symbol,
+    engine = signal.get("engine_v4", {}) or {}
+    entry = _first_float(signal.get("entry_price"), ea.get("entry"))
+    sl = _first_float(signal.get("sl_price"), ea.get("sl"))
+    tp2 = _first_float(signal.get("tp2_price"), ea.get("tp_final"))
+    tp1 = _first_float(
+        signal.get("tp1_price"),
+        engine.get("tp1_price"),
+        engine.get("tp1"),
+        tp2,
     )
 
-    # Production baseline overlay:
-    # v12 scanner/blueprint stays intact, but proven engine_v4 BUY/SELL baseline
-    # becomes the actual trade source when it produces confirmed levels.
-    engine_v4_signal = _run_engine_v4_baseline(df_15m)
-    signal = _apply_engine_v4_signal(signal, engine_v4_signal)
+    if signal_status == ERROR:
+        status = ERROR
+    elif direction is None:
+        status = NO_SIGNAL
+    elif signal_status == SIGNAL and ea.get("action") == "OPEN":
+        status = SIGNAL
+    else:
+        status = BLOCKED
 
+    response_reason = (
+        signal.get("reason")
+        if status in {NO_SIGNAL, ERROR}
+        else ea.get("reason") or signal.get("reason")
+    )
+    contract = create_signal(
+        status=status,
+        direction=direction,
+        entry_price=entry,
+        sl_price=sl,
+        tp1_price=tp1,
+        tp2_price=tp2,
+        score=signal.get("score", ea.get("score", 0)),
+        reason=response_reason or "No signal",
+    )
     return {
-        "status": "ok",
-        "symbol": public_symbol,
+        **contract,
+        "symbol": symbol,
         "signal": signal,
-        "ea": build_ea_payload(public_symbol, signal),
+        "ea": ea,
     }
+
+def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBOL_DEFAULT) -> Dict:
+    try:
+        df_4h, df_1h, df_15m = fetch_multi_tf(symbol)
+
+        scanner = ScenarioScanner()
+        blueprint = scanner.scan(df_4h, df_1h, df_15m, symbol=public_symbol)
+
+        session_clock = SessionClock()
+        session_state = session_clock.get()
+        blueprint.session = session_state.session
+
+        engine = DecisionEngine()
+        decision = engine.evaluate(blueprint)
+
+        composer = SignalComposer(session_clock=session_clock)
+        signal = composer.compose(
+            blueprint=blueprint,
+            decision=decision,
+            symbol=public_symbol,
+        )
+
+        # Production baseline overlay:
+        # v12 scanner/blueprint stays intact, but proven engine_v4 BUY/SELL baseline
+        # becomes the actual trade source when it produces confirmed levels.
+        engine_v4_signal = _run_engine_v4_baseline(df_15m)
+        signal = _apply_engine_v4_signal(signal, engine_v4_signal)
+        ea = build_ea_payload(public_symbol, signal)
+        return build_api_signal_response(public_symbol, signal, ea)
+    except Exception as exc:
+        error_signal = {
+            "status": ERROR,
+            "direction": None,
+            "reason": f"{type(exc).__name__}: {exc}",
+            "decision": {
+                "action": "NONE",
+                "confidence": 0.0,
+                "score": 0,
+                "reason": f"PIPELINE_ERROR:{type(exc).__name__}",
+                "grade": "ERROR",
+            },
+            "gates": {"blueprint_valid": False, "session": ""},
+            "blueprint": {"is_valid": False},
+        }
+        ea = build_ea_payload(public_symbol, error_signal)
+        return build_api_signal_response(public_symbol, error_signal, ea)
 
 
 def _set_latest_signal(payload: dict) -> None:

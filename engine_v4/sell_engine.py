@@ -128,6 +128,10 @@ class SellSignalEngine(BaseEngine):
             basis_parts.append("SWEEP_HA")
         v5_basis = "|".join(basis_parts) if basis_parts else "UPPER_REJECTION"
 
+        tp1 = float(row.get("BB_Mid", 0.0) or 0.0)
+        if not (tp < tp1 < entry):
+            tp1 = tp
+
         candle_range = float(row["high"] - row["low"])
         sell_rejection_wick_ratio = (
             float((row["high"] - max(row["open"], row["close"])) / candle_range)
@@ -139,7 +143,14 @@ class SellSignalEngine(BaseEngine):
         )
 
         return {
+            "status": "SIGNAL",
             "direction": "SELL",
+            "entry_price": entry,
+            "sl_price": sl,
+            "tp1_price": tp1,
+            "tp2_price": tp,
+            "score": quality_score,
+            "reason": f"V4 Engine: {session_state.session} SELL",
             "zone_confluence": bb_prz_confluence,
             "bb_prz_confluence": bb_prz_confluence,
             "v4_entry_zone": bool(row.get("V4_Sell_Entry_Zone", False)),
