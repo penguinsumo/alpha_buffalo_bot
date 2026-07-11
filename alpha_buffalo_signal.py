@@ -932,6 +932,127 @@ def _apply_engine_v4_signal(signal: Dict, engine_signal: Dict | None) -> Dict:
 
     return signal
 
+
+def _python_trade_management_contract(direction: str, signal: Dict, setup_info: Dict) -> Dict:
+    """
+    Python-side trade management contract.
+    EA must execute only; all HA/VSA/BOS/BE/TP-route decisions stay in Python.
+    """
+    engine_v4 = signal.get("engine_v4", {}) or {}
+    existing = signal.get("trade_management") or engine_v4.get("trade_management") or {}
+
+    if isinstance(existing, dict):
+        management = dict(existing)
+    elif existing:
+        management = {"legacy_value": existing}
+    else:
+        management = {}
+
+    management.setdefault("managed_by", "PYTHON_CLOUD")
+    management.setdefault("ea_role", "EXECUTION_ONLY")
+    management.setdefault("ha_tf", "15M")
+    management.setdefault("m5_fallback", "NOT_AVAILABLE_USE_HA15")
+    management.setdefault("bos_required_always", False)
+
+    if direction == "BUY":
+        management.setdefault("entry_source", "VSA_DEMAND_WALL_REACTION")
+        management.setdefault("entry_confirmation", "REACTION_CONFIRM_OR_BULLISH_PINBAR")
+        management.setdefault("visual_sl_source", "VSA_WALL_LOW")
+        management.setdefault("sl_rule", "BELOW_VSA_WALL_LOW")
+        management.setdefault("tp_route", {
+            "tp1": "UPPER_BB_CHECKPOINT",
+            "tp2": "NEXT_PRZ",
+            "tp3": "HARMONIC_ROUTE_OR_NEXT_HARMONIC_PRZ",
+        })
+        management.setdefault("ha_close_all_if", "HA15_RED")
+        management.setdefault("move_be_if", "HA15_SECOND_GREEN_AFTER_8_MIN")
+        management.setdefault("bos_pullback_entry", "BOS_UP_PULLBACK_HA15_GREEN")
+        management.setdefault("add_layer_rule", "BOS_UP_PULLBACK_HA15_GREEN")
+
+    elif direction == "SELL":
+        management.setdefault("entry_source", "VSA_SUPPLY_WALL_REJECTION")
+        management.setdefault("entry_confirmation", "REACTION_CONFIRM_OR_BEARISH_PINBAR")
+        management.setdefault("visual_sl_source", "VSA_WALL_HIGH")
+        management.setdefault("sl_rule", "ABOVE_VSA_WALL_HIGH")
+        management.setdefault("tp_route", {
+            "tp1": "LOWER_BB_CHECKPOINT",
+            "tp2": "NEXT_PRZ",
+            "tp3": "HARMONIC_ROUTE_OR_NEXT_HARMONIC_PRZ",
+        })
+        management.setdefault("ha_close_all_if", "HA15_GREEN")
+        management.setdefault("move_be_if", "HA15_SECOND_RED_AFTER_8_MIN")
+        management.setdefault("bos_add_layer", "M15_BOS_BODY_CLOSE_DOWN_OR_RETEST_REJECTION")
+        management.setdefault("layer_1", "VSA_SUPPLY_WALL_OR_PRZ_RESISTANCE_REJECTION")
+        management.setdefault("layer_2", "M15_BOS_DOWN_OR_BOS_RETEST_REJECTION")
+
+    else:
+        management.setdefault("entry_source", "NONE")
+        management.setdefault("visual_sl_source", "NONE")
+        management.setdefault("tp_route", {})
+
+    return management
+
+
+def _python_plan_lifecycle_contract(
+    *,
+    signal_id: str,
+    action: str,
+    execution_state: str,
+    direction: str,
+    trade_direction_ok: bool,
+    setup_ok: bool,
+    zone_ok: bool,
+    vsa_gate_ok: bool,
+    rr_ok: bool,
+    levels_ready: bool,
+    directional_levels_ok: bool,
+) -> Dict:
+    """
+    Plan lifecycle is controlled by Python.
+    EA may display/store ARMED plans, but may open only READY + OPEN.
+    """
+    if action == "OPEN" and execution_state == "READY":
+        plan_status = "READY"
+    elif trade_direction_ok and setup_ok and zone_ok and vsa_gate_ok:
+        plan_status = "ARMED"
+    elif trade_direction_ok:
+        plan_status = "WATCH"
+    else:
+        plan_status = "NONE"
+
+    cancel_if = [
+        "PYTHON_SENDS_CANCELLED",
+        "PYTHON_SENDS_EXPIRED",
+        "ZONE_INVALIDATED",
+        "VSA_WALL_BROKEN",
+        "HA15_OPPOSITE_CLOSE_ALL",
+        "SESSION_EXPIRED",
+    ]
+
+    if not rr_ok:
+        cancel_if.append("RR_BELOW_MIN")
+    if not levels_ready or not directional_levels_ok:
+        cancel_if.append("LEVELS_INVALID")
+
+    return {
+        "plan_id": signal_id,
+        "plan_status": plan_status,
+        "action_source": "PYTHON_CLOUD",
+        "ea_may_open_from_armed": False,
+        "ea_open_rule": "ONLY_ACTION_OPEN_AND_EXECUTION_STATE_READY",
+        "python_controls_cancel": True,
+        "cancel_if": cancel_if,
+        "ready_checks": {
+            "setup_ok": setup_ok,
+            "zone_ok": zone_ok,
+            "vsa_gate_ok": vsa_gate_ok,
+            "rr_ok": rr_ok,
+            "levels_ready": levels_ready,
+            "directional_levels_ok": directional_levels_ok,
+        },
+    }
+
+
 def build_ea_payload(symbol: str, signal: Dict) -> Dict:
     """
     EA execution payload.
@@ -1031,6 +1152,21 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
 
     signal_id = f"{symbol}-{timestamp}-{direction}".replace(":", "").replace("/", "")
 
+    trade_management = _python_trade_management_contract(direction, signal, setup_info)
+    plan_lifecycle = _python_plan_lifecycle_contract(
+        signal_id=signal_id,
+        action=action,
+        execution_state=execution_state,
+        direction=direction,
+        trade_direction_ok=trade_direction_ok,
+        setup_ok=setup_ok,
+        zone_ok=zone_ok,
+        vsa_gate_ok=vsa_gate_ok,
+        rr_ok=rr_ok,
+        levels_ready=levels_ready,
+        directional_levels_ok=directional_levels_ok,
+    )
+
     return {
         "signal_id": signal_id,
         "symbol": symbol,
@@ -1058,11 +1194,18 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
         "setup_state": setup_info["setup_state"],
         "scenario_state": signal.get("scenario_state") or (signal.get("engine_v4", {}) or {}).get("scenario_state"),
         "journey_state": signal.get("journey_state") or (signal.get("engine_v4", {}) or {}).get("journey_state"),
-        "trade_management": signal.get("trade_management") or (signal.get("engine_v4", {}) or {}).get("trade_management"),
+        "trade_management": trade_management,
         "break_prediction": signal.get("break_prediction") or (signal.get("engine_v4", {}) or {}).get("break_prediction"),
         "bos_confirmed": bool(signal.get("bos_confirmed") or (signal.get("engine_v4", {}) or {}).get("bos_confirmed")),
         "vsa_gate": signal.get("vsa_gate") or (signal.get("engine_v4", {}) or {}).get("vsa_gate"),
         "checkpoint_price": _safe_float(signal.get("checkpoint_price") or (signal.get("engine_v4", {}) or {}).get("checkpoint_price")),
+
+        "visual_sl_source": trade_management.get("visual_sl_source", "NONE"),
+        "tp_route": trade_management.get("tp_route", {}),
+        "plan_lifecycle": plan_lifecycle,
+        "command_owner": "PYTHON_CLOUD",
+        "ea_role": "EXECUTION_ONLY",
+        "ea_execute_only": True,
 
         "session": gates.get("session", ""),
         "entry_mode": signal.get("entry_mode", "V12_DECISION"),
