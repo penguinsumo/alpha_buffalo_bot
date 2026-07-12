@@ -7,6 +7,11 @@ ROLE:
     - No threshold logic
     - No strategy logic
 
+SOURCE OF TRUTH:
+    - BKK/GMT+7 Forex market hours
+    - Summer: Mar-Oct
+    - Winter: Nov-Feb
+
 OUTPUT:
     - session: ASIA | LONDON | NY | CLOSED
     - liquidity: NORMAL | OVERLAP | NONE
@@ -18,33 +23,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta, time
 import os
-from typing import Optional, Dict, Any
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 
-# =========================================================
-# TIMEBASE (BKK STANDARD)
-# =========================================================
-
 BKK = timezone(timedelta(hours=7))
 NEW_YORK = ZoneInfo("America/New_York")
-
-
-# =========================================================
-# SESSION CONSTANTS (BKK TIME)
-# =========================================================
-
-ASIA_START   = time(5, 0)
-ASIA_END     = time(14, 0)
-
-LONDON_START = time(14, 0)
-LONDON_END   = time(19, 0)
-
-NY_START     = time(19, 0)
-NY_END       = time(2, 15)
-
-CLOSED_START = time(2, 15)
-CLOSED_END   = time(5, 0)
 
 
 def _configured_closed_dates() -> set[str]:
@@ -86,10 +70,6 @@ def market_closed_reason(dt: Optional[datetime] = None) -> str:
     return ""
 
 
-# =========================================================
-# DATA MODEL (READ ONLY OUTPUT)
-# =========================================================
-
 @dataclass(frozen=True)
 class SessionState:
     session: str
@@ -99,86 +79,94 @@ class SessionState:
     timestamp: str
 
 
-# =========================================================
-# SESSION CLOCK (READ ONLY)
-# =========================================================
-
 class SessionClock:
     """
     Read-only market session provider.
-    No trading logic allowed.
+    No trading decision logic allowed.
     """
 
     def get(self, dt: Optional[datetime] = None) -> SessionState:
-
         if dt is None:
             dt = datetime.now(BKK)
-
         elif dt.tzinfo is None:
             dt = dt.replace(tzinfo=BKK)
-
         else:
             dt = dt.astimezone(BKK)
 
-        bkk_time = dt.time()
-        bkk_hour = dt.hour
-
         utc_dt = dt.astimezone(timezone.utc)
-        utc_hour = utc_dt.hour
+        bkk_minutes = dt.hour * 60 + dt.minute
+
+        schedule = self._schedule(dt.month)
 
         session = "CLOSED"
         liquidity = "NONE"
 
-        # Full-day closure is resolved before intraday sessions.  Previously a
-        # Saturday/Sunday at 05:00 BKK was incorrectly classified as ASIA.
+        # Hard closure uses the real New York weekend/DST boundary and explicit
+        # deployment holidays before resolving the seasonal Bangkok sessions.
         if market_closed_reason(dt):
             return SessionState(
                 session="CLOSED",
                 liquidity="NONE",
-                bkk_hour=bkk_hour,
-                utc_hour=utc_hour,
+                bkk_hour=dt.hour,
+                utc_hour=utc_dt.hour,
                 timestamp=dt.isoformat(),
             )
 
-        # =========================
-        # SESSION RESOLUTION
-        # =========================
-
-        if ASIA_START <= bkk_time < ASIA_END:
+        if schedule["asia_start"] <= bkk_minutes < schedule["london_start"]:
             session = "ASIA"
             liquidity = "NORMAL"
 
-        elif LONDON_START <= bkk_time < LONDON_END:
+        elif schedule["london_start"] <= bkk_minutes < schedule["ny_start"]:
             session = "LONDON"
             liquidity = "NORMAL"
 
-        elif bkk_time >= LONDON_START or bkk_time < time(2, 15):
+        elif bkk_minutes >= schedule["ny_start"] or bkk_minutes < schedule["ny_end"]:
             session = "NY"
-
-            # liquidity refinement only (no decision logic)
-            if 19 <= bkk_hour <= 23:
-                liquidity = "OVERLAP"
-            else:
-                liquidity = "NORMAL"
-
-        elif CLOSED_START <= bkk_time < CLOSED_END:
-            session = "CLOSED"
-            liquidity = "NONE"
+            liquidity = "OVERLAP" if self._in_overlap(bkk_minutes, schedule) else "NORMAL"
 
         return SessionState(
             session=session,
             liquidity=liquidity,
-            bkk_hour=bkk_hour,
-            utc_hour=utc_hour,
-            timestamp=dt.isoformat()
+            bkk_hour=dt.hour,
+            utc_hour=utc_dt.hour,
+            timestamp=dt.isoformat(),
         )
 
+    @staticmethod
+    def _schedule(month: int) -> dict:
+        # Summer: Mar-Oct / Winter: Nov-Feb
+        if 3 <= month <= 10:
+            return {
+                "season": "SUMMER",
+                "asia_start": 4 * 60,
+                "london_start": 14 * 60,
+                "ny_start": 19 * 60,
+                "ny_end": 2 * 60,
+                "overlap_start": 19 * 60,
+                "overlap_end": 23 * 60,
+            }
 
-# =========================================================
-# BACKTEST SUPPORT ONLY
-# =========================================================
+        return {
+            "season": "WINTER",
+            "asia_start": 5 * 60,
+            "london_start": 15 * 60,
+            "ny_start": 20 * 60,
+            "ny_end": 3 * 60,
+            "overlap_start": 20 * 60,
+            "overlap_end": 24 * 60,
+        }
+
+    @staticmethod
+    def _in_overlap(bkk_minutes: int, schedule: dict) -> bool:
+        start = schedule["overlap_start"]
+        end = schedule["overlap_end"]
+
+        if end >= 24 * 60:
+            return bkk_minutes >= start
+
+        return start <= bkk_minutes < end
+
 
 class SessionClockBacktest(SessionClock):
-
     def get_many(self, dates: list[datetime]):
         return [self.get(dt) for dt in dates]

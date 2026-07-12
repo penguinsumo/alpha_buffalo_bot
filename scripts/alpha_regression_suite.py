@@ -328,11 +328,14 @@ def test_signal_latest_preserves_canonical_contract() -> None:
     runtime_signal = _runtime_signal(candidate)
     ea = build_ea_payload("XAUUSD", runtime_signal)
     expected = build_api_signal_response("XAUUSD", runtime_signal, ea)
+    original_clock_get = runtime.SessionClock.get
 
     try:
+        runtime.SessionClock.get = lambda self, dt=None: NY_SESSION
         _set_latest_signal(expected)
         served = signal_latest(key=API_LICENSE_KEY, symbol="XAU/USD")
     finally:
+        runtime.SessionClock.get = original_clock_get
         _set_latest_signal({})
 
     assert_equal(served["status"], SIGNAL, "endpoint status")
@@ -969,6 +972,40 @@ def test_weekend_is_hard_closed_before_session_resolution() -> None:
     assert_equal(market_closed_reason(winter_after_open), "", "winter Sunday NY post-open")
 
 
+def test_seasonal_bangkok_sessions_survive_conflict_resolution() -> None:
+    summer = pd.Timestamp("2026-07-14T04:30:00+07:00").to_pydatetime()
+    winter_before = pd.Timestamp("2026-12-08T04:30:00+07:00").to_pydatetime()
+    winter_after = pd.Timestamp("2026-12-08T05:30:00+07:00").to_pydatetime()
+    assert_equal(SessionClock().get(summer).session, "ASIA", "summer ASIA opens at 04:00 BKK")
+    assert_equal(SessionClock().get(winter_before).session, "CLOSED", "winter pre-ASIA gap")
+    assert_equal(SessionClock().get(winter_after).session, "ASIA", "winter ASIA opens at 05:00 BKK")
+
+
+def test_closed_market_pipeline_is_canonical_and_skips_data_fetch() -> None:
+    closed = SessionState(
+        session="CLOSED",
+        liquidity="NONE",
+        bkk_hour=10,
+        utc_hour=3,
+        timestamp="2026-07-12T10:00:00+07:00",
+    )
+    original_clock_get = runtime.SessionClock.get
+    original_fetch = runtime.fetch_multi_tf
+    try:
+        runtime.SessionClock.get = lambda self, dt=None: closed
+        runtime.fetch_multi_tf = lambda symbol: (_ for _ in ()).throw(
+            AssertionError("closed-market pipeline must not fetch candles")
+        )
+        payload = runtime.run_pipeline()
+        assert_equal(payload["status"], NO_SIGNAL, "closed market canonical status")
+        assert_equal(payload["direction"], None, "closed market has no direction")
+        assert_equal(payload["ea"]["action"], "WAIT", "EA waits while closed")
+        assert_equal(payload["ea"]["execution_state"], "BLOCKED", "EA closed state")
+    finally:
+        runtime.SessionClock.get = original_clock_get
+        runtime.fetch_multi_tf = original_fetch
+
+
 def test_configured_holiday_blocks_session_and_telegram() -> None:
     holiday = pd.Timestamp("2026-07-13T10:00:00+07:00").to_pydatetime()
     original = os.environ.get("ALPHA_MARKET_CLOSED_DATES")
@@ -1077,6 +1114,8 @@ TESTS = [
     test_telegram_public_output_hides_engine_internals,
     test_closed_market_suppresses_all_telegram,
     test_weekend_is_hard_closed_before_session_resolution,
+    test_seasonal_bangkok_sessions_survive_conflict_resolution,
+    test_closed_market_pipeline_is_canonical_and_skips_data_fetch,
     test_configured_holiday_blocks_session_and_telegram,
     test_weekend_direct_sender_never_calls_telegram_network,
     test_every_repository_telegram_sender_uses_central_closed_gate,
