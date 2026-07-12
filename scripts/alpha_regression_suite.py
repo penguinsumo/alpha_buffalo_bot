@@ -7,6 +7,7 @@ ideas are mined back into production.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from engine_v4.router import SignalRouter
 from engine_v4.sell_engine import SellSignalEngine
 from engine_v4.session_gate import GateResult
 from execution_lifecycle import ExecutionLifecycleManager, closed_ha5_evidence
-from session_clock import SessionClock, SessionState
+from session_clock import SessionClock, SessionState, market_closed_reason
 from alpha_buffalo_signal import (
     API_LICENSE_KEY,
     _set_latest_signal,
@@ -944,6 +945,63 @@ def test_closed_market_suppresses_all_telegram() -> None:
         runtime.requests.post = original_post
 
 
+def test_weekend_is_hard_closed_before_session_resolution() -> None:
+    saturday = pd.Timestamp("2026-07-11T10:00:00+07:00").to_pydatetime()
+    sunday = pd.Timestamp("2026-07-12T20:00:00+07:00").to_pydatetime()
+    for value in (saturday, sunday):
+        assert_equal(market_closed_reason(value), "WEEKEND", "weekend close reason")
+        assert_equal(SessionClock().get(value).session, "CLOSED", "weekend session")
+        assert_true(
+            not runtime._telegram_market_is_open(now=value),
+            "weekend must block Telegram even during an intraday session hour",
+        )
+
+    summer_before_close = pd.Timestamp("2026-07-11T03:30:00+07:00").to_pydatetime()
+    summer_after_close = pd.Timestamp("2026-07-11T04:30:00+07:00").to_pydatetime()
+    winter_before_open = pd.Timestamp("2026-12-07T05:30:00+07:00").to_pydatetime()
+    winter_after_open = pd.Timestamp("2026-12-07T06:30:00+07:00").to_pydatetime()
+    assert_equal(market_closed_reason(summer_before_close), "", "Friday NY pre-close remains openable")
+    assert_equal(market_closed_reason(summer_after_close), "WEEKEND", "Friday NY post-close")
+    assert_equal(market_closed_reason(winter_before_open), "WEEKEND", "winter Sunday NY pre-open")
+    assert_equal(market_closed_reason(winter_after_open), "", "winter Sunday NY post-open")
+
+
+def test_configured_holiday_blocks_session_and_telegram() -> None:
+    holiday = pd.Timestamp("2026-07-13T10:00:00+07:00").to_pydatetime()
+    original = os.environ.get("ALPHA_MARKET_CLOSED_DATES")
+    try:
+        os.environ["ALPHA_MARKET_CLOSED_DATES"] = "2026-07-13"
+        assert_equal(market_closed_reason(holiday), "CONFIGURED_HOLIDAY", "holiday reason")
+        assert_equal(SessionClock().get(holiday).session, "CLOSED", "holiday session")
+        assert_true(not runtime._telegram_market_is_open(now=holiday), "holiday Telegram gate")
+    finally:
+        if original is None:
+            os.environ.pop("ALPHA_MARKET_CLOSED_DATES", None)
+        else:
+            os.environ["ALPHA_MARKET_CLOSED_DATES"] = original
+
+
+def test_weekend_direct_sender_never_calls_telegram_network() -> None:
+    weekend = pd.Timestamp("2026-07-12T20:00:00+07:00").to_pydatetime()
+    original_clock_get = runtime.SessionClock.get
+    original_enabled = runtime._telegram_enabled
+    original_post = runtime.requests.post
+    try:
+        runtime.SessionClock.get = lambda self, dt=None: original_clock_get(self, weekend)
+        runtime._telegram_enabled = lambda: True
+        runtime.requests.post = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Telegram network call must not occur on weekend")
+        )
+        assert_true(
+            not runtime.send_telegram_message("weekend blocked"),
+            "direct Telegram sender must fail closed on weekend",
+        )
+    finally:
+        runtime.SessionClock.get = original_clock_get
+        runtime._telegram_enabled = original_enabled
+        runtime.requests.post = original_post
+
+
 TESTS = [
     test_upper_sell_not_blocked_by_bullish_context,
     test_lower_buy_not_blocked_by_bearish_context,
@@ -971,6 +1029,9 @@ TESTS = [
     test_execution_api_fill_and_ack_round_trip,
     test_telegram_public_output_hides_engine_internals,
     test_closed_market_suppresses_all_telegram,
+    test_weekend_is_hard_closed_before_session_resolution,
+    test_configured_holiday_blocks_session_and_telegram,
+    test_weekend_direct_sender_never_calls_telegram_network,
 ]
 
 

@@ -459,10 +459,13 @@ def format_telegram_signal(payload: Dict) -> str:
     ])
 
 
-def _telegram_market_is_open(payload: Dict | None = None) -> bool:
-    """Fail closed when either runtime clock or payload reports CLOSED."""
+def _telegram_market_is_open(
+    payload: Dict | None = None,
+    now: datetime | None = None,
+) -> bool:
+    """Fail closed for weekend/holiday/intraday closure or a CLOSED payload."""
     try:
-        current_session = str(SessionClock().get().session or "CLOSED").upper()
+        current_session = str(SessionClock().get(now).session or "CLOSED").upper()
     except Exception:
         return False
 

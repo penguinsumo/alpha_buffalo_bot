@@ -114,6 +114,16 @@ Customer output should show only:
 - TP1 / TP2
 - public watch label such as `WAIT SETUP 🔴 SELL`
 
+### Telegram Market-Closed Gate
+
+- Every automated Telegram path must fail closed before making a network call.
+- XAU weekend closure follows New York time with DST: Friday 17:00 ET through
+  Sunday 18:00 ET.
+- Intraday `session=CLOSED` also blocks all signal and trend messages.
+- Full-day exchange/broker holidays are configured as Bangkok dates with
+  `ALPHA_MARKET_CLOSED_DATES=YYYY-MM-DD,YYYY-MM-DD`.
+- `ALPHA_FORCE_MARKET_CLOSED=true` is the emergency global kill switch.
+
 ## Integration Contract
 
 Older branches and zip files contain useful ideas. They must be mined through tests, not copied directly.
