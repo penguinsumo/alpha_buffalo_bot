@@ -16,6 +16,7 @@ from scenario_scanner import ScenarioScanner
 from signal_composer import SignalComposer
 from signal_schema import BLOCKED, ERROR, NO_SIGNAL, SIGNAL, create_signal
 from session_clock import SessionClock
+from telegram_guard import guarded_telegram_post, telegram_market_is_open
 from engine_v4.session_gate import SessionGate
 from execution_lifecycle import execution_lifecycle
 
@@ -464,11 +465,6 @@ def _telegram_market_is_open(
     now: datetime | None = None,
 ) -> bool:
     """Fail closed for weekend/holiday/intraday closure or a CLOSED payload."""
-    try:
-        current_session = str(SessionClock().get(now).session or "CLOSED").upper()
-    except Exception:
-        return False
-
     payload = payload or {}
     signal = payload.get("signal", {}) or {}
     ea = payload.get("ea", {}) or {}
@@ -476,7 +472,7 @@ def _telegram_market_is_open(
         ea.get("session") or _deep_get(signal, ["gates", "session"], "") or ""
     ).upper()
 
-    return current_session != "CLOSED" and payload_session != "CLOSED"
+    return telegram_market_is_open(payload_session=payload_session, now=now)
 
 
 def send_telegram_message(text: str) -> bool:
@@ -489,7 +485,7 @@ def send_telegram_message(text: str) -> bool:
     ok = False
     for chat_id in TELEGRAM_CHAT_IDS:
         try:
-            response = requests.post(
+            response = guarded_telegram_post(
                 url,
                 json={
                     "chat_id": chat_id,
@@ -499,6 +495,8 @@ def send_telegram_message(text: str) -> bool:
                 },
                 timeout=TELEGRAM_TIMEOUT_SECONDS,
             )
+            if response is None:
+                return False
             if response.status_code == 200:
                 ok = True
             else:

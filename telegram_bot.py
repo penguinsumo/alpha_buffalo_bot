@@ -1,18 +1,25 @@
 from fastapi import FastAPI, Request
-import os, requests, uvicorn
+import os, uvicorn
+from telegram_guard import guarded_telegram_post, telegram_market_is_open
 
 app = FastAPI()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
 def send_message(chat_id, text):
-    if not TOKEN:
-        return
+    if not TOKEN or not telegram_market_is_open():
+        return False
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=5)
+        response = guarded_telegram_post(
+            url,
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=5,
+        )
+        return bool(response is not None and response.status_code == 200)
     except Exception as e:
         print(f"Send error: {e}")
+        return False
 
 @app.get("/health")
 def health():

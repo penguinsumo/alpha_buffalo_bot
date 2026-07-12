@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import alpha_buffalo_signal as runtime
+import early_warning as warning_runtime
+import telegram_bot as telegram_bot_runtime
+import telegram_guard as telegram_guard_runtime
 from engine_v4.buy_engine import BuySignalEngine
 from engine_v4.final_gate import FinalGate
 from engine_v4.indicators import (
@@ -1002,6 +1005,50 @@ def test_weekend_direct_sender_never_calls_telegram_network() -> None:
         runtime.requests.post = original_post
 
 
+def test_every_repository_telegram_sender_uses_central_closed_gate() -> None:
+    original_force = os.environ.get("ALPHA_FORCE_MARKET_CLOSED")
+    original_runtime_enabled = runtime._telegram_enabled
+    original_bot_token = telegram_bot_runtime.TOKEN
+    original_post = telegram_guard_runtime.requests.post
+    try:
+        os.environ["ALPHA_FORCE_MARKET_CLOSED"] = "true"
+        runtime._telegram_enabled = lambda: True
+        telegram_bot_runtime.TOKEN = "test-token"
+        telegram_guard_runtime.requests.post = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("No repository Telegram sender may reach the network while closed")
+        )
+
+        assert_true(not runtime.send_telegram_message("blocked"), "runtime sender gate")
+        assert_true(not warning_runtime.send_telegram("blocked"), "early warning sender gate")
+        assert_true(not telegram_bot_runtime.send_message("1", "blocked"), "bot sender gate")
+        assert_true(
+            telegram_guard_runtime.guarded_telegram_post(
+                "https://api.telegram.org/test",
+                json={"text": "blocked"},
+                timeout=1,
+            ) is None,
+            "network-layer sender gate",
+        )
+
+        for relative in (
+            "alpha_buffalo_signal.py",
+            "early_warning.py",
+            "telegram_bot.py",
+            "scripts/friday_sim.py",
+        ):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            assert_true("guarded_telegram_post" in source, f"{relative} central sender")
+            assert_true("requests.post(" not in source, f"{relative} bypasses central sender")
+    finally:
+        if original_force is None:
+            os.environ.pop("ALPHA_FORCE_MARKET_CLOSED", None)
+        else:
+            os.environ["ALPHA_FORCE_MARKET_CLOSED"] = original_force
+        runtime._telegram_enabled = original_runtime_enabled
+        telegram_bot_runtime.TOKEN = original_bot_token
+        telegram_guard_runtime.requests.post = original_post
+
+
 TESTS = [
     test_upper_sell_not_blocked_by_bullish_context,
     test_lower_buy_not_blocked_by_bearish_context,
@@ -1032,6 +1079,7 @@ TESTS = [
     test_weekend_is_hard_closed_before_session_resolution,
     test_configured_holiday_blocks_session_and_telegram,
     test_weekend_direct_sender_never_calls_telegram_network,
+    test_every_repository_telegram_sender_uses_central_closed_gate,
 ]
 
 

@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.expanduser("~/alpha_buffalo_bot"))
 import requests, pandas as pd, warnings, logging
 from datetime import datetime, timedelta
 from core.config.loader import load_env_safely
+from telegram_guard import guarded_telegram_post, telegram_market_is_open
 
 load_env_safely()
 warnings.filterwarnings('ignore')
@@ -65,7 +66,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 NOTIFY_IDS = os.getenv("NOTIFY_IDS", "")
 CHAT_IDS = [x.strip() for x in NOTIFY_IDS.split(",") if x.strip()]
 
-if TELEGRAM_TOKEN and CHAT_IDS:
+if TELEGRAM_TOKEN and CHAT_IDS and telegram_market_is_open():
     print(f"\n📤 Sending last 3 SELL signals to {len(CHAT_IDS)} chat(s)...")
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     for s in sell_signals[-3:]:   # ส่ง 3 ตัวล่าสุด
@@ -80,7 +81,14 @@ if TELEGRAM_TOKEN and CHAT_IDS:
         )
         for chat_id in CHAT_IDS:
             try:
-                resp = requests.post(url, json={"chat_id": chat_id, "text": msg}, timeout=5)
+                resp = guarded_telegram_post(
+                    url,
+                    json={"chat_id": chat_id, "text": msg},
+                    timeout=5,
+                )
+                if resp is None:
+                    print("⛔ Market closed — Telegram suppressed")
+                    break
                 if resp.status_code == 200:
                     print(f"✅ Sent SELL @ {s.entry_price:.2f} to {chat_id}")
                 else:
@@ -88,6 +96,8 @@ if TELEGRAM_TOKEN and CHAT_IDS:
             except Exception as e:
                 print(f"❌ Failed to {chat_id}: {e}")
     print("✅ Done")
+elif TELEGRAM_TOKEN and CHAT_IDS:
+    print("⛔ Market closed — Telegram suppressed")
 else:
     print("⚠️ Telegram not configured")
 
