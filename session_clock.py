@@ -7,6 +7,11 @@ ROLE:
     - No threshold logic
     - No strategy logic
 
+SOURCE OF TRUTH:
+    - BKK/GMT+7 Forex market hours
+    - Summer: Mar-Oct
+    - Winter: Nov-Feb
+
 OUTPUT:
     - session: ASIA | LONDON | NY | CLOSED
     - liquidity: NORMAL | OVERLAP | NONE
@@ -16,37 +21,12 @@ OUTPUT:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta, time
-from typing import Optional, Dict, Any
+from datetime import datetime, timezone, timedelta
+from typing import Optional
 
-
-# =========================================================
-# TIMEBASE (BKK STANDARD)
-# =========================================================
 
 BKK = timezone(timedelta(hours=7))
 
-
-# =========================================================
-# SESSION CONSTANTS (BKK TIME)
-# =========================================================
-
-ASIA_START   = time(5, 0)
-ASIA_END     = time(14, 0)
-
-LONDON_START = time(14, 0)
-LONDON_END   = time(19, 0)
-
-NY_START     = time(19, 0)
-NY_END       = time(2, 15)
-
-CLOSED_START = time(2, 15)
-CLOSED_END   = time(5, 0)
-
-
-# =========================================================
-# DATA MODEL (READ ONLY OUTPUT)
-# =========================================================
 
 @dataclass(frozen=True)
 class SessionState:
@@ -57,75 +37,101 @@ class SessionState:
     timestamp: str
 
 
-# =========================================================
-# SESSION CLOCK (READ ONLY)
-# =========================================================
-
 class SessionClock:
     """
     Read-only market session provider.
-    No trading logic allowed.
+    No trading decision logic allowed.
     """
 
     def get(self, dt: Optional[datetime] = None) -> SessionState:
-
         if dt is None:
             dt = datetime.now(BKK)
-
         elif dt.tzinfo is None:
             dt = dt.replace(tzinfo=BKK)
-
         else:
             dt = dt.astimezone(BKK)
 
-        bkk_time = dt.time()
-        bkk_hour = dt.hour
-
         utc_dt = dt.astimezone(timezone.utc)
-        utc_hour = utc_dt.hour
+        bkk_minutes = dt.hour * 60 + dt.minute
+        weekday = dt.weekday()  # Mon=0 ... Sun=6
+
+        schedule = self._schedule(dt.month)
 
         session = "CLOSED"
         liquidity = "NONE"
 
-        # =========================
-        # SESSION RESOLUTION
-        # =========================
-
-        if ASIA_START <= bkk_time < ASIA_END:
-            session = "ASIA"
-            liquidity = "NORMAL"
-
-        elif LONDON_START <= bkk_time < LONDON_END:
-            session = "LONDON"
-            liquidity = "NORMAL"
-
-        elif bkk_time >= LONDON_START or bkk_time < time(2, 15):
-            session = "NY"
-
-            # liquidity refinement only (no decision logic)
-            if 19 <= bkk_hour <= 23:
-                liquidity = "OVERLAP"
-            else:
+        if not self._is_weekend_closed(weekday, bkk_minutes, schedule):
+            if schedule["asia_start"] <= bkk_minutes < schedule["london_start"]:
+                session = "ASIA"
                 liquidity = "NORMAL"
 
-        elif CLOSED_START <= bkk_time < CLOSED_END:
-            session = "CLOSED"
-            liquidity = "NONE"
+            elif schedule["london_start"] <= bkk_minutes < schedule["ny_start"]:
+                session = "LONDON"
+                liquidity = "NORMAL"
+
+            elif bkk_minutes >= schedule["ny_start"] or bkk_minutes < schedule["ny_end"]:
+                session = "NY"
+                liquidity = "OVERLAP" if self._in_overlap(bkk_minutes, schedule) else "NORMAL"
 
         return SessionState(
             session=session,
             liquidity=liquidity,
-            bkk_hour=bkk_hour,
-            utc_hour=utc_hour,
-            timestamp=dt.isoformat()
+            bkk_hour=dt.hour,
+            utc_hour=utc_dt.hour,
+            timestamp=dt.isoformat(),
         )
 
+    @staticmethod
+    def _schedule(month: int) -> dict:
+        # Summer: Mar-Oct / Winter: Nov-Feb
+        if 3 <= month <= 10:
+            return {
+                "season": "SUMMER",
+                "asia_start": 4 * 60,
+                "london_start": 14 * 60,
+                "ny_start": 19 * 60,
+                "ny_end": 2 * 60,
+                "overlap_start": 19 * 60,
+                "overlap_end": 23 * 60,
+            }
 
-# =========================================================
-# BACKTEST SUPPORT ONLY
-# =========================================================
+        return {
+            "season": "WINTER",
+            "asia_start": 5 * 60,
+            "london_start": 15 * 60,
+            "ny_start": 20 * 60,
+            "ny_end": 3 * 60,
+            "overlap_start": 20 * 60,
+            "overlap_end": 24 * 60,
+        }
+
+    @staticmethod
+    def _is_weekend_closed(weekday: int, bkk_minutes: int, schedule: dict) -> bool:
+        # Saturday after NY close -> closed
+        if weekday == 5 and bkk_minutes >= schedule["ny_end"]:
+            return True
+
+        # Sunday all day closed
+        if weekday == 6:
+            return True
+
+        # Monday before Asia/Sydney open -> closed
+        if weekday == 0 and bkk_minutes < schedule["asia_start"]:
+            return True
+
+        return False
+
+    @staticmethod
+    def _in_overlap(bkk_minutes: int, schedule: dict) -> bool:
+        start = schedule["overlap_start"]
+        end = schedule["overlap_end"]
+
+        if end >= 24 * 60:
+            return bkk_minutes >= start
+
+        return start <= bkk_minutes < end
+
 
 class SessionClockBacktest(SessionClock):
-
     def get_many(self, dates: list[datetime]):
         return [self.get(dt) for dt in dates]

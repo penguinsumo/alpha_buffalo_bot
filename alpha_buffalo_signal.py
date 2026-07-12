@@ -80,6 +80,116 @@ LAST_TELEGRAM_H1_UPDATE_KEY = ""
 LAST_TELEGRAM_LOCK = threading.Lock()
 
 
+def _market_open_gate() -> Dict:
+    session_state = SessionClock().get()
+    block_reason = "MARKET_CLOSED" if session_state.session == "CLOSED" else ""
+
+    return {
+        "market_open": not bool(block_reason),
+        "block_reason": block_reason,
+        "session_state": session_state,
+        "timestamp": session_state.timestamp,
+    }
+
+
+def _market_closed_payload(symbol: str, public_symbol: str, gate: Dict) -> Dict:
+    session_state = gate["session_state"]
+    timestamp = str(gate.get("timestamp") or datetime.now(timezone.utc).isoformat())
+    block_reason = str(gate.get("block_reason") or "MARKET_CLOSED")
+    signal_id = f"{public_symbol}-{timestamp}-MARKET_CLOSED".replace(":", "").replace("/", "")
+
+    return {
+        "status": "ok",
+        "symbol": public_symbol,
+        "generated_at": timestamp,
+        "signal": {
+            "timestamp": timestamp,
+            "decision": {
+                "action": "NONE",
+                "grade": "WAIT",
+                "score": 0,
+                "confidence": 0.0,
+                "reason": block_reason,
+            },
+            "gates": {
+                "session": session_state.session,
+                "liquidity": session_state.liquidity,
+                "market_open": False,
+                "block_reason": block_reason,
+            },
+            "blueprint": {
+                "symbol": public_symbol,
+                "session": session_state.session,
+                "is_valid": False,
+                "validation_errors": [block_reason],
+            },
+        },
+        "ea": {
+            "signal_id": signal_id,
+            "symbol": public_symbol,
+            "action": "WAIT",
+            "execution_state": "BLOCKED",
+            "direction": "NONE",
+            "entry": 0.0,
+            "sl": 0.0,
+            "tp_final": 0.0,
+            "risk_pct": 0.0,
+            "levels_ready": False,
+            "directional_levels_ok": False,
+            "max_bars": 0,
+            "rr": 0.0,
+            "rr_ok": False,
+            "risk_points": 0.0,
+            "reward_points": 0.0,
+            "min_rr": TRADE_MIN_RR,
+            "zone_ok": False,
+            "setup_ok": False,
+            "vsa_gate_ok": False,
+            "setup_state": "MARKET_CLOSED",
+            "scenario_state": "MARKET_CLOSED",
+            "journey_state": "NONE",
+            "trade_management": {
+                "managed_by": "PYTHON_CLOUD",
+                "ea_role": "EXECUTION_ONLY",
+                "entry_source": "NONE",
+                "visual_sl_source": "NONE",
+                "tp_route": {},
+            },
+            "visual_sl_source": "NONE",
+            "tp_route": {},
+            "plan_lifecycle": {
+                "plan_id": signal_id,
+                "plan_status": "NONE",
+                "action_source": "PYTHON_CLOUD",
+                "ea_may_open_from_armed": False,
+                "ea_open_rule": "ONLY_ACTION_OPEN_AND_EXECUTION_STATE_READY",
+                "python_controls_cancel": True,
+                "cancel_if": [block_reason, "SESSION_EXPIRED"],
+                "ready_checks": {
+                    "setup_ok": False,
+                    "zone_ok": False,
+                    "vsa_gate_ok": False,
+                    "rr_ok": False,
+                    "levels_ready": False,
+                    "directional_levels_ok": False,
+                },
+            },
+            "command_owner": "PYTHON_CLOUD",
+            "ea_role": "EXECUTION_ONLY",
+            "ea_execute_only": True,
+            "session": session_state.session,
+            "entry_mode": "MARKET_CLOSED_GUARD",
+            "exit_mode": "NONE",
+            "confidence": 0.0,
+            "score": 0.0,
+            "grade": "WAIT",
+            "reason": block_reason,
+            "block_reason": block_reason,
+            "market_open": False,
+        },
+    }
+
+
 def verify_license(key: str) -> bool:
     return bool(key) and key == API_LICENSE_KEY
 
@@ -641,6 +751,11 @@ def format_telegram_trend_update(payload: Dict) -> str:
 def maybe_broadcast_trend_update(payload: Dict) -> None:
     """Send one compact market-state update per H1 hour. Never opens or bypasses trade gates."""
     global LAST_TELEGRAM_H1_UPDATE_KEY
+
+    ea = payload.get("ea", {}) or {}
+    if str(ea.get("execution_state", "")).upper() == "BLOCKED":
+        return
+
     if not TELEGRAM_NOTIFY_TREND_UPDATE:
         return
     if not _telegram_enabled():
@@ -1227,6 +1342,10 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
     }
 
 def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBOL_DEFAULT) -> Dict:
+    market_gate = _market_open_gate()
+    if not market_gate["market_open"]:
+        return _market_closed_payload(symbol=symbol, public_symbol=public_symbol, gate=market_gate)
+
     df_4h, df_1h, df_15m = fetch_multi_tf(symbol)
 
     scanner = ScenarioScanner()
@@ -1336,6 +1455,12 @@ def signal_latest(key: str = "", symbol: str = SYMBOL_DEFAULT):
         raise HTTPException(status_code=403, detail="INVALID_LICENSE")
 
     public_symbol = symbol.replace("/", "")
+    market_gate = _market_open_gate()
+    if not market_gate["market_open"]:
+        payload = _market_closed_payload(symbol=symbol, public_symbol=public_symbol, gate=market_gate)
+        _set_latest_signal(payload)
+        return payload
+
     cached = _get_latest_signal()
     if cached and cached.get("symbol") == public_symbol:
         return cached
