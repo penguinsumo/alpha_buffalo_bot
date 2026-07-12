@@ -56,6 +56,40 @@ BOS or CHoCH is a promotion condition, not a V4 entry requirement.
 - `rr_ok=false` means EA action must be `WAIT`.
 - A candidate with `rr_ok=false` may still populate `engine_v4` so the runtime can explain why it is waiting.
 
+### Session Kivanc / Deep Sweep Entry
+
+- Asia uses the Kivanc `0.618-0.786` reaction window.
+- London/NY use the deeper V12 `0.720-0.886` reaction window.
+- A sweep through `0.886` to the `1.00` boundary is setup-only, never an immediate entry.
+- The sweep wick becomes a VSA pressure/absorption wall.
+- BUY requires a later break of the wall candle high and reclaim inside `0.886-0.720`.
+- SELL mirrors BUY: later break of the wall candle low and reclaim inside `0.720-0.886`.
+- A normal zone pinbar is also setup-only; entry requires a later break of its high/low.
+- SL is outside the preserved sweep/pinbar wall, not inside the wick.
+
+### Position Lifecycle
+
+Python owns the position state and EA executes commands only.
+
+1. EA opens only `action=OPEN` and `execution_state=READY`.
+2. EA confirms the actual fill to `POST /execution/fill`.
+3. At TP1 Python emits one idempotent `PARTIAL_CLOSE_MOVE_BE` command.
+4. After the EA ACK, TP1 is durable, remaining SL is at entry, and HA5 trailing is armed.
+5. BUY closes the remainder after two completed red HA5 bars; SELL uses two completed green HA5 bars.
+6. Hard SL, TP2 final, and max-bars timeout remain active. Missing M5 data means HOLD, never a guessed HA exit.
+7. EA ACKs every management command through `POST /execution/ack`; a command is retried with the same ID until ACK.
+
+Runtime endpoints:
+
+- `GET /execution/state`
+- `GET /execution/command`
+- `POST /execution/fill`
+- `POST /execution/ack`
+
+The runtime permits one active position per symbol and blocks a second open while it is managing that position.
+The exact EA request/ACK payloads and persistent-state requirement are defined
+in `EA_EXECUTION_CONTRACT.md`.
+
 ## Customer Message Contract
 
 Telegram customer-facing output must not expose engine internals.
@@ -79,6 +113,16 @@ Customer output should show only:
 - SL zone
 - TP1 / TP2
 - public watch label such as `WAIT SETUP 🔴 SELL`
+
+### Telegram Market-Closed Gate
+
+- Every automated Telegram path must fail closed before making a network call.
+- XAU weekend closure follows New York time with DST: Friday 17:00 ET through
+  Sunday 18:00 ET.
+- Intraday `session=CLOSED` also blocks all signal and trend messages.
+- Full-day exchange/broker holidays are configured as Bangkok dates with
+  `ALPHA_MARKET_CLOSED_DATES=YYYY-MM-DD,YYYY-MM-DD`.
+- `ALPHA_FORCE_MARKET_CLOSED=true` is the emergency global kill switch.
 
 ## Integration Contract
 

@@ -21,11 +21,53 @@ OUTPUT:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time
+import os
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 
 BKK = timezone(timedelta(hours=7))
+NEW_YORK = ZoneInfo("America/New_York")
+
+
+def _configured_closed_dates() -> set[str]:
+    """Full-day XAU closures in Bangkok date, supplied by deployment config."""
+    raw = os.getenv("ALPHA_MARKET_CLOSED_DATES", "")
+    return {value.strip() for value in raw.split(",") if value.strip()}
+
+
+def _force_market_closed() -> bool:
+    return os.getenv("ALPHA_FORCE_MARKET_CLOSED", "false").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def market_closed_reason(dt: Optional[datetime] = None) -> str:
+    """Return the hard full-day closure reason, or an empty string when openable."""
+    if dt is None:
+        local = datetime.now(BKK)
+    elif dt.tzinfo is None:
+        local = dt.replace(tzinfo=BKK)
+    else:
+        local = dt.astimezone(BKK)
+
+    if _force_market_closed():
+        return "FORCED_CLOSED"
+    # XAU weekend follows New York and DST: Friday 17:00 ET through Sunday
+    # 18:00 ET.  A plain Bangkok weekday check would close several valid late-
+    # Friday NY hours and open one hour early during US standard time.
+    new_york = local.astimezone(NEW_YORK)
+    ny_weekday = new_york.weekday()
+    if (
+        (ny_weekday == 4 and new_york.time() >= time(17, 0))
+        or ny_weekday == 5
+        or (ny_weekday == 6 and new_york.time() < time(18, 0))
+    ):
+        return "WEEKEND"
+    if local.date().isoformat() in _configured_closed_dates():
+        return "CONFIGURED_HOLIDAY"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -53,25 +95,34 @@ class SessionClock:
 
         utc_dt = dt.astimezone(timezone.utc)
         bkk_minutes = dt.hour * 60 + dt.minute
-        weekday = dt.weekday()  # Mon=0 ... Sun=6
 
         schedule = self._schedule(dt.month)
 
         session = "CLOSED"
         liquidity = "NONE"
 
-        if not self._is_weekend_closed(weekday, bkk_minutes, schedule):
-            if schedule["asia_start"] <= bkk_minutes < schedule["london_start"]:
-                session = "ASIA"
-                liquidity = "NORMAL"
+        # Hard closure uses the real New York weekend/DST boundary and explicit
+        # deployment holidays before resolving the seasonal Bangkok sessions.
+        if market_closed_reason(dt):
+            return SessionState(
+                session="CLOSED",
+                liquidity="NONE",
+                bkk_hour=dt.hour,
+                utc_hour=utc_dt.hour,
+                timestamp=dt.isoformat(),
+            )
 
-            elif schedule["london_start"] <= bkk_minutes < schedule["ny_start"]:
-                session = "LONDON"
-                liquidity = "NORMAL"
+        if schedule["asia_start"] <= bkk_minutes < schedule["london_start"]:
+            session = "ASIA"
+            liquidity = "NORMAL"
 
-            elif bkk_minutes >= schedule["ny_start"] or bkk_minutes < schedule["ny_end"]:
-                session = "NY"
-                liquidity = "OVERLAP" if self._in_overlap(bkk_minutes, schedule) else "NORMAL"
+        elif schedule["london_start"] <= bkk_minutes < schedule["ny_start"]:
+            session = "LONDON"
+            liquidity = "NORMAL"
+
+        elif bkk_minutes >= schedule["ny_start"] or bkk_minutes < schedule["ny_end"]:
+            session = "NY"
+            liquidity = "OVERLAP" if self._in_overlap(bkk_minutes, schedule) else "NORMAL"
 
         return SessionState(
             session=session,
@@ -104,22 +155,6 @@ class SessionClock:
             "overlap_start": 20 * 60,
             "overlap_end": 24 * 60,
         }
-
-    @staticmethod
-    def _is_weekend_closed(weekday: int, bkk_minutes: int, schedule: dict) -> bool:
-        # Saturday after NY close -> closed
-        if weekday == 5 and bkk_minutes >= schedule["ny_end"]:
-            return True
-
-        # Sunday all day closed
-        if weekday == 6:
-            return True
-
-        # Monday before Asia/Sydney open -> closed
-        if weekday == 0 and bkk_minutes < schedule["asia_start"]:
-            return True
-
-        return False
 
     @staticmethod
     def _in_overlap(bkk_minutes: int, schedule: dict) -> bool:

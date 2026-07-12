@@ -10,11 +10,11 @@ Stage 3: Score threshold hit  → Fire Signal to EA
 """
 
 import os
-import requests
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from typing import Optional
+from telegram_guard import guarded_telegram_post, telegram_market_is_open
 
 BKK          = timezone(timedelta(hours=7))
 TELEGRAM_API = f"https://api.telegram.org/bot{os.getenv('TELEGRAM_TOKEN','')}"
@@ -52,15 +52,19 @@ _warn_states: dict = {}
 
 
 def send_telegram(msg: str, chat_id: int = None):
+    if not telegram_market_is_open():
+        return False
     try:
-        requests.post(
+        response = guarded_telegram_post(
             f"{TELEGRAM_API}/sendMessage",
             json={"chat_id": chat_id or ADMIN_ID,
                   "text": msg, "parse_mode": "HTML"},
             timeout=10,
         )
+        return bool(response is not None and response.status_code == 200)
     except Exception as e:
         print(f"⚠️ telegram error: {e}")
+        return False
 
 
 def _can_alert(symbol: str, stage: int) -> bool:

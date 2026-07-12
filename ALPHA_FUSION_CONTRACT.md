@@ -14,8 +14,34 @@ The engine order is:
 3. Build V4 scalp/range candidate.
 4. Apply RR for execution readiness.
 5. Promote to V5 only when BOS/CHoCH/structure confirms.
-6. Use trend, H1, H4, and session as context and management, not as the first
+6. Take TP1, move the remainder to BE, then trail with two closed opposite HA5 bars.
+7. Use trend, H1, H4, and session as context and management, not as the first
    V4 entry gate.
+
+## Kivanc Wall/Reclaim State Machine
+
+- Asia location: `0.618-0.786`.
+- London/NY location: `0.720-0.886`.
+- Premium overlap: `0.720-0.786`.
+- A London/NY move to the `1.00` boundary may arm a deep sweep wall when PRZ,
+  BB edge, pinbar/wick, and winning VSA pressure are present.
+- The `1.00` candle cannot enter. A later candle must break the wall toward the
+  trade and close back in `0.886-0.720` before the setup is executable.
+- BUY/SELL are strict mirrors and share the same API schema.
+- Without real volume, the evidence is labelled a VSA pressure/absorption
+  proxy; it is not claimed as confirmed exchange volume.
+
+## End-to-End Exit Contract
+
+- TP1: partial close and move the remainder to BE.
+- TP2: close all remaining size.
+- HA5 trailing: enabled only after the TP1/BE command is ACKed.
+- BUY trailing exit: two completed red HA5 bars.
+- SELL trailing exit: two completed green HA5 bars.
+- Hard SL and max-bars timeout are Python-owned fallback exits.
+- Commands are idempotent and remain pending until the EA ACKs them.
+- Risk permissions use closed-trade R accounting for daily loss and
+  consecutive-loss gates; they do not choose trade direction.
 
 ## PRZ Rule That Must Survive Every Refactor
 
@@ -172,7 +198,7 @@ Every future AI session should run:
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/alpha_pycache python3 -m py_compile alpha_buffalo_signal.py engine_v4/*.py scripts/alpha_regression_suite.py
-python3 scripts/alpha_regression_suite.py
+PYTHONPYCACHEPREFIX=/private/tmp/alpha_pycache python3 scripts/alpha_regression_suite.py
 ```
 
 The regression suite must keep proving:
@@ -185,3 +211,7 @@ The regression suite must keep proving:
 - BOS/CHoCH promotes to V5
 - no BOS/CHoCH stays V4 scalp/range
 - public Telegram hides internal logic
+- deep `1.00` sweep requires a later reclaim before entry
+- Kivanc pinbar requires a later high/low break
+- TP1/BE and HA5 exits mirror correctly for BUY and SELL
+- active-position commands are idempotent and block duplicate opens
