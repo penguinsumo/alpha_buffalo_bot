@@ -6,6 +6,7 @@ ideas are mined back into production.
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -17,9 +18,16 @@ sys.path.insert(0, str(ROOT))
 import alpha_buffalo_signal as runtime
 from engine_v4.buy_engine import BuySignalEngine
 from engine_v4.final_gate import FinalGate
+from engine_v4.indicators import (
+    _apply_deep_sweep_reclaim_state,
+    _apply_zone_pinbar_break_state,
+    _asia_session_mask,
+    add_indicators,
+)
 from engine_v4.router import SignalRouter
 from engine_v4.sell_engine import SellSignalEngine
 from engine_v4.session_gate import GateResult
+from execution_lifecycle import ExecutionLifecycleManager, closed_ha5_evidence
 from session_clock import SessionClock, SessionState
 from alpha_buffalo_signal import (
     API_LICENSE_KEY,
@@ -444,6 +452,371 @@ def test_no_choch_stays_v4_range() -> None:
     assert_true(not routed[0]["bos_confirmed"], "no CHoCH must not mark BOS confirmed")
 
 
+def test_session_kivanc_mask_uses_bangkok_asia_hours() -> None:
+    index = pd.DatetimeIndex([
+        pd.Timestamp("2026-07-10T00:00:00Z"),  # 07:00 BKK
+        pd.Timestamp("2026-07-10T08:00:00Z"),  # 15:00 BKK
+    ])
+    mask = _asia_session_mask(index)
+    assert_true(bool(mask.iloc[0]), "07:00 BKK must use ASIA 0.618-0.786 map")
+    assert_true(not bool(mask.iloc[1]), "15:00 BKK must use deep 0.720-0.886 map")
+
+
+def test_indicators_do_not_read_future_daily_or_h1_bars() -> None:
+    index = pd.date_range("2026-06-01", periods=420, freq="15min", tz="UTC")
+    base = pd.DataFrame(index=index)
+    base["open"] = [100.0 + (i % 40) * 0.1 for i in range(len(index))]
+    base["close"] = base["open"] + 0.05
+    base["high"] = base[["open", "close"]].max(axis=1) + 0.3
+    base["low"] = base[["open", "close"]].min(axis=1) - 0.3
+    base["volume"] = 100.0
+    changed = base.copy()
+    changed.loc[index[360]:, "high"] += 500.0
+    changed.loc[index[360]:, "low"] -= 500.0
+
+    original_indicators = add_indicators(base)
+    changed_indicators = add_indicators(changed)
+    for column in ("Swing_H", "Swing_L", "Fib_072", "Fib_0886", "Trend_1H_Up"):
+        left = original_indicators.loc[:index[359], column]
+        right = changed_indicators.loc[:index[359], column]
+        assert_true(left.equals(right), f"future candles changed historical {column}")
+
+
+def _deep_state_row() -> dict:
+    return {
+        "open": 101.0,
+        "high": 102.0,
+        "low": 99.0,
+        "close": 101.0,
+        "ATR14": 1.0,
+        "Fib_0886": 102.28,
+        "Fib_072": 105.6,
+        "Fib_R_072": 114.4,
+        "Fib_R_0886": 117.72,
+        "HA_Bullish": False,
+        "HA_Bearish": False,
+        "VSA_Buy_Wins": False,
+        "VSA_Sell_Wins": False,
+        "Deep_Buy_Wall_Candidate": False,
+        "Deep_Sell_Wall_Candidate": False,
+    }
+
+
+def test_deep_buy_requires_wall_then_reclaim() -> None:
+    wall = _deep_state_row()
+    wall.update({"Deep_Buy_Wall_Candidate": True, "VSA_Buy_Wins": True})
+    wait = _deep_state_row()
+    wait.update({"low": 100.5, "high": 102.1, "close": 101.8})
+    reclaim = _deep_state_row()
+    reclaim.update({"low": 101.5, "high": 103.2, "close": 103.0, "HA_Bullish": True})
+
+    result = _apply_deep_sweep_reclaim_state(frame([wall, wait, reclaim]))
+    assert_true(not bool(result["Deep_Buy_Reclaim_Trigger"].iloc[0]), "1.00 wall candle is SETUP, not entry")
+    assert_true(not bool(result["Deep_Buy_Reclaim_Trigger"].iloc[1]), "price below 0.886 must keep waiting")
+    assert_true(bool(result["Deep_Buy_Reclaim_Trigger"].iloc[2]), "break of wall high inside 0.886-0.720 must trigger BUY")
+    assert_equal(float(result["Deep_Buy_Wall_Low"].iloc[2]), 99.0, "BUY wall must preserve sweep wick low")
+
+
+def test_deep_sell_requires_wall_then_reclaim() -> None:
+    wall = _deep_state_row()
+    wall.update(
+        {
+            "open": 119.0,
+            "high": 121.0,
+            "low": 118.0,
+            "close": 119.0,
+            "Deep_Sell_Wall_Candidate": True,
+            "VSA_Sell_Wins": True,
+        }
+    )
+    wait = _deep_state_row()
+    wait.update({"open": 118.8, "high": 119.2, "low": 118.1, "close": 118.4})
+    reclaim = _deep_state_row()
+    reclaim.update({"open": 118.0, "high": 118.2, "low": 116.8, "close": 117.0, "HA_Bearish": True})
+
+    result = _apply_deep_sweep_reclaim_state(frame([wall, wait, reclaim]))
+    assert_true(not bool(result["Deep_Sell_Reclaim_Trigger"].iloc[0]), "1.00 wall candle is SETUP, not entry")
+    assert_true(not bool(result["Deep_Sell_Reclaim_Trigger"].iloc[1]), "price above 0.886 must keep waiting")
+    assert_true(bool(result["Deep_Sell_Reclaim_Trigger"].iloc[2]), "break of wall low inside 0.886-0.720 must trigger SELL")
+    assert_equal(float(result["Deep_Sell_Wall_High"].iloc[2]), 121.0, "SELL wall must preserve sweep wick high")
+
+
+def test_deep_reclaim_engines_use_wall_for_sl() -> None:
+    buy_row = base_row()
+    buy_row.update(
+        {
+            "V4_Buy_Setup": True,
+            "V4_Sell_Setup": False,
+            "V4_Buy_Entry_Zone": True,
+            "V4_Sell_Entry_Zone": False,
+            "V4_Block_Buy_At_Upper": False,
+            "VSA_Buy_Wins": True,
+            "VSA_Sell_Wins": False,
+            "VSA_Buy_Pressure": 0.8,
+            "VSA_Sell_Pressure": 0.2,
+            "Pine_PA_Bull_Confirmed": True,
+            "Pine_PA_Bear_Confirmed": False,
+            "BB_PRZ_Support_Confluence": False,
+            "BB_PRZ_Resistance_Confluence": False,
+            "Deep_Buy_Reclaim_Trigger": True,
+            "Deep_Buy_Wall_Low": 96.0,
+            "Deep_Buy_Wall_High": 99.0,
+            "Micro_Lot0_Low": 98.0,
+            "Kivanc_Scenario_State": "READY_BUY_RECLAIM",
+        }
+    )
+    buy = BuySignalEngine().evaluate(frame([buy_row]), 0, NY_SESSION, ALLOWED)
+    assert_true(buy is not None, "deep BUY reclaim must create candidate")
+    assert_equal(buy["entry_mode"], "V4_BUY_DEEP_100_WALL_RECLAIM", "deep BUY entry mode")
+    assert_true(buy["sl"] < 96.0, "deep BUY SL must sit below VSA wall low")
+    assert_equal(buy["vsa_wall_low"], 96.0, "deep BUY wall evidence")
+
+    sell_row = base_row()
+    sell_row.update(
+        {
+            "BB_PRZ_Resistance_Confluence": False,
+            "Deep_Sell_Reclaim_Trigger": True,
+            "Deep_Sell_Wall_Low": 101.0,
+            "Deep_Sell_Wall_High": 104.0,
+            "Micro_Lot0_High": 102.0,
+            "Kivanc_Scenario_State": "READY_SELL_RECLAIM",
+        }
+    )
+    sell = SellSignalEngine().evaluate(frame([sell_row]), 0, NY_SESSION, ALLOWED)
+    assert_true(sell is not None, "deep SELL reclaim must create candidate")
+    assert_equal(sell["entry_mode"], "V4_SELL_DEEP_100_WALL_RECLAIM", "deep SELL entry mode")
+    assert_true(sell["sl"] > 104.0, "deep SELL SL must sit above VSA wall high")
+    assert_equal(sell["vsa_wall_high"], 104.0, "deep SELL wall evidence")
+
+
+def test_zone_pinbar_requires_later_break_and_mirrors() -> None:
+    buy_rows = [
+        {
+            "open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0,
+            "Zone_Buy_Pinbar_Candidate": True, "Zone_Sell_Pinbar_Candidate": False,
+            "In_Session_Kivanc_Buy_Zone": True, "In_Session_Kivanc_Sell_Zone": False,
+            "HA_Bullish": True, "HA_Bearish": False,
+            "VSA_Buy_Wins": True, "VSA_Sell_Wins": False,
+        },
+        {
+            "open": 100.0, "high": 102.0, "low": 99.5, "close": 101.5,
+            "Zone_Buy_Pinbar_Candidate": False, "Zone_Sell_Pinbar_Candidate": False,
+            "In_Session_Kivanc_Buy_Zone": True, "In_Session_Kivanc_Sell_Zone": False,
+            "HA_Bullish": True, "HA_Bearish": False,
+            "VSA_Buy_Wins": True, "VSA_Sell_Wins": False,
+        },
+    ]
+    buy = _apply_zone_pinbar_break_state(frame(buy_rows))
+    assert_true(not bool(buy["Zone_Buy_Pinbar_Trigger"].iloc[0]), "pinbar candle is setup only")
+    assert_true(bool(buy["Zone_Buy_Pinbar_Trigger"].iloc[1]), "later high break triggers BUY")
+    assert_equal(float(buy["Zone_Buy_Wall_Low"].iloc[1]), 98.0, "BUY preserves wick wall")
+
+    sell_rows = [
+        {
+            "open": 101.0, "high": 102.0, "low": 99.0, "close": 100.0,
+            "Zone_Buy_Pinbar_Candidate": False, "Zone_Sell_Pinbar_Candidate": True,
+            "In_Session_Kivanc_Buy_Zone": False, "In_Session_Kivanc_Sell_Zone": True,
+            "HA_Bullish": False, "HA_Bearish": True,
+            "VSA_Buy_Wins": False, "VSA_Sell_Wins": True,
+        },
+        {
+            "open": 100.0, "high": 100.5, "low": 97.5, "close": 98.5,
+            "Zone_Buy_Pinbar_Candidate": False, "Zone_Sell_Pinbar_Candidate": False,
+            "In_Session_Kivanc_Buy_Zone": False, "In_Session_Kivanc_Sell_Zone": True,
+            "HA_Bullish": False, "HA_Bearish": True,
+            "VSA_Buy_Wins": False, "VSA_Sell_Wins": True,
+        },
+    ]
+    sell = _apply_zone_pinbar_break_state(frame(sell_rows))
+    assert_true(bool(sell["Zone_Sell_Pinbar_Trigger"].iloc[1]), "later low break triggers SELL")
+    assert_equal(float(sell["Zone_Sell_Wall_High"].iloc[1]), 102.0, "SELL preserves wick wall")
+
+
+def _m5_trend(
+    direction: str,
+    offset: float = 0.0,
+    start: str = "2026-07-10 15:00",
+) -> pd.DataFrame:
+    index = pd.date_range(start, periods=6, freq="5min", tz="UTC")
+    if direction == "DOWN":
+        opens = [106 + offset, 105 + offset, 104 + offset, 103 + offset, 102 + offset, 101 + offset]
+        closes = [105 + offset, 104 + offset, 103 + offset, 102 + offset, 101 + offset, 100 + offset]
+    else:
+        opens = [100 + offset, 101 + offset, 102 + offset, 103 + offset, 104 + offset, 105 + offset]
+        closes = [101 + offset, 102 + offset, 103 + offset, 104 + offset, 105 + offset, 106 + offset]
+    return pd.DataFrame({
+        "open": opens,
+        "high": [max(o, c) + 0.2 for o, c in zip(opens, closes)],
+        "low": [min(o, c) - 0.2 for o, c in zip(opens, closes)],
+        "close": closes,
+    }, index=index)
+
+
+def test_ha5_uses_two_closed_bars() -> None:
+    bearish = closed_ha5_evidence(_m5_trend("DOWN"))
+    bullish = closed_ha5_evidence(_m5_trend("UP"))
+    assert_true(bearish["two_bearish"], "two completed HA5 red bars required")
+    assert_true(bullish["two_bullish"], "two completed HA5 green bars required")
+    assert_equal(len(bearish["timestamps"]), 2, "HA evidence exposes exactly two closed bars")
+
+
+def test_live_m5_extreme_detects_tp1_between_polls() -> None:
+    manager = ExecutionLifecycleManager()
+    manager.register_fill(
+        symbol="XAUUSD", signal_id="m5-hit", ticket="100", direction="BUY",
+        entry=100, sl=98, tp1=105, tp2=110, filled_at="2026-07-10T14:59:00+00:00",
+    )
+    command = manager.evaluate("XAUUSD", 103, _m5_trend("UP"))
+    assert_equal(command["action"], "PARTIAL_CLOSE_MOVE_BE", "M5 high detects missed TP1 touch")
+
+
+def test_lifecycle_buy_tp1_be_then_ha5_exit_is_idempotent() -> None:
+    manager = ExecutionLifecycleManager()
+    first = manager.register_fill(
+        symbol="XAUUSD", signal_id="buy-1", ticket="101", direction="BUY",
+        entry=100, sl=98, tp1=105, tp2=120, filled_at="2026-07-10T14:50:00+00:00",
+    )
+    repeated = manager.register_fill(
+        symbol="XAUUSD", signal_id="buy-1", ticket="101", direction="BUY",
+        entry=100, sl=98, tp1=105, tp2=120, filled_at="2026-07-10T14:50:00+00:00",
+    )
+    assert_equal(repeated, first, "same fill retry must not reset position")
+
+    tp1 = manager.evaluate("XAUUSD", 105)
+    retry = manager.evaluate("XAUUSD", 105)
+    assert_equal(tp1["action"], "PARTIAL_CLOSE_MOVE_BE", "TP1 command")
+    assert_equal(retry["command_id"], tp1["command_id"], "poll retry keeps command id")
+    state = manager.acknowledge(
+        symbol="XAUUSD", command_id=tp1["command_id"], success=True, remaining_pct=50,
+        acknowledged_at="2026-07-10T15:00:00+00:00",
+    )
+    assert_true(state["tp1_done"] and state["be_armed"], "TP1 ACK arms BE")
+    assert_equal(state["sl"], 100.0, "BUY SL moves to entry")
+
+    post_be = _m5_trend("DOWN", offset=10, start="2026-07-10 15:05")
+    pre_be = pd.DataFrame(
+        {"open": [101], "high": [102], "low": [95], "close": [101]},
+        index=pd.DatetimeIndex([pd.Timestamp("2026-07-10T14:55:00Z")]),
+    )
+    close = manager.evaluate(
+        "XAUUSD", 104, pd.concat([pre_be, post_be]), now="2026-07-10T15:40:00+00:00"
+    )
+    assert_equal(close["action"], "CLOSE_ALL", "opposite HA5 closes BUY after BE")
+    assert_equal(close["reason"], "HA5_OPPOSITE_2_AFTER_BE", "HA5 close reason")
+    manager.acknowledge(
+        symbol="XAUUSD", command_id=close["command_id"], success=True, r_multiple=1.5,
+    )
+    assert_true(not manager.has_active("XAUUSD"), "close ACK removes position")
+
+
+def test_lifecycle_sell_mirror_and_hard_risk_gate() -> None:
+    manager = ExecutionLifecycleManager()
+    manager.register_fill(
+        symbol="XAUUSD", signal_id="sell-1", ticket="201", direction="SELL",
+        entry=100, sl=102, tp1=95, tp2=80, filled_at="2026-07-10T14:50:00+00:00",
+    )
+    tp1 = manager.evaluate("XAUUSD", 95)
+    manager.acknowledge(
+        symbol="XAUUSD", command_id=tp1["command_id"], success=True, remaining_pct=50,
+        acknowledged_at="2026-07-10T15:00:00+00:00",
+    )
+    post_be = _m5_trend("UP", offset=-10, start="2026-07-10 15:05")
+    pre_be = pd.DataFrame(
+        {"open": [99], "high": [105], "low": [98], "close": [99]},
+        index=pd.DatetimeIndex([pd.Timestamp("2026-07-10T14:55:00Z")]),
+    )
+    close = manager.evaluate(
+        "XAUUSD", 96, pd.concat([pre_be, post_be]), now="2026-07-10T15:40:00+00:00"
+    )
+    assert_equal(close["reason"], "HA5_OPPOSITE_2_AFTER_BE", "SELL uses two green HA5")
+    manager.acknowledge(
+        symbol="XAUUSD", command_id=close["command_id"], success=True, r_multiple=1.0,
+    )
+
+    for count in range(3):
+        signal_id = f"loss-{count}"
+        manager.register_fill(
+            symbol="XAUUSD", signal_id=signal_id, ticket=signal_id, direction="BUY",
+            entry=100, sl=98, tp1=105, tp2=110,
+        )
+        stop = manager.evaluate("XAUUSD", 98)
+        manager.acknowledge(
+            symbol="XAUUSD", command_id=stop["command_id"], success=True, r_multiple=-1.0,
+        )
+    assert_true(not manager.risk_permissions("XAUUSD")["daily_dd_ok"], "3R daily loss blocks entries")
+
+
+def test_active_position_forces_ea_to_management_only() -> None:
+    manager = ExecutionLifecycleManager()
+    manager.register_fill(
+        symbol="XAUUSD", signal_id="active-1", ticket="301", direction="BUY",
+        entry=100, sl=98, tp1=105, tp2=110,
+    )
+    original_manager = runtime.execution_lifecycle
+    original_fetch_m5 = runtime.fetch_management_m5
+    try:
+        runtime.execution_lifecycle = manager
+        runtime.fetch_management_m5 = lambda symbol: _m5_trend("UP")
+        managed = runtime._attach_execution_lifecycle(
+            data_symbol="XAU/USD",
+            public_symbol="XAUUSD",
+            df_15m=pd.DataFrame({"close": [101.0]}),
+            ea={"action": "OPEN", "execution_state": "READY", "plan_lifecycle": {}},
+        )
+        assert_equal(managed["action"], "WAIT", "active position blocks another open")
+        assert_equal(managed["execution_state"], "MANAGING", "EA becomes management-only")
+    finally:
+        runtime.execution_lifecycle = original_manager
+        runtime.fetch_management_m5 = original_fetch_m5
+
+
+def test_execution_api_fill_and_ack_round_trip() -> None:
+    class JsonRequest:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def json(self):
+            return self.payload
+
+    manager = ExecutionLifecycleManager()
+    original_manager = runtime.execution_lifecycle
+    original_cache = runtime._get_latest_signal()
+    plan = {
+        "signal_id": "api-buy-1",
+        "action": "OPEN",
+        "execution_state": "READY",
+        "direction": "BUY",
+        "entry": 100.0,
+        "sl": 98.0,
+        "tp1": 105.0,
+        "tp_final": 110.0,
+        "max_bars": 40,
+    }
+    try:
+        runtime.execution_lifecycle = manager
+        runtime._set_latest_signal({"symbol": "XAUUSD", "ea": plan})
+        fill = asyncio.run(runtime.execution_fill(JsonRequest({
+            "key": API_LICENSE_KEY,
+            "symbol": "XAUUSD",
+            "signal_id": "api-buy-1",
+            "ticket": "9001",
+            "fill_price": 100.0,
+        })))
+        assert_equal(fill["status"], "accepted", "fill endpoint accepts matching ready plan")
+        command = manager.evaluate("XAUUSD", 105.0)
+        ack = asyncio.run(runtime.execution_ack(JsonRequest({
+            "key": API_LICENSE_KEY,
+            "symbol": "XAUUSD",
+            "command_id": command["command_id"],
+            "success": True,
+            "remaining_pct": 50,
+        })))
+        assert_true(ack["result"]["be_armed"], "ACK endpoint persists BE state")
+    finally:
+        runtime.execution_lifecycle = original_manager
+        runtime._set_latest_signal(original_cache)
+
+
 def test_telegram_public_output_hides_engine_internals() -> None:
     engine = {
         "direction": "SELL",
@@ -584,6 +957,18 @@ TESTS = [
     test_error_uses_same_schema_and_never_executes,
     test_choch_promotes_to_v5_journey,
     test_no_choch_stays_v4_range,
+    test_session_kivanc_mask_uses_bangkok_asia_hours,
+    test_indicators_do_not_read_future_daily_or_h1_bars,
+    test_deep_buy_requires_wall_then_reclaim,
+    test_deep_sell_requires_wall_then_reclaim,
+    test_deep_reclaim_engines_use_wall_for_sl,
+    test_zone_pinbar_requires_later_break_and_mirrors,
+    test_ha5_uses_two_closed_bars,
+    test_live_m5_extreme_detects_tp1_between_polls,
+    test_lifecycle_buy_tp1_be_then_ha5_exit_is_idempotent,
+    test_lifecycle_sell_mirror_and_hard_risk_gate,
+    test_active_position_forces_ea_to_management_only,
+    test_execution_api_fill_and_ack_round_trip,
     test_telegram_public_output_hides_engine_internals,
     test_closed_market_suppresses_all_telegram,
 ]

@@ -9,7 +9,7 @@ from typing import Dict, Tuple
 
 import pandas as pd
 import requests
-from fastapi import FastAPI, HTTPException, Request, Response, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 
 from decision_engine import DecisionEngine
 from scenario_scanner import ScenarioScanner
@@ -17,6 +17,7 @@ from signal_composer import SignalComposer
 from signal_schema import BLOCKED, ERROR, NO_SIGNAL, SIGNAL, create_signal
 from session_clock import SessionClock
 from engine_v4.session_gate import SessionGate
+from execution_lifecycle import execution_lifecycle
 
 # Engine V4 baseline imports. Keep these globals available for _run_engine_v4_baseline().
 ENGINE_V4_IMPORT_ERROR = None
@@ -42,6 +43,7 @@ LATEST_SIGNAL_CACHE: dict = {}
 LATEST_SIGNAL_LOCK = threading.Lock()
 
 TF_FETCH_TTL_SECONDS = {
+    "5min": int(os.getenv("TF_5M_TTL_SECONDS", "45")),
     "15min": int(os.getenv("TF_15M_TTL_SECONDS", "180")),
     "1h": int(os.getenv("TF_1H_TTL_SECONDS", "900")),
     "4h": int(os.getenv("TF_4H_TTL_SECONDS", "1800")),
@@ -176,6 +178,15 @@ def fetch_multi_tf(symbol: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFram
     df_1h = _fetch_cached_tf(symbol, "1h")
     df_15m = _fetch_cached_tf(symbol, "15min")
     return df_4h, df_1h, df_15m
+
+
+def fetch_management_m5(symbol: str) -> pd.DataFrame | None:
+    """Fetch M5 for active-position management without breaking entry scans."""
+    try:
+        return _fetch_cached_tf(symbol, "5min", outputsize=250)
+    except Exception as exc:
+        print(f"AlphaBuffalo M5 management unavailable | {type(exc).__name__}: {exc}", flush=True)
+        return None
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -794,7 +805,10 @@ def _ensure_engine_v4_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
     out.index.name = "datetime"
     return out
 
-def _run_engine_v4_baseline(df_15m: pd.DataFrame) -> Dict | None:
+def _run_engine_v4_baseline(
+    df_15m: pd.DataFrame,
+    symbol: str = PUBLIC_SYMBOL_DEFAULT,
+) -> Dict | None:
 
     if add_indicators is None or SignalRouter is None or FinalGate is None or BuySignalEngine is None or SellSignalEngine is None:
         print(
@@ -810,6 +824,11 @@ def _run_engine_v4_baseline(df_15m: pd.DataFrame) -> Dict | None:
         "BB_PRZ_Support_Confluence", "BB_PRZ_Resistance_Confluence",
         "Pine_PA_Bull_Confirmed", "Pine_PA_Bear_Confirmed",
         "VSA_Buy_Pressure", "VSA_Sell_Pressure", "VSA_Buy_Wins", "VSA_Sell_Wins",
+        "In_Session_Kivanc_Buy_Zone", "In_Session_Kivanc_Sell_Zone",
+        "Deep_Buy_PRZ_Context", "Deep_Sell_PRZ_Context",
+        "Deep_Buy_Wall_Candidate", "Deep_Sell_Wall_Candidate",
+        "Deep_Buy_Reclaim_Active", "Deep_Sell_Reclaim_Active",
+        "Deep_Buy_Reclaim_Trigger", "Deep_Sell_Reclaim_Trigger", "Kivanc_Scenario_State",
         "V4_Buy_Entry_Zone", "V4_Sell_Entry_Zone", "V4_Buy_Setup", "V4_Sell_Setup",
         "V4_Block_Sell_At_Lower", "V4_Block_Buy_At_Upper", "CHoCH_Bull", "CHoCH_Bear",
     ]
@@ -821,12 +840,13 @@ def _run_engine_v4_baseline(df_15m: pd.DataFrame) -> Dict | None:
         df = _ensure_engine_v4_datetime_index(df_15m)
         df = add_indicators(df)
         session_clock = SessionClock()
+        risk_permissions = execution_lifecycle.risk_permissions(symbol)
         routed = SignalRouter(
             clock=session_clock,
             gate=FinalGate(session_clock),
             buy_engine=BuySignalEngine(),
             sell_engine=SellSignalEngine(),
-        ).process(df)
+        ).process(df, **risk_permissions)
         signal = routed[0] if routed else None
 
         tail = df.tail(int(os.getenv("ENGINE_V4_LOOKBACK_BARS", "6")))
@@ -1016,22 +1036,25 @@ def _python_trade_management_contract(direction: str, signal: Dict, setup_info: 
 
     management.setdefault("managed_by", "PYTHON_CLOUD")
     management.setdefault("ea_role", "EXECUTION_ONLY")
-    management.setdefault("ha_tf", "15M")
-    management.setdefault("m5_fallback", "NOT_AVAILABLE_USE_HA15")
+    management["ha_tf"] = "5M_CLOSED_BARS"
+    management["m5_fallback"] = "HOLD_USE_SL_TP_TIMEOUT"
+    management["ha_trailing_activation"] = "AFTER_TP1_AND_BE_ONLY"
     management.setdefault("bos_required_always", False)
 
     if direction == "BUY":
         management.setdefault("entry_source", "VSA_DEMAND_WALL_REACTION")
         management.setdefault("entry_confirmation", "REACTION_CONFIRM_OR_BULLISH_PINBAR")
         management.setdefault("visual_sl_source", "VSA_WALL_LOW")
+        management.setdefault("vsa_wall_low", _safe_float(engine_v4.get("vsa_wall_low")))
+        management.setdefault("vsa_wall_high", _safe_float(engine_v4.get("vsa_wall_high")))
         management.setdefault("sl_rule", "BELOW_VSA_WALL_LOW")
         management.setdefault("tp_route", {
             "tp1": "UPPER_BB_CHECKPOINT",
             "tp2": "NEXT_PRZ",
             "tp3": "HARMONIC_ROUTE_OR_NEXT_HARMONIC_PRZ",
         })
-        management.setdefault("ha_close_all_if", "HA15_RED")
-        management.setdefault("move_be_if", "HA15_SECOND_GREEN_AFTER_8_MIN")
+        management["ha_close_all_if"] = "TWO_CLOSED_HA5_RED_AFTER_BE"
+        management["move_be_if"] = "TP1_REACHED"
         management.setdefault("bos_pullback_entry", "BOS_UP_PULLBACK_HA15_GREEN")
         management.setdefault("add_layer_rule", "BOS_UP_PULLBACK_HA15_GREEN")
 
@@ -1039,14 +1062,16 @@ def _python_trade_management_contract(direction: str, signal: Dict, setup_info: 
         management.setdefault("entry_source", "VSA_SUPPLY_WALL_REJECTION")
         management.setdefault("entry_confirmation", "REACTION_CONFIRM_OR_BEARISH_PINBAR")
         management.setdefault("visual_sl_source", "VSA_WALL_HIGH")
+        management.setdefault("vsa_wall_low", _safe_float(engine_v4.get("vsa_wall_low")))
+        management.setdefault("vsa_wall_high", _safe_float(engine_v4.get("vsa_wall_high")))
         management.setdefault("sl_rule", "ABOVE_VSA_WALL_HIGH")
         management.setdefault("tp_route", {
             "tp1": "LOWER_BB_CHECKPOINT",
             "tp2": "NEXT_PRZ",
             "tp3": "HARMONIC_ROUTE_OR_NEXT_HARMONIC_PRZ",
         })
-        management.setdefault("ha_close_all_if", "HA15_GREEN")
-        management.setdefault("move_be_if", "HA15_SECOND_RED_AFTER_8_MIN")
+        management["ha_close_all_if"] = "TWO_CLOSED_HA5_GREEN_AFTER_BE"
+        management["move_be_if"] = "TP1_REACHED"
         management.setdefault("bos_add_layer", "M15_BOS_BODY_CLOSE_DOWN_OR_RETEST_REJECTION")
         management.setdefault("layer_1", "VSA_SUPPLY_WALL_OR_PRZ_RESISTANCE_REJECTION")
         management.setdefault("layer_2", "M15_BOS_DOWN_OR_BOS_RETEST_REJECTION")
@@ -1173,14 +1198,21 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
         blueprint.get("plan_b_tp1"),
     )
 
+    tp1 = _first_float(
+        signal.get("tp1_price"),
+        signal.get("tp1"),
+        (signal.get("engine_v4", {}) or {}).get("tp1_price"),
+        tp_final,
+    )
+
     blueprint_valid = bool(gates.get("blueprint_valid", blueprint.get("is_valid", False)))
     trade_direction_ok = signal_status == SIGNAL and direction in {"BUY", "SELL"}
-    levels_ready = entry > 0 and sl > 0 and tp_final > 0
+    levels_ready = entry > 0 and sl > 0 and tp1 > 0 and tp_final > 0
 
     if direction == "BUY":
-        directional_levels_ok = sl < entry < tp_final
+        directional_levels_ok = sl < entry < tp1 <= tp_final
     elif direction == "SELL":
-        directional_levels_ok = tp_final < entry < sl
+        directional_levels_ok = tp_final <= tp1 < entry < sl
     else:
         directional_levels_ok = False
 
@@ -1246,6 +1278,7 @@ def build_ea_payload(symbol: str, signal: Dict) -> Dict:
 
         "entry": entry,
         "sl": sl,
+        "tp1": tp1,
         "tp_final": tp_final,
         "risk_pct": _safe_float(signal.get("risk_pct"), 0.0075),
         "levels_ready": levels_ready,
@@ -1346,6 +1379,49 @@ def build_api_signal_response(symbol: str, signal: Dict, ea: Dict) -> Dict:
         "ea": ea,
     }
 
+
+def _latest_market_price(df: pd.DataFrame | None) -> float:
+    if df is None or getattr(df, "empty", True) or "close" not in df:
+        return 0.0
+    return _safe_float(df["close"].iloc[-1])
+
+
+def _attach_execution_lifecycle(
+    *,
+    data_symbol: str,
+    public_symbol: str,
+    df_15m: pd.DataFrame,
+    ea: Dict,
+) -> Dict:
+    """Attach Python-owned fill/TP/BE/HA5 state without changing entry logic."""
+    payload = dict(ea)
+    payload["risk_permissions"] = execution_lifecycle.risk_permissions(public_symbol)
+    position = execution_lifecycle.position(public_symbol)
+    payload["position"] = position
+
+    if not position:
+        payload["management_command"] = {
+            "action": "HOLD",
+            "reason": "NO_ACTIVE_POSITION",
+            "symbol": public_symbol,
+        }
+        return payload
+
+    command = execution_lifecycle.evaluate(
+        public_symbol,
+        _latest_market_price(df_15m),
+        fetch_management_m5(data_symbol),
+    )
+    payload["action"] = "WAIT"
+    payload["execution_state"] = "MANAGING"
+    payload["reason"] = "ACTIVE_POSITION|" + str(command.get("reason", "MANAGING"))
+    payload["management_command"] = command
+    lifecycle = dict(payload.get("plan_lifecycle") or {})
+    lifecycle["plan_status"] = "MANAGING"
+    lifecycle["ea_may_open_from_armed"] = False
+    payload["plan_lifecycle"] = lifecycle
+    return payload
+
 def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBOL_DEFAULT) -> Dict:
     try:
         df_4h, df_1h, df_15m = fetch_multi_tf(symbol)
@@ -1370,9 +1446,15 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
         # Production baseline overlay:
         # v12 scanner/blueprint stays intact, but proven engine_v4 BUY/SELL baseline
         # becomes the actual trade source when it produces confirmed levels.
-        engine_v4_signal = _run_engine_v4_baseline(df_15m)
+        engine_v4_signal = _run_engine_v4_baseline(df_15m, public_symbol)
         signal = _apply_engine_v4_signal(signal, engine_v4_signal)
         ea = build_ea_payload(public_symbol, signal)
+        ea = _attach_execution_lifecycle(
+            data_symbol=symbol,
+            public_symbol=public_symbol,
+            df_15m=df_15m,
+            ea=ea,
+        )
         return build_api_signal_response(public_symbol, signal, ea)
     except Exception as exc:
         error_signal = {
@@ -1476,6 +1558,104 @@ def signal_latest(key: str = "", symbol: str = SYMBOL_DEFAULT):
     payload = run_pipeline(symbol=symbol, public_symbol=public_symbol)
     _set_latest_signal(payload)
     return payload
+
+
+@app.get("/execution/state")
+def execution_state(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
+    if not verify_license(key):
+        raise HTTPException(status_code=403, detail="INVALID_LICENSE")
+    public_symbol = symbol.replace("/", "")
+    return {
+        "status": "ok",
+        "symbol": public_symbol,
+        "position": execution_lifecycle.position(public_symbol),
+        "pending_command": execution_lifecycle.pending_command(public_symbol),
+        "risk_permissions": execution_lifecycle.risk_permissions(public_symbol),
+    }
+
+
+@app.post("/execution/fill")
+async def execution_fill(request: Request):
+    """EA confirms a fill; Python then becomes the position command owner."""
+    body = await request.json()
+    if not verify_license(str(body.get("key", ""))):
+        raise HTTPException(status_code=403, detail="INVALID_LICENSE")
+
+    public_symbol = str(body.get("symbol") or PUBLIC_SYMBOL_DEFAULT).replace("/", "")
+    signal_id = str(body.get("signal_id") or "")
+    ticket = str(body.get("ticket") or "")
+    fill_price = _safe_float(body.get("fill_price"))
+    if not ticket or fill_price <= 0:
+        raise HTTPException(status_code=400, detail="TICKET_AND_FILL_PRICE_REQUIRED")
+    cached = _get_latest_signal()
+    plan = cached.get("ea", {}) if cached.get("symbol") == public_symbol else {}
+    if (
+        not signal_id
+        or signal_id != str(plan.get("signal_id") or "")
+        or plan.get("action") != "OPEN"
+        or plan.get("execution_state") != "READY"
+    ):
+        raise HTTPException(status_code=409, detail="NO_MATCHING_READY_PLAN")
+
+    try:
+        position = execution_lifecycle.register_fill(
+            symbol=public_symbol,
+            signal_id=signal_id,
+            ticket=ticket,
+            direction=str(plan.get("direction") or ""),
+            entry=fill_price,
+            sl=_safe_float(plan.get("sl")),
+            tp1=_safe_float(plan.get("tp1")),
+            tp2=_safe_float(plan.get("tp_final")),
+            max_bars=int(plan.get("max_bars", 40) or 40),
+            filled_at=body.get("filled_at"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "accepted", "position": position}
+
+
+@app.get("/execution/command")
+def execution_command(key: str = "", symbol: str = SYMBOL_DEFAULT):
+    """EA polls this endpoint and executes only the returned command."""
+    if not verify_license(key):
+        raise HTTPException(status_code=403, detail="INVALID_LICENSE")
+    public_symbol = symbol.replace("/", "")
+    if not execution_lifecycle.has_active(public_symbol):
+        return {"status": "ok", "command": execution_lifecycle.pending_command(public_symbol)}
+
+    pending = execution_lifecycle.pending_command(public_symbol)
+    if pending.get("action") != "HOLD":
+        return {"status": "ok", "command": pending}
+
+    df_15m = _fetch_cached_tf(symbol, "15min")
+    command = execution_lifecycle.evaluate(
+        public_symbol,
+        _latest_market_price(df_15m),
+        fetch_management_m5(symbol),
+    )
+    return {"status": "ok", "command": command}
+
+
+@app.post("/execution/ack")
+async def execution_ack(request: Request):
+    """EA ACK makes partial/BE and close transitions durable and retry-safe."""
+    body = await request.json()
+    if not verify_license(str(body.get("key", ""))):
+        raise HTTPException(status_code=403, detail="INVALID_LICENSE")
+    public_symbol = str(body.get("symbol") or PUBLIC_SYMBOL_DEFAULT).replace("/", "")
+    try:
+        result = execution_lifecycle.acknowledge(
+            symbol=public_symbol,
+            command_id=str(body.get("command_id") or ""),
+            success=body.get("success") is True,
+            remaining_pct=body.get("remaining_pct"),
+            r_multiple=_safe_float(body.get("r_multiple")),
+            acknowledged_at=body.get("acknowledged_at"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "accepted", "result": result}
 
 
 @app.get("/signal/scenarios")
