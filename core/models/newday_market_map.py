@@ -15,7 +15,17 @@ class HarmonicContext(BaseModel):
     timeframe: str = "NONE"
     source: str = "NONE"
     state: str = "NONE"
+    x_point: float = 0.0
+    a_point: float = 0.0
+    b_point: float = 0.0
+    c_point: float = 0.0
     d_point: float = 0.0
+    x_idx: int = -1
+    a_idx: int = -1
+    b_idx: int = -1
+    c_idx: int = -1
+    d_idx: int = -1
+    ratios: Dict[str, float] = Field(default_factory=dict)
     prz_low: float = 0.0
     prz_high: float = 0.0
     tp1: float = 0.0

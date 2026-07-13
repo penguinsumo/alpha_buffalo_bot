@@ -139,6 +139,7 @@ class ScenarioBlueprint:
     harmonic_a_price: float = 0.0
     harmonic_b_price: float = 0.0
     harmonic_c_price: float = 0.0
+    harmonic_ratios: Dict[str, float] = field(default_factory=dict)
     harmonic_tp1: float = 0.0
     harmonic_tp2: float = 0.0
     harmonic_tp3: float = 0.0
@@ -322,6 +323,7 @@ class ScenarioBlueprint:
                 "b": self.harmonic_b_price,
                 "c": self.harmonic_c_price,
                 "d": self.harmonic_d_point,
+                "ratios": self.harmonic_ratios,
                 "prz_current": self.prz_current,
                 "prz_next": self.prz_next,
                 "prz_low": self.harmonic_prz_low,

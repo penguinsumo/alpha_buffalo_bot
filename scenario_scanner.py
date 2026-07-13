@@ -174,6 +174,10 @@ class ScenarioScanner:
         harmonic_prz_low = float(selected_harmonic.get("prz_low", 0.0)) if real_harmonic else 0.0
         harmonic_prz_high = float(selected_harmonic.get("prz_high", 0.0)) if real_harmonic else 0.0
         harmonic_d_point = float(selected_harmonic.get("d_point", 0.0)) if real_harmonic else 0.0
+        harmonic_x_point = float(selected_harmonic.get("x", 0.0)) if real_harmonic else 0.0
+        harmonic_a_point = float(selected_harmonic.get("a", 0.0)) if real_harmonic else 0.0
+        harmonic_b_point = float(selected_harmonic.get("b", 0.0)) if real_harmonic else 0.0
+        harmonic_c_point = float(selected_harmonic.get("c", 0.0)) if real_harmonic else 0.0
 
         inside_htf_prz = (
             self._inside_zone(current_price, htf_support_low, htf_support_high)
@@ -378,6 +382,18 @@ class ScenarioScanner:
             harmonic_pattern_state=str(selected_harmonic.get("state", "NONE")) if real_harmonic else "NONE",
             harmonic_is_real=bool(real_harmonic),
             harmonic_d_point=round(harmonic_d_point, 3) if real_harmonic else 0.0,
+            harmonic_x_price=round(harmonic_x_point, 3) if real_harmonic else 0.0,
+            harmonic_a_price=round(harmonic_a_point, 3) if real_harmonic else 0.0,
+            harmonic_b_price=round(harmonic_b_point, 3) if real_harmonic else 0.0,
+            harmonic_c_price=round(harmonic_c_point, 3) if real_harmonic else 0.0,
+            harmonic_ratios={
+                str(key): round(float(value), 6)
+                for key, value in dict(selected_harmonic.get("ratios") or {}).items()
+            } if real_harmonic else {},
+            harmonic_tp1=round(float(selected_harmonic.get("tp1", 0.0)), 3) if real_harmonic else 0.0,
+            harmonic_tp2=round(float(selected_harmonic.get("tp2", 0.0)), 3) if real_harmonic else 0.0,
+            harmonic_tp3=round(float(selected_harmonic.get("tp3", 0.0)), 3) if real_harmonic else 0.0,
+            harmonic_invalidation=round(float(selected_harmonic.get("invalidation", 0.0)), 3) if real_harmonic else 0.0,
             harmonic_prz_timeframe=str(selected_harmonic.get("source_tf", "NONE")) if real_harmonic else "NONE",
             harmonic_prz_source=str(selected_harmonic.get("source", "NONE")) if real_harmonic else "NONE",
             prz_current=round(harmonic_d_point, 3) if real_harmonic else None,
@@ -474,6 +490,15 @@ class ScenarioScanner:
             "prz_low": prz_low,
             "prz_high": prz_high,
             "d_point": d_point,
+            "x": float(harmonic.get("x_point", harmonic.get("x", 0.0)) or 0.0),
+            "a": float(harmonic.get("a_point", harmonic.get("a", 0.0)) or 0.0),
+            "b": float(harmonic.get("b_point", harmonic.get("b", 0.0)) or 0.0),
+            "c": float(harmonic.get("c_point", harmonic.get("c", 0.0)) or 0.0),
+            "ratios": dict(harmonic.get("ratios") or {}),
+            "tp1": float(harmonic.get("tp1", 0.0) or 0.0),
+            "tp2": float(harmonic.get("tp2", 0.0) or 0.0),
+            "tp3": float(harmonic.get("tp3", 0.0) or 0.0),
+            "invalidation": float(harmonic.get("invalidation", 0.0) or 0.0),
             "score": 0,
             "in_prz": in_prz,
             "distance": distance,
@@ -600,6 +625,11 @@ class ScenarioScanner:
                     "prz_low": prz_low,
                     "prz_high": prz_high,
                     "d_point": d_point,
+                    "x": float(getattr(z, "x_point", 0.0) or 0.0),
+                    "a": float(getattr(z, "a_point", 0.0) or 0.0),
+                    "b": float(getattr(z, "b_point", 0.0) or 0.0),
+                    "c": float(getattr(z, "c_point", 0.0) or 0.0),
+                    "ratios": dict(getattr(z, "ratios", {}) or {}),
                     "score": int(getattr(z, "confluence_score", 0) or 0),
                     "in_prz": in_prz,
                     "distance": distance,
