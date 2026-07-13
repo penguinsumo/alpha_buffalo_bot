@@ -19,6 +19,11 @@ from session_clock import SessionClock
 from telegram_guard import guarded_telegram_post, telegram_market_is_open
 from engine_v4.session_gate import SessionGate
 from execution_lifecycle import execution_lifecycle
+from pine_signal_bridge import (
+    PineSignalError,
+    build_pine_api_payload,
+    pine_signal_bridge,
+)
 
 # Engine V4 baseline imports. Keep these globals available for _run_engine_v4_baseline().
 ENGINE_V4_IMPORT_ERROR = None
@@ -63,6 +68,9 @@ TWELVEDATA_API_KEY = (
     or ""
 )
 API_LICENSE_KEY = os.getenv("ALPHA_API_KEY", os.getenv("LICENSE_KEY", "DEMO123"))
+SIGNAL_SOURCE = os.getenv("ALPHA_SIGNAL_SOURCE", "PYTHON").strip().upper()
+if SIGNAL_SOURCE not in {"PYTHON", "PINE", "HYBRID"}:
+    SIGNAL_SOURCE = "PYTHON"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_IDS = [
     chat_id.strip()
@@ -1645,6 +1653,9 @@ def _start_cloud_signal_loop() -> None:
     if _SIGNAL_LOOP_STARTED:
         return
     _SIGNAL_LOOP_STARTED = True
+    if SIGNAL_SOURCE == "PINE":
+        print("AlphaBuffalo Pine signal mode | cloud analysis loop disabled", flush=True)
+        return
     worker = threading.Thread(target=_cloud_signal_loop, name="alpha-cloud-signal-loop", daemon=True)
     worker.start()
 
@@ -1665,6 +1676,7 @@ def root():
         "service": "Alpha Buffalo",
         "version": "v12-core",
         "status": "ok",
+        "signal_source": SIGNAL_SOURCE,
     }
 
 
@@ -1673,6 +1685,7 @@ def health():
     return {
         "status": "alive",
         "version": "v12-core",
+        "signal_source": SIGNAL_SOURCE,
         "timestamp": time.time(),
     }
 
@@ -1683,6 +1696,23 @@ def signal_latest(key: str = "", symbol: str = SYMBOL_DEFAULT):
         raise HTTPException(status_code=403, detail="INVALID_LICENSE")
 
     public_symbol = symbol.replace("/", "")
+    if SIGNAL_SOURCE == "PINE":
+        cached = _get_latest_signal()
+        if cached and cached.get("symbol") == public_symbol:
+            return cached
+        return {
+            **create_signal(status=NO_SIGNAL, reason="WAITING_FOR_PINE_SIGNAL"),
+            "symbol": public_symbol,
+            "source": "PINE",
+            "ea": {
+                "action": "WAIT",
+                "execution_state": "WATCH",
+                "direction": "NONE",
+                "ea_role": "EXECUTION_ONLY",
+                "ea_execute_only": True,
+            },
+        }
+
     market_gate = _market_open_gate()
     if not market_gate["market_open"]:
         payload = _market_closed_payload(symbol=symbol, public_symbol=public_symbol, gate=market_gate)
@@ -1714,7 +1744,7 @@ def execution_state(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
 
 @app.post("/execution/fill")
 async def execution_fill(request: Request):
-    """EA confirms a fill; Python then becomes the position command owner."""
+    """EA confirms a fill while the configured source keeps command ownership."""
     body = await request.json()
     if not verify_license(str(body.get("key", ""))):
         raise HTTPException(status_code=403, detail="INVALID_LICENSE")
@@ -1727,6 +1757,21 @@ async def execution_fill(request: Request):
         raise HTTPException(status_code=400, detail="TICKET_AND_FILL_PRICE_REQUIRED")
     cached = _get_latest_signal()
     plan = cached.get("ea", {}) if cached.get("symbol") == public_symbol else {}
+    if SIGNAL_SOURCE in {"PINE", "HYBRID"}:
+        durable_pine_plan = pine_signal_bridge.pending_command(public_symbol)
+        if (
+            durable_pine_plan.get("action") == "OPEN"
+            and str(durable_pine_plan.get("signal_id") or "") == signal_id
+        ):
+            plan = {
+                "signal_id": durable_pine_plan.get("signal_id"),
+                "action": "OPEN",
+                "execution_state": "READY",
+                "direction": durable_pine_plan.get("direction"),
+                "sl": durable_pine_plan.get("sl"),
+                "tp1": durable_pine_plan.get("tp1"),
+                "tp_final": durable_pine_plan.get("tp_final"),
+            }
     if (
         not signal_id
         or signal_id != str(plan.get("signal_id") or "")
@@ -1759,6 +1804,12 @@ def execution_command(key: str = "", symbol: str = SYMBOL_DEFAULT):
     if not verify_license(key):
         raise HTTPException(status_code=403, detail="INVALID_LICENSE")
     public_symbol = symbol.replace("/", "")
+    pine_command = pine_signal_bridge.pending_command(public_symbol)
+    if pine_command.get("action") != "HOLD":
+        return {"status": "ok", "source": "PINE", "command": pine_command}
+    if SIGNAL_SOURCE == "PINE":
+        return {"status": "ok", "source": "PINE", "command": pine_command}
+
     if not execution_lifecycle.has_active(public_symbol):
         return {"status": "ok", "command": execution_lifecycle.pending_command(public_symbol)}
 
@@ -1782,10 +1833,33 @@ async def execution_ack(request: Request):
     if not verify_license(str(body.get("key", ""))):
         raise HTTPException(status_code=403, detail="INVALID_LICENSE")
     public_symbol = str(body.get("symbol") or PUBLIC_SYMBOL_DEFAULT).replace("/", "")
+    command_id = str(body.get("command_id") or "")
+    if pine_signal_bridge.owns(command_id):
+        try:
+            result = pine_signal_bridge.acknowledge(
+                symbol=public_symbol,
+                command_id=command_id,
+                success=body.get("success") is True,
+            )
+        except PineSignalError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        close_state = None
+        if body.get("success") is True and result.get("action") == "CLOSE_ALL":
+            close_state = execution_lifecycle.close_external(
+                public_symbol,
+                r_multiple=_safe_float(body.get("r_multiple")),
+            )
+        return {
+            "status": "accepted",
+            "source": "PINE",
+            "result": result,
+            "position": close_state,
+        }
+
     try:
         result = execution_lifecycle.acknowledge(
             symbol=public_symbol,
-            command_id=str(body.get("command_id") or ""),
+            command_id=command_id,
             success=body.get("success") is True,
             remaining_pct=body.get("remaining_pct"),
             r_multiple=_safe_float(body.get("r_multiple")),
@@ -1815,13 +1889,37 @@ def signal_scenarios(key: str = "", symbol: str = SYMBOL_DEFAULT):
 
 @app.post("/webhook/tv")
 async def webhook_tv(request: Request):
+    if SIGNAL_SOURCE not in {"PINE", "HYBRID"}:
+        raise HTTPException(status_code=409, detail="PINE_SIGNAL_MODE_DISABLED")
+
     payload = await request.json()
 
     key = payload.get("key", "")
     if not verify_license(key):
         raise HTTPException(status_code=403, detail="INVALID_LICENSE")
 
-    symbol = payload.get("symbol", SYMBOL_DEFAULT)
-    public_symbol = symbol.replace("/", "")
+    action = str(payload.get("action") or "").upper()
+    if action in {"OPEN", "ENTRY"} and not _market_open_gate()["market_open"]:
+        raise HTTPException(status_code=409, detail="MARKET_CLOSED")
 
-    return run_pipeline(symbol=symbol, public_symbol=public_symbol)
+    try:
+        command = pine_signal_bridge.ingest(payload)
+    except PineSignalError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if command.get("action") == "HOLD":
+        return {
+            "status": "accepted",
+            "source": "PINE",
+            "duplicate": True,
+            "command": command,
+        }
+
+    public_payload = build_pine_api_payload(command)
+    _set_latest_signal(public_payload)
+    return {
+        "status": "accepted",
+        "source": "PINE",
+        "command": command,
+        "signal": public_payload,
+    }
