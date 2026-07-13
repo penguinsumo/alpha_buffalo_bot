@@ -1,0 +1,775 @@
+//@version=6
+indicator("AlphaBuff Gold Analyzer v2.4.2 - Decision Stack", overlay=true, max_labels_count=300, max_boxes_count=30)
+
+// This indicator is designed to run on a 5-minute chart. Every higher-timeframe
+// request uses the last confirmed source bar (offset [1] + lookahead_on).
+
+// =============================================================================
+// 1. INPUTS
+// =============================================================================
+
+groupTf = "01. Timeframes / Sessions"
+contextTf       = input.timeframe("1D",  "Context timeframe", group=groupTf)
+rangeTfD        = input.timeframe("1D",  "Cluster TF 1", group=groupTf)
+rangeTfH4       = input.timeframe("240", "Cluster TF 2", group=groupTf)
+rangeTfH1       = input.timeframe("60",  "Cluster TF 3", group=groupTf)
+triggerTf       = input.timeframe("15",  "HA / PA / VSA trigger TF", group=groupTf)
+structureTf     = input.timeframe("60",  "BOS / CHoCH TF", group=groupTf)
+entryConfirmTf  = input.timeframe("60",  "Asymmetric entry confirmation TF", group=groupTf)
+exitTf          = input.timeframe("5",   "HA mirror exit TF", group=groupTf)
+marketTimezone  = input.string("Asia/Bangkok", "Session timezone", group=groupTf)
+marketSession   = input.session("0000-2359:23456", "Alert session (Mon-Fri)", group=groupTf)
+asiaSession     = input.session("0600-1500:23456", "Asia session", group=groupTf)
+requireExchangeMarket = input.bool(true, "Require exchange regular session", group=groupTf)
+enforceSafeTf   = input.bool(true, "Require chart TF <= exit TF", group=groupTf,
+     tooltip="Keep enabled for exact two-candle 5m HA exits. Use this script on a 5m chart.")
+
+groupContext = "02. Directional Context"
+emaLen            = input.int(200, "EMA length", minval=20, group=groupContext)
+rsiLen            = input.int(14, "RSI length", minval=2, group=groupContext)
+dxySymbol         = input.symbol("TVC:DXY", "DXY symbol", group=groupContext)
+contextThreshold  = input.int(2, "Directional score required", minval=1, maxval=3, group=groupContext)
+displaySpread     = input.float(20.0, "Display only: futures - spot", minval=0.0, group=groupContext,
+     tooltip="This value is never added to PRZ or signal prices.")
+
+groupPrz = "03. PRZ / Cluster"
+asiaFibMin       = input.float(0.618, "Asia Fib near", minval=0.50, maxval=1.0, step=0.001, group=groupPrz)
+asiaFibMax       = input.float(0.705, "Asia Fib deep", minval=0.50, maxval=1.0, step=0.001, group=groupPrz)
+deepFibMin       = input.float(0.720, "Non-Asia Fib near", minval=0.50, maxval=1.0, step=0.001, group=groupPrz)
+deepFibMax       = input.float(0.880, "Non-Asia Fib deep", minval=0.50, maxval=1.0, step=0.001, group=groupPrz)
+lookbackD        = input.int(20, "Daily range lookback", minval=5, group=groupPrz)
+lookbackH4       = input.int(30, "4H range lookback", minval=5, group=groupPrz)
+lookbackH1       = input.int(60, "1H range lookback", minval=5, group=groupPrz)
+swingPivotBars   = input.int(3, "Confirmed swing pivot bars", minval=2, maxval=10, group=groupPrz,
+     tooltip="PRZ anchors remain fixed until a new pivot is confirmed on both sides.")
+minimumCluster   = input.int(2, "Minimum overlapping PRZ levels", minval=1, maxval=3, group=groupPrz)
+requireDeepSweep = input.bool(true, "Require 0.88 boundary sweep outside Asia", group=groupPrz)
+sweepTtl         = input.int(8, "Sweep reclaim TTL (15m bars)", minval=1, maxval=40, group=groupPrz)
+invalidationAtr  = input.float(0.15, "Beyond 1.00 invalidation buffer (ATR)", minval=0.0, step=0.05, group=groupPrz)
+reclaimAtr       = input.float(0.25, "Reclaim overshoot allowance (ATR)", minval=0.0, step=0.05, group=groupPrz)
+
+groupTrigger = "04. BB / PA / VSA Trigger"
+bbLen          = input.int(20, "BB length", minval=5, group=groupTrigger)
+bbMult         = input.float(2.0, "BB deviation", minval=0.5, step=0.1, group=groupTrigger)
+requireBbTouch = input.bool(true, "Require BB rejection", group=groupTrigger)
+pinWickRatio   = input.float(2.0, "Pinbar wick/body ratio", minval=1.0, step=0.1, group=groupTrigger)
+vsaVolLen      = input.int(20, "VSA volume average", minval=5, group=groupTrigger)
+vsaVolMult     = input.float(1.20, "VSA volume wall multiplier", minval=0.5, step=0.05, group=groupTrigger)
+vsaWickPct     = input.float(0.45, "VSA rejection wick / range", minval=0.20, maxval=0.90, step=0.05, group=groupTrigger)
+
+groupStructure = "05. Structure Permission"
+structureLookback     = input.int(5, "BOS / CHoCH lookback", minval=2, group=groupStructure)
+requireAsymmetricH1   = input.bool(true, "Require BUY normal candle / SELL HA", group=groupStructure,
+     tooltip="BUY permission uses a confirmed regular H1 bullish candle. SELL permission uses a confirmed H1 Heikin-Ashi bearish candle.")
+requireStructureEntry = input.bool(false, "Require structure for entry", group=groupStructure)
+requireStructureRun   = input.bool(true, "Require aligned structure to hold after BE", group=groupStructure)
+exitOnStructureFlip   = input.bool(false, "Exit runner on opposite structure break", group=groupStructure)
+
+groupRisk = "06. Virtual Trade Lifecycle"
+slAtrBuffer    = input.float(0.20, "SL beyond sweep/cluster (ATR)", minval=0.0, step=0.05, group=groupRisk)
+beAtR          = input.float(1.0, "Arm break-even at R", minval=0.25, step=0.25, group=groupRisk)
+beOffsetTicks  = input.int(1, "BE offset (ticks)", minval=0, group=groupRisk)
+tp2AtR         = input.float(3.0, "Runner hard target (R)", minval=1.0, step=0.25, group=groupRisk)
+minimumPrzTargetR = input.float(1.25, "Minimum opposing PRZ target (R)", minval=1.0, step=0.25, group=groupRisk)
+cooldownBars   = input.int(3, "Cooldown after exit (chart bars)", minval=0, group=groupRisk)
+
+groupEa = "07. EA Signal Bridge"
+webhookKey = input.string("", "API license key", group=groupEa,
+     tooltip="Entered in TradingView settings. Never hard-code the key in this source file.")
+
+groupVisual = "08. Visuals"
+showDashboard = input.bool(true, "Show dashboard", group=groupVisual)
+showHistoricalBands = input.bool(false, "Show rolling historical PRZ bands", group=groupVisual,
+     tooltip="Keep disabled for clean fixed PRZ boxes. Historical bands move when confirmed HTF anchors update.")
+showPrzBoxes  = input.bool(true, "Project PRZ target boxes", group=groupVisual)
+projectionBars = input.int(60, "PRZ box projection bars", minval=10, maxval=300, group=groupVisual)
+boxHistoryBars = input.int(48, "PRZ box bars to the left", minval=0, maxval=500, group=groupVisual)
+showBb        = input.bool(false, "Show confirmed 15m BB", group=groupVisual)
+showTrade     = input.bool(true, "Show entry / stop / targets", group=groupVisual)
+showH1SourceDots = input.bool(true, "Show H1 BUY-candle / SELL-HA dots", group=groupVisual)
+
+// =============================================================================
+// 2. HELPERS
+// =============================================================================
+
+f_confirmed_swing_range(int _lookback, int _pivotBars) =>
+    _pivotHigh = ta.pivothigh(high, _pivotBars, _pivotBars)
+    _pivotLow = ta.pivotlow(low, _pivotBars, _pivotBars)
+    _lastHigh = ta.valuewhen(not na(_pivotHigh), _pivotHigh, 0)
+    _lastLow = ta.valuewhen(not na(_pivotLow), _pivotLow, 0)
+    _fallbackHigh = ta.highest(high, _lookback)
+    _fallbackLow = ta.lowest(low, _lookback)
+    _rawHigh = na(_lastHigh) ? _fallbackHigh : _lastHigh
+    _rawLow = na(_lastLow) ? _fallbackLow : _lastLow
+    [math.max(_rawHigh, _rawLow)[1], math.min(_rawHigh, _rawLow)[1]]
+
+f_confirmed_trigger(_bbLen, _bbMult, _volLen) =>
+    _basis = ta.sma(close, _bbLen)
+    _dev = ta.stdev(close, _bbLen) * _bbMult
+    _upper = _basis + _dev
+    _lower = _basis - _dev
+    _volAvg = ta.sma(volume, _volLen)
+    _atr = ta.atr(14)
+    [open[1], high[1], low[1], close[1], volume[1], _basis[1], _upper[1], _lower[1], _volAvg[1], _atr[1]]
+
+f_confirmed_structure(_lookback) =>
+    _bullBreak = close > ta.highest(high, _lookback)[1]
+    _bearBreak = close < ta.lowest(low, _lookback)[1]
+    [_bullBreak[1], _bearBreak[1]]
+
+f_buy_zone(_high, _low, _fibNear, _fibDeep) =>
+    _width = math.max(_high - _low, syminfo.mintick)
+    [_high - _width * _fibDeep, _high - _width * _fibNear]
+
+f_sell_zone(_high, _low, _fibNear, _fibDeep) =>
+    _width = math.max(_high - _low, syminfo.mintick)
+    [_low + _width * _fibNear, _low + _width * _fibDeep]
+
+f_overlap(_lo1, _hi1, _lo2, _hi2) =>
+    not na(_lo1) and not na(_hi1) and not na(_lo2) and not na(_hi2) and math.max(_lo1, _lo2) <= math.min(_hi1, _hi2)
+
+f_distance(_price, _lo, _hi) =>
+    _price < _lo ? _lo - _price : _price > _hi ? _price - _hi : 0.0
+
+f_target_above(_entry, _minimumDistance, _candidate1, _candidate2, _candidate3) =>
+    float _target = na
+    _threshold = _entry + _minimumDistance
+    if not na(_candidate1) and _candidate1 >= _threshold
+        _target := _candidate1
+    if not na(_candidate2) and _candidate2 >= _threshold and (na(_target) or _candidate2 < _target)
+        _target := _candidate2
+    if not na(_candidate3) and _candidate3 >= _threshold and (na(_target) or _candidate3 < _target)
+        _target := _candidate3
+    _target
+
+f_target_below(_entry, _minimumDistance, _candidate1, _candidate2, _candidate3) =>
+    float _target = na
+    _threshold = _entry - _minimumDistance
+    if not na(_candidate1) and _candidate1 <= _threshold
+        _target := _candidate1
+    if not na(_candidate2) and _candidate2 <= _threshold and (na(_target) or _candidate2 > _target)
+        _target := _candidate2
+    if not na(_candidate3) and _candidate3 <= _threshold and (na(_target) or _candidate3 > _target)
+        _target := _candidate3
+    _target
+
+f_num(float _value) =>
+    na(_value) ? "null" : str.tostring(_value, "#.#####")
+
+f_send_signal(string _action, string _direction, string _reason, float _entry, float _exit, float _sl, float _tp1, float _tp2, int _score, string _signalId, string _targetSource) =>
+    _payload = '{"key":"' + webhookKey + '","status":"SIGNAL","source":"PINE","strategy":"ALPHABUFF_V2_4","action":"' + _action + '","direction":"' + _direction + '","symbol":"' + syminfo.ticker + '","ticker_id":"' + syminfo.tickerid + '","timeframe":"' + timeframe.period + '","signal_id":"' + _signalId + '","entry_price":' + f_num(_entry) + ',"exit_price":' + f_num(_exit) + ',"sl_price":' + f_num(_sl) + ',"tp1_price":' + f_num(_tp1) + ',"tp2_price":' + f_num(_tp2) + ',"score":' + str.tostring(_score) + ',"target_source":"' + _targetSource + '","reason":"' + _reason + '"}'
+    alert(_payload, alert.freq_once_per_bar_close)
+
+// =============================================================================
+// 3. CONFIRMED MULTI-TIMEFRAME DATA (NON-REPAINT)
+// =============================================================================
+
+[contextClose, contextEma, contextRsi, contextAtr] = request.security(
+     syminfo.tickerid, contextTf,
+     [close[1], ta.ema(close, emaLen)[1], ta.rsi(close, rsiLen)[1], ta.atr(14)[1]],
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+[dxyClose, dxyPrevious] = request.security(
+     dxySymbol, contextTf, [close[1], close[2]],
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+[rangeHighD, rangeLowD] = request.security(
+     syminfo.tickerid, rangeTfD, f_confirmed_swing_range(lookbackD, swingPivotBars),
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+[rangeHighH4, rangeLowH4] = request.security(
+     syminfo.tickerid, rangeTfH4, f_confirmed_swing_range(lookbackH4, swingPivotBars),
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+[rangeHighH1, rangeLowH1] = request.security(
+     syminfo.tickerid, rangeTfH1, f_confirmed_swing_range(lookbackH1, swingPivotBars),
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+[triggerOpen, triggerHigh, triggerLow, triggerClose, triggerVolume, bbBasis, bbUpper, bbLower, triggerVolAvg, triggerAtr] = request.security(
+     syminfo.tickerid, triggerTf, f_confirmed_trigger(bbLen, bbMult, vsaVolLen),
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+haTicker = ticker.heikinashi(syminfo.tickerid)
+[ha15Open, ha15Close, ha15PrevOpen, ha15PrevClose] = request.security(
+     haTicker, triggerTf, [open[1], close[1], open[2], close[2]],
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+[ha5Open, ha5Close, ha5PrevOpen, ha5PrevClose] = request.security(
+     haTicker, exitTf, [open[1], close[1], open[2], close[2]],
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+[h1RegularOpen, h1RegularClose] = request.security(
+     syminfo.tickerid, entryConfirmTf, [open[1], close[1]],
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+[h1HaOpen, h1HaClose] = request.security(
+     haTicker, entryConfirmTf, [open[1], close[1]],
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+[bullStructureBreak, bearStructureBreak] = request.security(
+     syminfo.tickerid, structureTf, f_confirmed_structure(structureLookback),
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+// =============================================================================
+// 4. SESSION-AWARE FIBONACCI PRZ CLUSTERS
+// =============================================================================
+
+marketOpen = not na(time(timeframe.period, marketSession, marketTimezone)) and (not requireExchangeMarket or session.ismarket)
+isAsia = not na(time(timeframe.period, asiaSession, marketTimezone))
+selectedFibA = isAsia ? asiaFibMin : deepFibMin
+selectedFibB = isAsia ? asiaFibMax : deepFibMax
+fibNear = math.min(selectedFibA, selectedFibB)
+fibDeep = math.max(selectedFibA, selectedFibB)
+
+[buyDLo, buyDHi] = f_buy_zone(rangeHighD, rangeLowD, fibNear, fibDeep)
+[buyH4Lo, buyH4Hi] = f_buy_zone(rangeHighH4, rangeLowH4, fibNear, fibDeep)
+[buyH1Lo, buyH1Hi] = f_buy_zone(rangeHighH1, rangeLowH1, fibNear, fibDeep)
+
+[sellDLo, sellDHi] = f_sell_zone(rangeHighD, rangeLowD, fibNear, fibDeep)
+[sellH4Lo, sellH4Hi] = f_sell_zone(rangeHighH4, rangeLowH4, fibNear, fibDeep)
+[sellH1Lo, sellH1Hi] = f_sell_zone(rangeHighH1, rangeLowH1, fibNear, fibDeep)
+
+buyOverlapDH4 = f_overlap(buyDLo, buyDHi, buyH4Lo, buyH4Hi)
+buyOverlapDH1 = f_overlap(buyDLo, buyDHi, buyH1Lo, buyH1Hi)
+buyOverlapH4H1 = f_overlap(buyH4Lo, buyH4Hi, buyH1Lo, buyH1Hi)
+
+sellOverlapDH4 = f_overlap(sellDLo, sellDHi, sellH4Lo, sellH4Hi)
+sellOverlapDH1 = f_overlap(sellDLo, sellDHi, sellH1Lo, sellH1Hi)
+sellOverlapH4H1 = f_overlap(sellH4Lo, sellH4Hi, sellH1Lo, sellH1Hi)
+
+// TF weights: D=3, H4=2, H1=1. A D+H4 overlap therefore produces Score 5.
+buyScoreD = 3 + (buyOverlapDH4 ? 2 : 0) + (buyOverlapDH1 ? 1 : 0)
+buyScoreH4 = 2 + (buyOverlapDH4 ? 3 : 0) + (buyOverlapH4H1 ? 1 : 0)
+buyScoreH1 = 1 + (buyOverlapDH1 ? 3 : 0) + (buyOverlapH4H1 ? 2 : 0)
+
+sellScoreD = 3 + (sellOverlapDH4 ? 2 : 0) + (sellOverlapDH1 ? 1 : 0)
+sellScoreH4 = 2 + (sellOverlapDH4 ? 3 : 0) + (sellOverlapH4H1 ? 1 : 0)
+sellScoreH1 = 1 + (sellOverlapDH1 ? 3 : 0) + (sellOverlapH4H1 ? 2 : 0)
+
+int buyChoice = 0
+int buyClusterScore = buyScoreD
+float buyBestDistance = f_distance(close, buyDLo, buyDHi)
+if buyScoreH4 > buyClusterScore or (buyScoreH4 == buyClusterScore and f_distance(close, buyH4Lo, buyH4Hi) < buyBestDistance)
+    buyChoice := 1
+    buyClusterScore := buyScoreH4
+    buyBestDistance := f_distance(close, buyH4Lo, buyH4Hi)
+if buyScoreH1 > buyClusterScore or (buyScoreH1 == buyClusterScore and f_distance(close, buyH1Lo, buyH1Hi) < buyBestDistance)
+    buyChoice := 2
+    buyClusterScore := buyScoreH1
+    buyBestDistance := f_distance(close, buyH1Lo, buyH1Hi)
+
+float buyClusterLo = buyChoice == 0 ? buyDLo : buyChoice == 1 ? buyH4Lo : buyH1Lo
+float buyClusterHi = buyChoice == 0 ? buyDHi : buyChoice == 1 ? buyH4Hi : buyH1Hi
+float buyExtreme = buyChoice == 0 ? rangeLowD : buyChoice == 1 ? rangeLowH4 : rangeLowH1
+int buyClusterCount = buyChoice == 0 ? 1 + (buyOverlapDH4 ? 1 : 0) + (buyOverlapDH1 ? 1 : 0) : buyChoice == 1 ? 1 + (buyOverlapDH4 ? 1 : 0) + (buyOverlapH4H1 ? 1 : 0) : 1 + (buyOverlapDH1 ? 1 : 0) + (buyOverlapH4H1 ? 1 : 0)
+
+if buyChoice == 0
+    if buyOverlapDH4
+        buyClusterLo := math.min(buyClusterLo, buyH4Lo)
+        buyClusterHi := math.max(buyClusterHi, buyH4Hi)
+    if buyOverlapDH1
+        buyClusterLo := math.min(buyClusterLo, buyH1Lo)
+        buyClusterHi := math.max(buyClusterHi, buyH1Hi)
+else if buyChoice == 1
+    if buyOverlapDH4
+        buyClusterLo := math.min(buyClusterLo, buyDLo)
+        buyClusterHi := math.max(buyClusterHi, buyDHi)
+    if buyOverlapH4H1
+        buyClusterLo := math.min(buyClusterLo, buyH1Lo)
+        buyClusterHi := math.max(buyClusterHi, buyH1Hi)
+else
+    if buyOverlapDH1
+        buyClusterLo := math.min(buyClusterLo, buyDLo)
+        buyClusterHi := math.max(buyClusterHi, buyDHi)
+    if buyOverlapH4H1
+        buyClusterLo := math.min(buyClusterLo, buyH4Lo)
+        buyClusterHi := math.max(buyClusterHi, buyH4Hi)
+
+int sellChoice = 0
+int sellClusterScore = sellScoreD
+float sellBestDistance = f_distance(close, sellDLo, sellDHi)
+if sellScoreH4 > sellClusterScore or (sellScoreH4 == sellClusterScore and f_distance(close, sellH4Lo, sellH4Hi) < sellBestDistance)
+    sellChoice := 1
+    sellClusterScore := sellScoreH4
+    sellBestDistance := f_distance(close, sellH4Lo, sellH4Hi)
+if sellScoreH1 > sellClusterScore or (sellScoreH1 == sellClusterScore and f_distance(close, sellH1Lo, sellH1Hi) < sellBestDistance)
+    sellChoice := 2
+    sellClusterScore := sellScoreH1
+    sellBestDistance := f_distance(close, sellH1Lo, sellH1Hi)
+
+float sellClusterLo = sellChoice == 0 ? sellDLo : sellChoice == 1 ? sellH4Lo : sellH1Lo
+float sellClusterHi = sellChoice == 0 ? sellDHi : sellChoice == 1 ? sellH4Hi : sellH1Hi
+float sellExtreme = sellChoice == 0 ? rangeHighD : sellChoice == 1 ? rangeHighH4 : rangeHighH1
+int sellClusterCount = sellChoice == 0 ? 1 + (sellOverlapDH4 ? 1 : 0) + (sellOverlapDH1 ? 1 : 0) : sellChoice == 1 ? 1 + (sellOverlapDH4 ? 1 : 0) + (sellOverlapH4H1 ? 1 : 0) : 1 + (sellOverlapDH1 ? 1 : 0) + (sellOverlapH4H1 ? 1 : 0)
+
+if sellChoice == 0
+    if sellOverlapDH4
+        sellClusterLo := math.min(sellClusterLo, sellH4Lo)
+        sellClusterHi := math.max(sellClusterHi, sellH4Hi)
+    if sellOverlapDH1
+        sellClusterLo := math.min(sellClusterLo, sellH1Lo)
+        sellClusterHi := math.max(sellClusterHi, sellH1Hi)
+else if sellChoice == 1
+    if sellOverlapDH4
+        sellClusterLo := math.min(sellClusterLo, sellDLo)
+        sellClusterHi := math.max(sellClusterHi, sellDHi)
+    if sellOverlapH4H1
+        sellClusterLo := math.min(sellClusterLo, sellH1Lo)
+        sellClusterHi := math.max(sellClusterHi, sellH1Hi)
+else
+    if sellOverlapDH1
+        sellClusterLo := math.min(sellClusterLo, sellDLo)
+        sellClusterHi := math.max(sellClusterHi, sellDHi)
+    if sellOverlapH4H1
+        sellClusterLo := math.min(sellClusterLo, sellH4Lo)
+        sellClusterHi := math.max(sellClusterHi, sellH4Hi)
+
+// =============================================================================
+// 5. DIRECTIONAL CONTEXT, PA / BB / VSA, AND STRUCTURE
+// =============================================================================
+
+emaBuy = contextClose > contextEma
+emaSell = contextClose < contextEma
+rsiBuy = contextRsi > 50.0
+rsiSell = contextRsi < 50.0
+dxyBuy = dxyClose < dxyPrevious
+dxySell = dxyClose > dxyPrevious
+
+buyContextScore = (emaBuy ? 1 : 0) + (rsiBuy ? 1 : 0) + (dxyBuy ? 1 : 0)
+sellContextScore = (emaSell ? 1 : 0) + (rsiSell ? 1 : 0) + (dxySell ? 1 : 0)
+buyContextOk = buyContextScore >= contextThreshold
+sellContextOk = sellContextScore >= contextThreshold
+
+triggerRange = math.max(triggerHigh - triggerLow, syminfo.mintick)
+triggerBody = math.max(math.abs(triggerClose - triggerOpen), syminfo.mintick)
+lowerWick = math.min(triggerOpen, triggerClose) - triggerLow
+upperWick = triggerHigh - math.max(triggerOpen, triggerClose)
+
+bullPin = lowerWick >= triggerBody * pinWickRatio and upperWick <= triggerBody
+bearPin = upperWick >= triggerBody * pinWickRatio and lowerWick <= triggerBody
+haBullReversal = ha15PrevClose <= ha15PrevOpen and ha15Close > ha15Open
+haBearReversal = ha15PrevClose >= ha15PrevOpen and ha15Close < ha15Open
+
+hasUsableVolume = not na(triggerVolume) and not na(triggerVolAvg) and triggerVolAvg > 0
+vsaVolumeWall = hasUsableVolume and triggerVolume >= triggerVolAvg * vsaVolMult
+bullVsaWall = vsaVolumeWall and lowerWick / triggerRange >= vsaWickPct and triggerClose >= triggerLow + triggerRange * 0.60
+bearVsaWall = vsaVolumeWall and upperWick / triggerRange >= vsaWickPct and triggerClose <= triggerHigh - triggerRange * 0.60
+
+bbBuyReject = triggerLow <= bbLower and triggerClose > bbLower
+bbSellReject = triggerHigh >= bbUpper and triggerClose < bbUpper
+buyPaTrigger = bullPin or haBullReversal or bullVsaWall
+sellPaTrigger = bearPin or haBearReversal or bearVsaWall
+buyBbOk = not requireBbTouch or bbBuyReject
+sellBbOk = not requireBbTouch or bbSellReject
+buyH1NormalCandle = h1RegularClose > h1RegularOpen
+sellH1HeikinAshi = h1HaClose < h1HaOpen
+buyH1Permission = not requireAsymmetricH1 or buyH1NormalCandle
+sellH1Permission = not requireAsymmetricH1 or sellH1HeikinAshi
+
+newTriggerBar = timeframe.change(triggerTf)
+newStructureBar = timeframe.change(structureTf)
+newEntryConfirmBar = timeframe.change(entryConfirmTf)
+newExitBar = timeframe.change(exitTf)
+
+var int structureBias = 0
+var string structureEvent = "NONE"
+if barstate.isconfirmed and newStructureBar
+    if bullStructureBreak
+        structureEvent := structureBias == -1 ? "BULL CHoCH" : structureBias == 1 ? "BULL BOS" : "BULL BREAK"
+        structureBias := 1
+    else if bearStructureBreak
+        structureEvent := structureBias == 1 ? "BEAR CHoCH" : structureBias == -1 ? "BEAR BOS" : "BEAR BREAK"
+        structureBias := -1
+
+// =============================================================================
+// 6. SWEEP -> RECLAIM STATE
+// =============================================================================
+
+var bool buySweepArmed = false
+var bool sellSweepArmed = false
+var float buySweepLow = na
+var float sellSweepHigh = na
+var int buySweepAge = 0
+var int sellSweepAge = 0
+var bool previousAsia = isAsia
+
+var int tradeDirection = 0
+var int cooldown = 0
+
+if barstate.isconfirmed and cooldown > 0
+    cooldown -= 1
+
+if isAsia != previousAsia
+    buySweepArmed := false
+    sellSweepArmed := false
+    buySweepLow := na
+    sellSweepHigh := na
+    buySweepAge := 0
+    sellSweepAge := 0
+    previousAsia := isAsia
+
+bool buyReclaimNow = false
+bool sellReclaimNow = false
+
+if barstate.isconfirmed and newTriggerBar and tradeDirection == 0
+    if buySweepArmed
+        buySweepAge += 1
+        buySweepLow := math.min(buySweepLow, triggerLow)
+    if sellSweepArmed
+        sellSweepAge += 1
+        sellSweepHigh := math.max(sellSweepHigh, triggerHigh)
+
+    buyInvalid = triggerLow < buyExtreme - triggerAtr * invalidationAtr
+    sellInvalid = triggerHigh > sellExtreme + triggerAtr * invalidationAtr
+
+    if buyInvalid or buySweepAge > sweepTtl
+        buySweepArmed := false
+        buySweepLow := na
+        buySweepAge := 0
+    if sellInvalid or sellSweepAge > sweepTtl
+        sellSweepArmed := false
+        sellSweepHigh := na
+        sellSweepAge := 0
+
+    buySweepCandidate = triggerLow < buyClusterLo and triggerLow >= buyExtreme - triggerAtr * invalidationAtr
+    sellSweepCandidate = triggerHigh > sellClusterHi and triggerHigh <= sellExtreme + triggerAtr * invalidationAtr
+
+    if buySweepCandidate
+        buySweepArmed := true
+        buySweepLow := na(buySweepLow) ? triggerLow : math.min(buySweepLow, triggerLow)
+        buySweepAge := 0
+    if sellSweepCandidate
+        sellSweepArmed := true
+        sellSweepHigh := na(sellSweepHigh) ? triggerHigh : math.max(sellSweepHigh, triggerHigh)
+        sellSweepAge := 0
+
+    buyReclaimNow := buySweepArmed and triggerClose >= buyClusterLo and triggerClose <= buyClusterHi + triggerAtr * reclaimAtr
+    sellReclaimNow := sellSweepArmed and triggerClose <= sellClusterHi and triggerClose >= sellClusterLo - triggerAtr * reclaimAtr
+
+buyClusterTouch = triggerLow <= buyClusterHi and triggerHigh >= buyClusterLo
+sellClusterTouch = triggerHigh >= sellClusterLo and triggerLow <= sellClusterHi
+
+buyLocationOk = (isAsia or not requireDeepSweep) ? buyClusterTouch : buyReclaimNow
+sellLocationOk = (isAsia or not requireDeepSweep) ? sellClusterTouch : sellReclaimNow
+buyClusterOk = buyClusterCount >= minimumCluster
+sellClusterOk = sellClusterCount >= minimumCluster
+
+chartSeconds = timeframe.in_seconds()
+exitSeconds = timeframe.in_seconds(exitTf)
+triggerSeconds = timeframe.in_seconds(triggerTf)
+structureSeconds = timeframe.in_seconds(structureTf)
+entryConfirmSeconds = timeframe.in_seconds(entryConfirmTf)
+contextSeconds = timeframe.in_seconds(contextTf)
+rangeDSeconds = timeframe.in_seconds(rangeTfD)
+rangeH4Seconds = timeframe.in_seconds(rangeTfH4)
+rangeH1Seconds = timeframe.in_seconds(rangeTfH1)
+safeTimeframe = chartSeconds <= exitSeconds and chartSeconds <= triggerSeconds and chartSeconds <= structureSeconds and chartSeconds <= entryConfirmSeconds and chartSeconds <= contextSeconds and chartSeconds <= rangeDSeconds and chartSeconds <= rangeH4Seconds and chartSeconds <= rangeH1Seconds
+timeframeGate = not enforceSafeTf or safeTimeframe
+buyStructureEntryOk = not requireStructureEntry or structureBias == 1
+sellStructureEntryOk = not requireStructureEntry or structureBias == -1
+
+buySetup = marketOpen and timeframeGate and buyContextOk and buyClusterOk and buyLocationOk and buyBbOk and buyPaTrigger and buyH1Permission and buyStructureEntryOk
+sellSetup = marketOpen and timeframeGate and sellContextOk and sellClusterOk and sellLocationOk and sellBbOk and sellPaTrigger and sellH1Permission and sellStructureEntryOk
+
+// =============================================================================
+// 7. SIGNAL AND VIRTUAL TRADE LIFECYCLE
+// =============================================================================
+
+var float tradeEntry = na
+var float tradeInitialStop = na
+var float tradeRisk = na
+var float tradeBeTrigger = na
+var float tradeTp2 = na
+var string tradeTargetSource = "NONE"
+var string tradeSignalId = ""
+var int tradeScore = 0
+var bool breakEvenArmed = false
+var bool runnerActive = false
+var int entryBar = na
+var string lifecycle = "WAIT_LOCATION"
+
+bool buySignal = false
+bool sellSignal = false
+bool exitSignal = false
+string exitReason = ""
+string exitedDirection = "NONE"
+float exitPrice = na
+float noExitPrice = na
+
+if barstate.isconfirmed and newTriggerBar and tradeDirection == 0 and cooldown == 0
+    if buySetup and not sellSetup
+        buySignal := true
+        tradeDirection := 1
+        tradeEntry := close
+        stopAnchor = math.min(buyClusterLo, na(buySweepLow) ? buyClusterLo : buySweepLow)
+        tradeInitialStop := stopAnchor - triggerAtr * slAtrBuffer
+        tradeRisk := math.max(tradeEntry - tradeInitialStop, syminfo.mintick)
+        tradeBeTrigger := tradeEntry + tradeRisk * beAtR
+        przTarget = f_target_above(tradeEntry, tradeRisk * minimumPrzTargetR, sellDLo, sellH4Lo, sellH1Lo)
+        tradeTp2 := na(przTarget) ? tradeEntry + tradeRisk * tp2AtR : przTarget
+        tradeTargetSource := na(przTarget) ? "R_FALLBACK" : "SUPPLY_PRZ"
+        tradeSignalId := str.replace_all(str.replace_all(syminfo.ticker + "-" + str.tostring(time_close) + "-BUY", ":", ""), "/", "")
+        tradeScore := buyClusterScore
+        breakEvenArmed := false
+        runnerActive := false
+        entryBar := bar_index
+        lifecycle := "OPEN_BUY"
+        if marketOpen
+            f_send_signal("OPEN", "BUY", "PRZ_SWEEP_RECLAIM_H1_CANDLE_15M_TRIGGER", tradeEntry, noExitPrice, tradeInitialStop, tradeBeTrigger, tradeTp2, tradeScore, tradeSignalId, tradeTargetSource)
+    else if sellSetup and not buySetup
+        sellSignal := true
+        tradeDirection := -1
+        tradeEntry := close
+        stopAnchor = math.max(sellClusterHi, na(sellSweepHigh) ? sellClusterHi : sellSweepHigh)
+        tradeInitialStop := stopAnchor + triggerAtr * slAtrBuffer
+        tradeRisk := math.max(tradeInitialStop - tradeEntry, syminfo.mintick)
+        tradeBeTrigger := tradeEntry - tradeRisk * beAtR
+        przTarget = f_target_below(tradeEntry, tradeRisk * minimumPrzTargetR, buyDHi, buyH4Hi, buyH1Hi)
+        tradeTp2 := na(przTarget) ? tradeEntry - tradeRisk * tp2AtR : przTarget
+        tradeTargetSource := na(przTarget) ? "R_FALLBACK" : "DEMAND_PRZ"
+        tradeSignalId := str.replace_all(str.replace_all(syminfo.ticker + "-" + str.tostring(time_close) + "-SELL", ":", ""), "/", "")
+        tradeScore := sellClusterScore
+        breakEvenArmed := false
+        runnerActive := false
+        entryBar := bar_index
+        lifecycle := "OPEN_SELL"
+        if marketOpen
+            f_send_signal("OPEN", "SELL", "PRZ_SWEEP_RECLAIM_H1_HA_15M_TRIGGER", tradeEntry, noExitPrice, tradeInitialStop, tradeBeTrigger, tradeTp2, tradeScore, tradeSignalId, tradeTargetSource)
+
+    if buySignal or sellSignal
+        buySweepArmed := false
+        sellSweepArmed := false
+        buySweepLow := na
+        sellSweepHigh := na
+        buySweepAge := 0
+        sellSweepAge := 0
+
+ha5TwoBear = ha5Close < ha5Open and ha5PrevClose < ha5PrevOpen
+ha5TwoBull = ha5Close > ha5Open and ha5PrevClose > ha5PrevOpen
+beStop = tradeDirection == 1 ? tradeEntry + syminfo.mintick * beOffsetTicks : tradeEntry - syminfo.mintick * beOffsetTicks
+activeStop = tradeDirection == 0 ? na : breakEvenArmed ? beStop : tradeInitialStop
+
+if barstate.isconfirmed and tradeDirection != 0 and bar_index > entryBar
+    if tradeDirection == 1
+        if low <= activeStop
+            exitReason := breakEvenArmed ? "BREAK_EVEN" : "INITIAL_STOP"
+            exitPrice := activeStop
+        else if not breakEvenArmed and high >= tradeBeTrigger
+            breakEvenArmed := true
+            if requireStructureRun and structureBias != 1
+                exitReason := "TP1_NO_BULL_STRUCTURE"
+                exitPrice := tradeBeTrigger
+            else
+                runnerActive := true
+                lifecycle := "RUNNER_BUY"
+        else if breakEvenArmed and high >= tradeTp2
+            exitReason := tradeTargetSource == "SUPPLY_PRZ" ? "OPPOSING_PRZ_TARGET" : "R_FALLBACK_TARGET"
+            exitPrice := tradeTp2
+        else if breakEvenArmed and newExitBar and ha5TwoBear
+            exitReason := "HA5_TWO_BEAR"
+            exitPrice := close
+        else if runnerActive and exitOnStructureFlip and newStructureBar and bearStructureBreak
+            exitReason := "BEAR_STRUCTURE_FLIP"
+            exitPrice := close
+    else
+        if high >= activeStop
+            exitReason := breakEvenArmed ? "BREAK_EVEN" : "INITIAL_STOP"
+            exitPrice := activeStop
+        else if not breakEvenArmed and low <= tradeBeTrigger
+            breakEvenArmed := true
+            if requireStructureRun and structureBias != -1
+                exitReason := "TP1_NO_BEAR_STRUCTURE"
+                exitPrice := tradeBeTrigger
+            else
+                runnerActive := true
+                lifecycle := "RUNNER_SELL"
+        else if breakEvenArmed and low <= tradeTp2
+            exitReason := tradeTargetSource == "DEMAND_PRZ" ? "OPPOSING_PRZ_TARGET" : "R_FALLBACK_TARGET"
+            exitPrice := tradeTp2
+        else if breakEvenArmed and newExitBar and ha5TwoBull
+            exitReason := "HA5_TWO_BULL"
+            exitPrice := close
+        else if runnerActive and exitOnStructureFlip and newStructureBar and bullStructureBreak
+            exitReason := "BULL_STRUCTURE_FLIP"
+            exitPrice := close
+
+if exitReason != ""
+    exitSignal := true
+    exitedDirection := tradeDirection == 1 ? "BUY" : "SELL"
+    if marketOpen
+        f_send_signal("CLOSE", exitedDirection, exitReason, tradeEntry, exitPrice, activeStop, tradeBeTrigger, tradeTp2, tradeScore, tradeSignalId, tradeTargetSource)
+    tradeDirection := 0
+    tradeEntry := na
+    tradeInitialStop := na
+    tradeRisk := na
+    tradeBeTrigger := na
+    tradeTp2 := na
+    tradeTargetSource := "NONE"
+    tradeSignalId := ""
+    tradeScore := 0
+    breakEvenArmed := false
+    runnerActive := false
+    entryBar := na
+    cooldown := cooldownBars
+    lifecycle := "COOLDOWN"
+
+if tradeDirection == 0 and cooldown == 0
+    lifecycle := buySweepArmed ? "BUY_SWEEP_ARMED" : sellSweepArmed ? "SELL_SWEEP_ARMED" : "WAIT_LOCATION"
+
+// =============================================================================
+// 8. VISUALS AND DASHBOARD
+// =============================================================================
+
+var box buyDBox = na
+var box buyH4Box = na
+var box buyH1Box = na
+var box sellDBox = na
+var box sellH4Box = na
+var box sellH1Box = na
+var box demandClusterBox = na
+var box supplyClusterBox = na
+var label demandClusterLabel = na
+var label supplyClusterLabel = na
+
+if barstate.islast
+    boxLeft = math.max(0, bar_index - boxHistoryBars)
+    boxRight = bar_index + projectionBars
+    labelX = bar_index + math.min(projectionBars - 1, 12)
+    if showPrzBoxes
+        if na(buyDBox)
+            buyDBox := box.new(boxLeft, buyDHi, boxRight, buyDLo, xloc=xloc.bar_index, bgcolor=color.new(color.lime, 94), border_color=color.new(color.lime, 55), border_style=line.style_dotted)
+            buyH4Box := box.new(boxLeft, buyH4Hi, boxRight, buyH4Lo, xloc=xloc.bar_index, bgcolor=color.new(color.lime, 95), border_color=color.new(color.lime, 65), border_style=line.style_dotted)
+            buyH1Box := box.new(boxLeft, buyH1Hi, boxRight, buyH1Lo, xloc=xloc.bar_index, bgcolor=color.new(color.lime, 96), border_color=color.new(color.lime, 75), border_style=line.style_dotted)
+            sellDBox := box.new(boxLeft, sellDHi, boxRight, sellDLo, xloc=xloc.bar_index, bgcolor=color.new(color.red, 94), border_color=color.new(color.red, 55), border_style=line.style_dotted)
+            sellH4Box := box.new(boxLeft, sellH4Hi, boxRight, sellH4Lo, xloc=xloc.bar_index, bgcolor=color.new(color.red, 95), border_color=color.new(color.red, 65), border_style=line.style_dotted)
+            sellH1Box := box.new(boxLeft, sellH1Hi, boxRight, sellH1Lo, xloc=xloc.bar_index, bgcolor=color.new(color.red, 96), border_color=color.new(color.red, 75), border_style=line.style_dotted)
+            demandClusterBox := box.new(boxLeft, buyClusterHi, boxRight, buyClusterLo, xloc=xloc.bar_index, bgcolor=color.new(color.lime, 84), border_color=color.lime)
+            supplyClusterBox := box.new(boxLeft, sellClusterHi, boxRight, sellClusterLo, xloc=xloc.bar_index, bgcolor=color.new(color.red, 84), border_color=color.red)
+            demandClusterLabel := label.new(labelX, (buyClusterLo + buyClusterHi) / 2.0, "", xloc=xloc.bar_index, style=label.style_label_left, color=color.lime, textcolor=color.black)
+            supplyClusterLabel := label.new(labelX, (sellClusterLo + sellClusterHi) / 2.0, "", xloc=xloc.bar_index, style=label.style_label_left, color=color.red, textcolor=color.white)
+
+        box.set_left(buyDBox, boxLeft)
+        box.set_right(buyDBox, boxRight)
+        box.set_top(buyDBox, buyDHi)
+        box.set_bottom(buyDBox, buyDLo)
+        box.set_left(buyH4Box, boxLeft)
+        box.set_right(buyH4Box, boxRight)
+        box.set_top(buyH4Box, buyH4Hi)
+        box.set_bottom(buyH4Box, buyH4Lo)
+        box.set_left(buyH1Box, boxLeft)
+        box.set_right(buyH1Box, boxRight)
+        box.set_top(buyH1Box, buyH1Hi)
+        box.set_bottom(buyH1Box, buyH1Lo)
+        box.set_left(sellDBox, boxLeft)
+        box.set_right(sellDBox, boxRight)
+        box.set_top(sellDBox, sellDHi)
+        box.set_bottom(sellDBox, sellDLo)
+        box.set_left(sellH4Box, boxLeft)
+        box.set_right(sellH4Box, boxRight)
+        box.set_top(sellH4Box, sellH4Hi)
+        box.set_bottom(sellH4Box, sellH4Lo)
+        box.set_left(sellH1Box, boxLeft)
+        box.set_right(sellH1Box, boxRight)
+        box.set_top(sellH1Box, sellH1Hi)
+        box.set_bottom(sellH1Box, sellH1Lo)
+        box.set_left(demandClusterBox, boxLeft)
+        box.set_right(demandClusterBox, boxRight)
+        box.set_top(demandClusterBox, buyClusterHi)
+        box.set_bottom(demandClusterBox, buyClusterLo)
+        box.set_left(supplyClusterBox, boxLeft)
+        box.set_right(supplyClusterBox, boxRight)
+        box.set_top(supplyClusterBox, sellClusterHi)
+        box.set_bottom(supplyClusterBox, sellClusterLo)
+
+        label.set_x(demandClusterLabel, labelX)
+        label.set_y(demandClusterLabel, (buyClusterLo + buyClusterHi) / 2.0)
+        label.set_text(demandClusterLabel, "DEMAND PRZ\n" + str.tostring(buyClusterCount) + " Levels | Score " + str.tostring(buyClusterScore))
+        label.set_x(supplyClusterLabel, labelX)
+        label.set_y(supplyClusterLabel, (sellClusterLo + sellClusterHi) / 2.0)
+        label.set_text(supplyClusterLabel, "SUPPLY PRZ\n" + str.tostring(sellClusterCount) + " Levels | Score " + str.tostring(sellClusterScore))
+    else if not na(buyDBox)
+        box.delete(buyDBox)
+        box.delete(buyH4Box)
+        box.delete(buyH1Box)
+        box.delete(sellDBox)
+        box.delete(sellH4Box)
+        box.delete(sellH1Box)
+        box.delete(demandClusterBox)
+        box.delete(supplyClusterBox)
+        label.delete(demandClusterLabel)
+        label.delete(supplyClusterLabel)
+        buyDBox := na
+        buyH4Box := na
+        buyH1Box := na
+        sellDBox := na
+        sellH4Box := na
+        sellH1Box := na
+        demandClusterBox := na
+        supplyClusterBox := na
+        demandClusterLabel := na
+        supplyClusterLabel := na
+
+buyLoPlot = plot(showHistoricalBands ? buyClusterLo : na, "Historical demand cluster low", color=color.new(color.lime, 35), style=plot.style_linebr)
+buyHiPlot = plot(showHistoricalBands ? buyClusterHi : na, "Historical demand cluster high", color=color.new(color.lime, 35), style=plot.style_linebr)
+fill(buyLoPlot, buyHiPlot, color=color.new(color.lime, 88), title="Demand PRZ cluster")
+
+sellLoPlot = plot(showHistoricalBands ? sellClusterLo : na, "Historical supply cluster low", color=color.new(color.red, 35), style=plot.style_linebr)
+sellHiPlot = plot(showHistoricalBands ? sellClusterHi : na, "Historical supply cluster high", color=color.new(color.red, 35), style=plot.style_linebr)
+fill(sellLoPlot, sellHiPlot, color=color.new(color.red, 88), title="Supply PRZ cluster")
+
+plot(showBb ? bbBasis : na, "Confirmed 15m BB basis", color=color.new(color.blue, 20), style=plot.style_stepline)
+plot(showBb ? bbUpper : na, "Confirmed 15m BB upper", color=color.new(color.red, 35), style=plot.style_stepline)
+plot(showBb ? bbLower : na, "Confirmed 15m BB lower", color=color.new(color.teal, 35), style=plot.style_stepline)
+
+plot(showTrade and tradeDirection != 0 ? tradeEntry : na, "Entry", color=color.white, linewidth=2, style=plot.style_linebr)
+plot(showTrade and tradeDirection != 0 ? activeStop : na, "Active stop", color=color.orange, linewidth=2, style=plot.style_linebr)
+plot(showTrade and tradeDirection != 0 ? tradeBeTrigger : na, "BE trigger / TP1", color=color.yellow, style=plot.style_linebr)
+plot(showTrade and tradeDirection != 0 ? tradeTp2 : na, "TP2", color=color.aqua, style=plot.style_linebr)
+
+plotshape(buySignal, title="BUY signal", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small, text="BUY")
+plotshape(sellSignal, title="SELL signal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="SELL")
+plotshape(exitSignal, title="Lifecycle exit", style=shape.xcross, location=location.abovebar, color=color.orange, size=size.tiny, text="EXIT")
+plotshape(bullVsaWall and newTriggerBar, title="Bull VSA wall", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 20), size=size.tiny)
+plotshape(bearVsaWall and newTriggerBar, title="Bear VSA wall", style=shape.circle, location=location.abovebar, color=color.new(color.red, 20), size=size.tiny)
+plotshape(showH1SourceDots and newEntryConfirmBar and buyH1NormalCandle, title="H1 normal-candle BUY permission", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 20), size=size.tiny)
+plotshape(showH1SourceDots and newEntryConfirmBar and sellH1HeikinAshi, title="H1 HA SELL permission", style=shape.circle, location=location.abovebar, color=color.new(color.red, 20), size=size.tiny)
+
+var table dashboard = table.new(position.bottom_left, 2, 16, bgcolor=color.new(color.rgb(25, 25, 25), 5), border_width=1)
+if showDashboard and barstate.islast
+    contextBias = buyContextOk and not sellContextOk ? "BUY" : sellContextOk and not buyContextOk ? "SELL" : "NEUTRAL"
+    triggerText = buyPaTrigger and buyBbOk ? "BUY READY" : sellPaTrigger and sellBbOk ? "SELL READY" : "WAIT"
+    h1EntryText = buyH1NormalCandle and sellH1HeikinAshi ? "BUY CANDLE + SELL HA" : buyH1NormalCandle ? "BUY CANDLE" : sellH1HeikinAshi ? "SELL HA" : "WAIT"
+    table.cell(dashboard, 0, 0, "ALPHA BUFF", text_color=color.white, bgcolor=color.rgb(40, 40, 40))
+    table.cell(dashboard, 1, 0, "PINE v2.4.2", text_color=color.yellow, bgcolor=color.rgb(40, 40, 40))
+    table.cell(dashboard, 0, 1, "Market / TF", text_color=color.white)
+    table.cell(dashboard, 1, 1, (marketOpen ? "OPEN" : "CLOSED") + " / " + (safeTimeframe ? "SAFE" : "USE 5m"), text_color=marketOpen and safeTimeframe ? color.lime : color.orange)
+    table.cell(dashboard, 0, 2, "Spot / GC+F", text_color=color.white)
+    table.cell(dashboard, 1, 2, str.tostring(close, "#.##") + " / " + str.tostring(close + displaySpread, "#.##"), text_color=color.white)
+    table.cell(dashboard, 0, 3, "Context", text_color=color.white)
+    table.cell(dashboard, 1, 3, contextBias + "  " + str.tostring(buyContextScore) + "/" + str.tostring(sellContextScore), text_color=contextBias == "BUY" ? color.lime : contextBias == "SELL" ? color.red : color.yellow)
+    table.cell(dashboard, 0, 4, "Demand PRZ", text_color=color.white)
+    table.cell(dashboard, 1, 4, str.tostring(buyClusterLo, "#.##") + "-" + str.tostring(buyClusterHi, "#.##"), text_color=color.lime)
+    table.cell(dashboard, 0, 5, "Demand Cluster", text_color=color.white)
+    table.cell(dashboard, 1, 5, str.tostring(buyClusterCount) + " levels / Score " + str.tostring(buyClusterScore), text_color=color.lime)
+    table.cell(dashboard, 0, 6, "Supply PRZ", text_color=color.white)
+    table.cell(dashboard, 1, 6, str.tostring(sellClusterLo, "#.##") + "-" + str.tostring(sellClusterHi, "#.##"), text_color=color.red)
+    table.cell(dashboard, 0, 7, "Supply Cluster", text_color=color.white)
+    table.cell(dashboard, 1, 7, str.tostring(sellClusterCount) + " levels / Score " + str.tostring(sellClusterScore), text_color=color.red)
+    table.cell(dashboard, 0, 8, "Fib profile", text_color=color.white)
+    table.cell(dashboard, 1, 8, (isAsia ? "ASIA " : "DEEP ") + str.tostring(fibNear, "#.###") + "-" + str.tostring(fibDeep, "#.###"), text_color=color.aqua)
+    table.cell(dashboard, 0, 9, "Sweep", text_color=color.white)
+    table.cell(dashboard, 1, 9, buySweepArmed ? "BUY ARMED" : sellSweepArmed ? "SELL ARMED" : "WAIT", text_color=buySweepArmed ? color.lime : sellSweepArmed ? color.red : color.gray)
+    table.cell(dashboard, 0, 10, "15m Trigger", text_color=color.white)
+    table.cell(dashboard, 1, 10, triggerText, text_color=triggerText == "BUY READY" ? color.lime : triggerText == "SELL READY" ? color.red : color.gray)
+    table.cell(dashboard, 0, 11, "H1 Entry Source", text_color=color.white)
+    table.cell(dashboard, 1, 11, h1EntryText, text_color=buyH1NormalCandle ? color.lime : sellH1HeikinAshi ? color.red : color.gray)
+    table.cell(dashboard, 0, 12, "Structure", text_color=color.white)
+    table.cell(dashboard, 1, 12, structureEvent, text_color=structureBias == 1 ? color.lime : structureBias == -1 ? color.red : color.gray)
+    table.cell(dashboard, 0, 13, "Lifecycle", text_color=color.white)
+    table.cell(dashboard, 1, 13, lifecycle, text_color=tradeDirection == 1 ? color.lime : tradeDirection == -1 ? color.red : color.yellow)
+    table.cell(dashboard, 0, 14, "Entry / Stop / TP2", text_color=color.white)
+    table.cell(dashboard, 1, 14, tradeDirection == 0 ? "-" : str.tostring(tradeEntry, "#.##") + " / " + str.tostring(activeStop, "#.##") + " / " + str.tostring(tradeTp2, "#.##"), text_color=color.white)
+    table.cell(dashboard, 0, 15, "TP2 Source / EA", text_color=color.white)
+    table.cell(dashboard, 1, 15, tradeTargetSource + " / SIGNAL ONLY", text_color=tradeTargetSource == "SUPPLY_PRZ" or tradeTargetSource == "DEMAND_PRZ" ? color.aqua : color.gray)
+
+// Create one TradingView alert using: Condition -> "Any alert() function call".
