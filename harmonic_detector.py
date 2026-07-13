@@ -173,6 +173,16 @@ class PRZZone:
     d_point: float
     confluence_score: int = 0
     label: str = ""
+    x_point: float = 0.0
+    a_point: float = 0.0
+    b_point: float = 0.0
+    c_point: float = 0.0
+    x_idx: int = -1
+    a_idx: int = -1
+    b_idx: int = -1
+    c_idx: int = -1
+    d_idx: int = -1
+    ratios: dict = field(default_factory=dict)
 
     def in_prz(self, price: float) -> bool:
         return self.prz_low <= price <= self.prz_high
@@ -190,33 +200,77 @@ def calc_ratio(leg1: float, leg2: float) -> float:
     return abs(leg2) / abs(leg1)
 
 
+def xabcd_ratios(pts: HarmonicPoint) -> dict[str, float]:
+    """Return the four ratios displayed by a five-point harmonic route."""
+    xa = pts.a - pts.x
+    ab = pts.b - pts.a
+    bc = pts.c - pts.b
+    cd = pts.d - pts.c
+    ad = pts.d - pts.a
+    return {
+        "XAB": calc_ratio(xa, ab),
+        "ABC": calc_ratio(ab, bc),
+        "BCD": calc_ratio(bc, cd),
+        "XAD": calc_ratio(xa, ad),
+    }
+
+
 # ── Pattern Validation ────────────────────────────────────
 def validate_xabcd(pts: HarmonicPoint, pattern: dict) -> bool:
     """ตรวจ XABCD ratios ทุก leg"""
-    XA = pts.a - pts.x
-    AB = pts.b - pts.a
-    BC = pts.c - pts.b
-    CD = pts.d - pts.c
-
+    ratios = xabcd_ratios(pts)
     checks = []
 
     if "XA" in pattern:
-        r = calc_ratio(XA, AB)
-        checks.append(ratio_ok(r, *pattern["XA"]))
+        checks.append(ratio_ok(ratios["XAB"], *pattern["XA"]))
 
     if "AB" in pattern:
-        r = calc_ratio(AB, BC)
-        checks.append(ratio_ok(r, *pattern["AB"]))
+        checks.append(ratio_ok(ratios["ABC"], *pattern["AB"]))
 
     if "BC" in pattern:
-        r = calc_ratio(BC, CD)
-        checks.append(ratio_ok(r, *pattern["BC"]))
+        checks.append(ratio_ok(ratios["BCD"], *pattern["BC"]))
 
     if "CD" in pattern:
-        r = calc_ratio(XA, CD)
-        checks.append(ratio_ok(r, *pattern["CD"]))
+        checks.append(ratio_ok(ratios["XAD"], *pattern["CD"]))
 
     return all(checks) if checks else False
+
+
+def classify_symmetric_xabcd_route(pts: HarmonicPoint):
+    """Recognize the mirrored M/W route even when it has no strict pattern name.
+
+    This captures charts where X≈D and A≈C, with a meaningful B retracement
+    and CD expansion. It is context-only and never bypasses the entry trigger.
+    """
+    ratios = xabcd_ratios(pts)
+    xa_range = abs(pts.a - pts.x)
+    if xa_range < 0.0001:
+        return None
+    ac_symmetry = abs(pts.c - pts.a) / xa_range
+    xd_symmetry = abs(pts.d - pts.x) / xa_range
+    route_ok = (
+        ac_symmetry <= 0.08
+        and xd_symmetry <= 0.08
+        and 0.30 <= ratios["XAB"] <= 0.70
+        and 1.20 <= ratios["BCD"] <= 2.618
+        and 0.90 <= ratios["XAD"] <= 1.08
+    )
+    if not route_ok:
+        return None
+
+    if pts.x > pts.a and pts.d > pts.c:
+        direction = "SELL"
+        name = "Bearish_Symmetric_XABCD"
+    elif pts.x < pts.a and pts.d < pts.c:
+        direction = "BUY"
+        name = "Bullish_Symmetric_XABCD"
+    else:
+        return None
+    return name, {
+        "direction": direction,
+        "priority": 3,
+        "reliability": "context",
+    }
 
 
 # ── PRZ Builder ───────────────────────────────────────────
@@ -231,11 +285,13 @@ def build_prz(pts: HarmonicPoint, pattern_name: str, pattern: dict) -> PRZZone:
 
     prz_high = d + prz_half
     prz_low  = d - prz_half
+    ratios = xabcd_ratios(pts)
 
     label = (
         f"🦋 {pattern_name} | D:{d:.2f} "
         f"| PRZ:{prz_low:.2f}-{prz_high:.2f}"
-        f"| {direction}"
+        f"| {direction} | XAB:{ratios['XAB']:.3f}"
+        f" BCD:{ratios['BCD']:.3f} XAD:{ratios['XAD']:.3f}"
     )
 
     return PRZZone(
@@ -247,6 +303,16 @@ def build_prz(pts: HarmonicPoint, pattern_name: str, pattern: dict) -> PRZZone:
         prz_low=prz_low,
         prz_mid=d,
         d_point=d,
+        x_point=pts.x,
+        a_point=pts.a,
+        b_point=pts.b,
+        c_point=pts.c,
+        x_idx=pts.x_idx,
+        a_idx=pts.a_idx,
+        b_idx=pts.b_idx,
+        c_idx=pts.c_idx,
+        d_idx=pts.d_idx,
+        ratios=ratios,
         label=label,
     )
 
@@ -303,8 +369,10 @@ class HarmonicDetector:
             if not pts:
                 continue
 
+            named_pattern_found = False
             for name, pattern in HARMONIC_PATTERNS.items():
                 if validate_xabcd(pts, pattern):
+                    named_pattern_found = True
                     prz = build_prz(pts, name, pattern)
                     # คำนวณ score
                     score = self._score(prz, current_price, pattern)
@@ -312,6 +380,17 @@ class HarmonicDetector:
                     threshold = SCORE_THRESHOLD.get(prz.priority, 5)
                     if score >= threshold:
                         self.detected.append(prz)
+
+            # A symmetric M/W route is useful Newday context even when its
+            # ratios do not fit one strict named pattern. It is deliberately
+            # not passed through a score bypass or an execution path.
+            if not named_pattern_found:
+                structural_route = classify_symmetric_xabcd_route(pts)
+                if structural_route:
+                    route_name, route_pattern = structural_route
+                    prz = build_prz(pts, route_name, route_pattern)
+                    prz.confluence_score = self._score(prz, current_price, route_pattern)
+                    self.detected.append(prz)
 
         # เรียงตาม priority + score
         self.detected.sort(key=lambda z: (z.priority, -z.confluence_score))
