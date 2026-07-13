@@ -197,6 +197,21 @@ class ExecutionLifecycleManager:
             state = self._positions.get(str(symbol))
             return asdict(state) if state else None
 
+    def close_external(self, symbol: str, r_multiple: float = 0.0) -> dict[str, Any]:
+        """Finalize state after an execution-only EA ACKs a Pine CLOSE_ALL."""
+        with self._lock:
+            state = self._positions.get(str(symbol))
+            if not state:
+                return {"status": "NO_ACTIVE_POSITION", "symbol": str(symbol)}
+            self._record_close(str(symbol), _number(r_multiple))
+            closed = asdict(state)
+            closed["status"] = "CLOSED"
+            closed["closed_at"] = _iso_now()
+            closed["close_owner"] = "PINE_TRADINGVIEW"
+            del self._positions[str(symbol)]
+            self._save()
+            return closed
+
     def register_fill(
         self,
         *,
