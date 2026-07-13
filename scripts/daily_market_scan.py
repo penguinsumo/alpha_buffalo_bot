@@ -23,7 +23,9 @@ from typing import Any, Dict, Optional
 import pandas as pd
 import requests
 
-sys.path.insert(0, os.path.expanduser("~/alpha_buffalo_bot"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 try:
     from core.config.loader import load_env_safely
@@ -153,7 +155,20 @@ def zone_to_harmonic_context(zone: Any, timeframe: str) -> HarmonicContext:
         timeframe=timeframe,
         source="market_close_harmonic_detector",
         state="COMPLETED_AT_D",
+        x_point=round(_to_float(getattr(zone, "x_point", 0.0)), 3),
+        a_point=round(_to_float(getattr(zone, "a_point", 0.0)), 3),
+        b_point=round(_to_float(getattr(zone, "b_point", 0.0)), 3),
+        c_point=round(_to_float(getattr(zone, "c_point", 0.0)), 3),
         d_point=round(d_point, 3),
+        x_idx=int(getattr(zone, "x_idx", -1)),
+        a_idx=int(getattr(zone, "a_idx", -1)),
+        b_idx=int(getattr(zone, "b_idx", -1)),
+        c_idx=int(getattr(zone, "c_idx", -1)),
+        d_idx=int(getattr(zone, "d_idx", -1)),
+        ratios={
+            str(key): round(_to_float(value), 6)
+            for key, value in dict(getattr(zone, "ratios", {}) or {}).items()
+        },
         prz_low=round(prz_low, 3),
         prz_high=round(prz_high, 3),
         tp1=round(tp1, 3),
