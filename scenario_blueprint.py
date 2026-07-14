@@ -232,6 +232,10 @@ class ScenarioBlueprint:
     near_tunnel_mid: bool = False
     near_tunnel_lower: bool = False
     tunnel_retest_valid: bool = False
+    buy_tunnel_sweep: bool = False
+    sell_tunnel_sweep: bool = False
+    tunnel_sweep_upper: float = 0.0
+    tunnel_sweep_lower: float = 0.0
 
     # Plan routing
     trade_plan: str = "NONE"
@@ -490,6 +494,10 @@ class ScenarioBlueprint:
                     "near_mid": self.near_tunnel_mid,
                     "near_lower": self.near_tunnel_lower,
                     "retest_valid": self.tunnel_retest_valid,
+                    "buy_sweep_armed": self.buy_tunnel_sweep,
+                    "sell_sweep_armed": self.sell_tunnel_sweep,
+                    "sweep_upper": self.tunnel_sweep_upper,
+                    "sweep_lower": self.tunnel_sweep_lower,
                     "upper": self.tunnel_upper,
                     "middle": self.tunnel_mid,
                     "lower": self.tunnel_lower,
