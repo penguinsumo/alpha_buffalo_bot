@@ -33,6 +33,7 @@ from engine_v4.router import SignalRouter
 from engine_v4.sell_engine import SellSignalEngine
 from engine_v4.session_gate import GateResult
 from execution_lifecycle import ExecutionLifecycleManager, closed_ha5_evidence
+from scenario_scanner import detect_confirmed_tunnel_sweep
 from session_clock import SessionClock, SessionState, market_closed_reason
 from alpha_buffalo_signal import (
     API_LICENSE_KEY,
@@ -222,6 +223,43 @@ def test_harmonic_d_prz_is_one_direction_only() -> None:
         "C_TO_D_APPROACH_ALIGNED",
         "falling parallel tunnel is the normal approach into bullish D",
     )
+
+
+def test_confirmed_tunnel_sweep_arms_only_the_aligned_approach() -> None:
+    sell = detect_confirmed_tunnel_sweep(
+        high=100.10,
+        low=98.50,
+        close=99.20,
+        upper=100.00,
+        lower=95.00,
+        tolerance=0.10,
+        tunnel_state="DOWNTREND",
+    )
+    assert_true(sell["SELL"], "upper-tunnel wick and reclaim must arm SELL")
+    assert_true(not sell["BUY"], "falling tunnel must not arm BUY at its upper edge")
+
+    no_reclaim = detect_confirmed_tunnel_sweep(
+        high=100.50,
+        low=99.00,
+        close=100.20,
+        upper=100.00,
+        lower=95.00,
+        tolerance=0.10,
+        tunnel_state="DOWNTREND",
+    )
+    assert_true(not no_reclaim["SELL"], "wick without close back below tunnel is not a sweep/reclaim")
+
+    buy = detect_confirmed_tunnel_sweep(
+        high=101.00,
+        low=94.90,
+        close=95.40,
+        upper=105.00,
+        lower=95.00,
+        tolerance=0.10,
+        tunnel_state="UPTREND",
+    )
+    assert_true(buy["BUY"], "lower-tunnel wick and reclaim must mirror BUY")
+    assert_true(not buy["SELL"], "rising tunnel must not arm SELL at its lower edge")
 
 
 def test_final_gate_combines_hours_risk_and_harmonic_bias() -> None:
@@ -1151,6 +1189,7 @@ TESTS = [
     test_lower_zone_blocks_fresh_sell,
     test_upper_zone_blocks_fresh_buy,
     test_harmonic_d_prz_is_one_direction_only,
+    test_confirmed_tunnel_sweep_arms_only_the_aligned_approach,
     test_final_gate_combines_hours_risk_and_harmonic_bias,
     test_low_rr_candidate_waits_in_ea_payload,
     test_buy_and_sell_share_one_api_schema,
