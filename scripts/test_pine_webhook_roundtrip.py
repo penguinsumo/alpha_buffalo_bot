@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 
 
 def payload(action: str) -> dict:
-    return {
+    command = {
         "key": "PINE_TEST_KEY",
         "status": "SIGNAL",
         "source": "PINE",
@@ -32,6 +32,21 @@ def payload(action: str) -> dict:
         "target_source": "SUPPLY_PRZ",
         "reason": "E2E_TEST",
     }
+    if action == "CLOSE":
+        command.update(
+            {
+                "reverse_direction": "SELL",
+                "reverse_entry_price": 4140.0,
+                "reverse_sl_price": 4150.0,
+                "reverse_tp1_price": 4130.0,
+                "reverse_tp2_price": 4110.0,
+                "reverse_score": 5,
+                "reverse_signal_id": "XAUUSD-E2E-REV-SELL-002",
+                "reverse_target_source": "DEMAND_PRZ",
+                "reverse_reason": "KIVANC_PRZ_ARMED_HA15_ACK_REVERSE",
+            }
+        )
+    return command
 
 
 def main() -> None:
@@ -50,10 +65,24 @@ def main() -> None:
             "block_reason": "",
             "session_state": None,
         }
+        from engine_v4.session_gate import GateResult
+
+        service._pine_entry_permission = lambda direction, symbol: GateResult(
+            True, f"TEST_{direction}_ALLOWED"
+        )
+        telegram_messages = []
+        service._telegram_market_is_open = lambda payload=None, now=None: True
+        service.TELEGRAM_TOKEN = "test-token"
+        service.TELEGRAM_CHAT_IDS = ["test-chat"]
+        service.send_telegram_message = lambda message: telegram_messages.append(message) or True
 
         with TestClient(service.app) as client:
             opened = client.post("/webhook/tv", json=payload("OPEN"))
             assert opened.status_code == 200, opened.text
+            assert opened.json()["telegram_notified"] is True
+            assert len(telegram_messages) == 1
+            assert "BUY" in telegram_messages[-1]
+            assert "PINE_V2_4" in telegram_messages[-1]
             open_command = opened.json()["command"]
             assert open_command["action"] == "OPEN"
 
@@ -111,6 +140,19 @@ def main() -> None:
             )
             assert close_ack.status_code == 200, close_ack.text
             assert close_ack.json()["position"]["status"] == "CLOSED"
+            assert close_ack.json()["next_command"]["action"] == "OPEN"
+            assert close_ack.json()["next_command"]["direction"] == "SELL"
+            assert close_ack.json()["telegram_notified"] is True
+            assert len(telegram_messages) == 2
+            assert "SELL" in telegram_messages[-1]
+
+            reverse_poll = client.get(
+                "/execution/command",
+                params={"key": "PINE_TEST_KEY", "symbol": "XAUUSD"},
+            )
+            assert reverse_poll.status_code == 200, reverse_poll.text
+            reverse_command = reverse_poll.json()["command"]
+            assert reverse_command["command_id"] == "PINE:XAUUSD-E2E-REV-SELL-002:OPEN"
 
             state = client.get(
                 "/execution/state",
@@ -130,8 +172,10 @@ def main() -> None:
     print("PASS EA fill survives relay restart and command ACK is accepted")
     print("PASS Pine CLOSE becomes EA CLOSE_ALL")
     print("PASS CLOSE ACK clears durable execution state")
+    print("PASS CLOSE ACK promotes the queued reverse SELL OPEN")
+    print("PASS Pine OPEN and promoted reverse OPEN notify Telegram exactly once")
     print("PASS Python mode rejects Pine webhook ownership")
-    print("Summary: 5/5 webhook round-trip checks passed")
+    print("Summary: 7/7 webhook round-trip checks passed")
 
 
 if __name__ == "__main__":

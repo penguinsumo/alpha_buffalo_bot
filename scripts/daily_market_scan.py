@@ -34,9 +34,10 @@ except Exception:
     pass
 
 try:
-    from harmonic_detector import run_harmonic
+    from harmonic_detector import run_harmonic, scan_forming_harmonic
 except Exception as exc:
     run_harmonic = None
+    scan_forming_harmonic = None
     HARMONIC_IMPORT_ERROR = str(exc)
 else:
     HARMONIC_IMPORT_ERROR = ""
@@ -152,6 +153,7 @@ def zone_to_harmonic_context(zone: Any, timeframe: str) -> HarmonicContext:
         found=bool(prz_low > 0 and prz_high > 0 and d_point > 0),
         pattern=str(getattr(zone, "pattern_name", "") or ""),
         direction=direction,
+        approach_direction="SELL" if direction == "BUY" else "BUY" if direction == "SELL" else "NONE",
         timeframe=timeframe,
         source="market_close_harmonic_detector",
         state="COMPLETED_AT_D",
@@ -177,14 +179,145 @@ def zone_to_harmonic_context(zone: Any, timeframe: str) -> HarmonicContext:
         invalidation=round(invalidation, 3),
         priority=int(getattr(zone, "priority", 5) or 5),
         reliability=str(getattr(zone, "reliability", "UNKNOWN") or "UNKNOWN"),
+        projection_mode="COMPLETED_XABCD",
+        execution_authority=str(getattr(zone, "reliability", "") or "").lower() != "context",
+        selected_pattern=str(getattr(zone, "pattern_name", "") or ""),
+        ratio_model="COMPLETED_XABCD_RATIOS",
+        confirmation_required=[
+            "PRZ_REVERSAL_CANDLE",
+            "DIRECTIONAL_CANDLE_BREAKOUT",
+            "HTF_STRUCTURE_ALIGNMENT",
+        ],
+        stop_reference="CONFIRMATION_CANDLE_EXTREME",
+        statistics_status="INSUFFICIENT_SAMPLE",
+        statistics_sample_size=0,
+        statistics_source="NONE",
     )
 
 
-def select_harmonic(df_4h: pd.DataFrame, df_1d: pd.DataFrame) -> HarmonicContext:
+def projection_to_harmonic_context(projection: Dict[str, Any], timeframe: str) -> HarmonicContext:
+    """Serialize a confirmed-XABC forecast before D exists."""
+    direction = str(projection.get("direction", "NONE") or "NONE").upper()
+    prz_low = _to_float(projection.get("prz_low"))
+    prz_high = _to_float(projection.get("prz_high"))
+    d_point = _to_float(projection.get("d_point"))
+    width = max(prz_high - prz_low, 0.0)
+    if direction == "BUY":
+        tp1, tp2, tp3 = d_point + width * 1.272, d_point + width * 1.618, d_point + width * 2.618
+        invalidation = prz_low - max(width * 0.25, d_point * 0.0015)
+    elif direction == "SELL":
+        tp1, tp2, tp3 = d_point - width * 1.272, d_point - width * 1.618, d_point - width * 2.618
+        invalidation = prz_high + max(width * 0.25, d_point * 0.0015)
+    else:
+        tp1 = tp2 = tp3 = invalidation = 0.0
+
+    explicit_tp1 = _to_float(projection.get("tp1"))
+    explicit_tp2 = _to_float(projection.get("tp2"))
+    explicit_tp3 = _to_float(projection.get("tp3"))
+    if explicit_tp1 > 0:
+        tp1 = explicit_tp1
+    if explicit_tp2 > 0:
+        tp2 = explicit_tp2
+    if explicit_tp3 > 0:
+        tp3 = explicit_tp3
+
+    candidates = []
+    for candidate in projection.get("candidates") or []:
+        candidates.append(
+            {
+                "pattern": str(candidate.get("pattern", "")),
+                "state": str(candidate.get("state", "NONE")),
+                "prz_low": round(_to_float(candidate.get("prz_low")), 3),
+                "prz_high": round(_to_float(candidate.get("prz_high")), 3),
+                "current_xad": round(_to_float(candidate.get("current_xad")), 6),
+                "current_bcd": round(_to_float(candidate.get("current_bcd")), 6),
+                "next_xad": round(_to_float(candidate.get("next_xad")), 6),
+                "fallback": bool(candidate.get("fallback", False)),
+                "execution_authority": bool(candidate.get("execution_authority", True)),
+                "ratio_model": str(candidate.get("ratio_model", "NONE")),
+                "confirmation_required": list(candidate.get("confirmation_required") or []),
+                "stop_reference": str(candidate.get("stop_reference", "NONE")),
+                "morph_state": str(candidate.get("morph_state", "BASE_PROJECTION")),
+                "morph_from": list(candidate.get("morph_from") or []),
+                "morph_to": str(candidate.get("morph_to", "")),
+                "morph_reason": str(candidate.get("morph_reason", "NONE")),
+                "statistics_status": str(candidate.get("statistics_status", "INSUFFICIENT_SAMPLE")),
+                "statistics_sample_size": int(candidate.get("statistics_sample_size", 0) or 0),
+                "statistics_source": str(candidate.get("statistics_source", "NONE")),
+            }
+        )
+
+    return HarmonicContext(
+        found=bool(direction in {"BUY", "SELL"} and prz_low > 0 and prz_high > 0),
+        pattern=str(projection.get("pattern", "") or ""),
+        direction=direction,
+        approach_direction=str(projection.get("approach_direction", "NONE") or "NONE"),
+        timeframe=timeframe,
+        source=str(projection.get("source", "market_close_harmonic_projection")),
+        state=str(projection.get("state", "FORMING") or "FORMING"),
+        x_point=round(_to_float(projection.get("x")), 3),
+        a_point=round(_to_float(projection.get("a")), 3),
+        b_point=round(_to_float(projection.get("b")), 3),
+        c_point=round(_to_float(projection.get("c")), 3),
+        d_point=round(d_point, 3),
+        x_idx=int(projection.get("x_idx", -1)),
+        a_idx=int(projection.get("a_idx", -1)),
+        b_idx=int(projection.get("b_idx", -1)),
+        c_idx=int(projection.get("c_idx", -1)),
+        d_idx=-1,
+        ratios={
+            str(key): round(_to_float(value), 6)
+            for key, value in dict(projection.get("ratios") or {}).items()
+        },
+        prz_low=round(prz_low, 3),
+        prz_high=round(prz_high, 3),
+        tp1=round(tp1, 3),
+        tp2=round(tp2, 3),
+        tp3=round(tp3, 3),
+        invalidation=round(invalidation, 3),
+        priority=int(projection.get("priority", 5) or 5),
+        reliability="PROJECTED",
+        projection_mode=str(projection.get("projection_mode", "FORMING_XABC_TO_D")),
+        execution_authority=bool(projection.get("execution_authority", True)),
+        selected_pattern=str(projection.get("selected_pattern", projection.get("pattern", "")) or ""),
+        candidate_patterns=candidates,
+        current_xad=round(_to_float(projection.get("current_xad")), 6),
+        current_bcd=round(_to_float(projection.get("current_bcd")), 6),
+        next_xad=round(_to_float(projection.get("next_xad")), 6),
+        ratio_model=str(projection.get("ratio_model", "NONE")),
+        confirmation_required=list(projection.get("confirmation_required") or []),
+        stop_reference=str(projection.get("stop_reference", "NONE")),
+        morph_state=str(projection.get("morph_state", "BASE_PROJECTION")),
+        morph_from=list(projection.get("morph_from") or []),
+        morph_to=str(projection.get("morph_to", "")),
+        morph_reason=str(projection.get("morph_reason", "NONE")),
+        statistics_status=str(projection.get("statistics_status", "INSUFFICIENT_SAMPLE")),
+        statistics_sample_size=int(projection.get("statistics_sample_size", 0) or 0),
+        statistics_source=str(projection.get("statistics_source", "NONE")),
+    )
+
+
+def select_harmonic(
+    df_4h: pd.DataFrame,
+    df_1d: pd.DataFrame,
+    df_1h: Optional[pd.DataFrame] = None,
+) -> HarmonicContext:
     if run_harmonic is None:
         return HarmonicContext(found=False, source=f"harmonic_import_error:{HARMONIC_IMPORT_ERROR}")
 
     candidates = []
+    if scan_forming_harmonic is not None:
+        projection_frames = [("1H", df_1h), ("4H", df_4h), ("1D", df_1d)]
+        for timeframe, df in projection_frames:
+            if df is None or df.empty:
+                continue
+            try:
+                projection = scan_forming_harmonic(df)
+                if projection.get("found"):
+                    candidates.append(projection_to_harmonic_context(projection, timeframe))
+            except Exception as exc:
+                print(f"⚠️ Forming harmonic projection failed timeframe={timeframe}: {exc}")
+
     for timeframe, df in (("4H", df_4h), ("1D", df_1d)):
         try:
             for zone in run_harmonic(df) or []:
@@ -197,8 +330,15 @@ def select_harmonic(df_4h: pd.DataFrame, df_1d: pd.DataFrame) -> HarmonicContext
     if not candidates:
         return HarmonicContext(found=False, source="market_close_harmonic_detector")
 
-    tf_rank = {"4H": 0, "1D": 1}
-    candidates.sort(key=lambda c: (tf_rank.get(c.timeframe, 9), c.priority))
+    state_rank = {"ACTIVE": 0, "ARMED": 1, "FORMING": 2, "COMPLETED_AT_D": 3, "PASSED": 9}
+    tf_rank = {"1H": 0, "4H": 1, "1D": 2}
+    candidates.sort(
+        key=lambda c: (
+            state_rank.get(str(c.state).upper(), 5),
+            tf_rank.get(c.timeframe, 9),
+            c.priority,
+        )
+    )
     return candidates[0]
 
 
@@ -243,7 +383,7 @@ def main() -> None:
     projected_low = pdl - day_range * 0.2
     daily_bias = "BULLISH" if pdc > ((pdh + pdl) / 2) else "BEARISH"
 
-    harmonic_context = select_harmonic(df_4h, df_1d)
+    harmonic_context = select_harmonic(df_4h, df_1d, df_1h)
 
     liquidity_zones = [
         LiquidityZone(price=round(pdh, 3), zone_type="BUY_SIDE_PDH", strength=0.9),

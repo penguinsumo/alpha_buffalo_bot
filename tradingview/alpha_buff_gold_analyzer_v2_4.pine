@@ -2,7 +2,7 @@
 indicator("AlphaBuff Gold Analyzer v2.4.2 - Decision Stack", overlay=true, max_labels_count=300, max_boxes_count=30)
 
 // This indicator is designed to run on a 5-minute chart. Every higher-timeframe
-// request uses the last confirmed source bar (offset [1] + lookahead_on).
+// decision uses the last confirmed source bar (offset [1] + lookahead_on).
 
 // =============================================================================
 // 1. INPUTS
@@ -13,24 +13,22 @@ contextTf       = input.timeframe("1D",  "Context timeframe", group=groupTf)
 rangeTfD        = input.timeframe("1D",  "Cluster TF 1", group=groupTf)
 rangeTfH4       = input.timeframe("240", "Cluster TF 2", group=groupTf)
 rangeTfH1       = input.timeframe("60",  "Cluster TF 3", group=groupTf)
-triggerTf       = input.timeframe("15",  "HA / PA / VSA trigger TF", group=groupTf)
+triggerTf       = input.timeframe("15",  "HA / PA trigger TF", group=groupTf)
 structureTf     = input.timeframe("60",  "BOS / CHoCH TF", group=groupTf)
 entryConfirmTf  = input.timeframe("60",  "Asymmetric entry confirmation TF", group=groupTf)
-exitTf          = input.timeframe("5",   "HA mirror exit TF", group=groupTf)
 marketTimezone  = input.string("Asia/Bangkok", "Session timezone", group=groupTf)
 marketSession   = input.session("0000-2359:23456", "Alert session (Mon-Fri)", group=groupTf)
 asiaSession     = input.session("0600-1500:23456", "Asia session", group=groupTf)
 requireExchangeMarket = input.bool(true, "Require exchange regular session", group=groupTf)
-enforceSafeTf   = input.bool(true, "Require chart TF <= exit TF", group=groupTf,
-     tooltip="Keep enabled for exact two-candle 5m HA exits. Use this script on a 5m chart.")
+enforceSafeTf   = input.bool(true, "Require chart TF <= trigger TF", group=groupTf,
+     tooltip="Use this script on a 5m chart; final HA decisions still wait for a confirmed 15m candle.")
 
 groupContext = "02. Directional Context"
 emaLen            = input.int(200, "EMA length", minval=20, group=groupContext)
 rsiLen            = input.int(14, "RSI length", minval=2, group=groupContext)
 dxySymbol         = input.symbol("TVC:DXY", "DXY symbol", group=groupContext)
+gcSymbol          = input.symbol("COMEX:GC1!", "GC futures confirmation symbol", group=groupContext)
 contextThreshold  = input.int(2, "Directional score required", minval=1, maxval=3, group=groupContext)
-displaySpread     = input.float(20.0, "Display only: futures - spot", minval=0.0, group=groupContext,
-     tooltip="This value is never added to PRZ or signal prices.")
 
 groupPrz = "03. PRZ / Cluster"
 asiaFibMin       = input.float(0.618, "Asia Fib near", minval=0.50, maxval=1.0, step=0.001, group=groupPrz)
@@ -48,14 +46,20 @@ sweepTtl         = input.int(8, "Sweep reclaim TTL (15m bars)", minval=1, maxval
 invalidationAtr  = input.float(0.15, "Beyond 1.00 invalidation buffer (ATR)", minval=0.0, step=0.05, group=groupPrz)
 reclaimAtr       = input.float(0.25, "Reclaim overshoot allowance (ATR)", minval=0.0, step=0.05, group=groupPrz)
 
-groupTrigger = "04. BB / PA / VSA Trigger"
+groupTrigger = "04. BB / PA / GC Futures RVOL Wall"
 bbLen          = input.int(20, "BB length", minval=5, group=groupTrigger)
 bbMult         = input.float(2.0, "BB deviation", minval=0.5, step=0.1, group=groupTrigger)
 requireBbTouch = input.bool(true, "Require BB rejection", group=groupTrigger)
 pinWickRatio   = input.float(2.0, "Pinbar wick/body ratio", minval=1.0, step=0.1, group=groupTrigger)
-vsaVolLen      = input.int(20, "VSA volume average", minval=5, group=groupTrigger)
-vsaVolMult     = input.float(1.20, "VSA volume wall multiplier", minval=0.5, step=0.05, group=groupTrigger)
-vsaWickPct     = input.float(0.45, "VSA rejection wick / range", minval=0.20, maxval=0.90, step=0.05, group=groupTrigger)
+gcVolumeLen      = input.int(20, "GC contract-volume average", minval=5, group=groupTrigger)
+requireGcRvolAtLevel = input.bool(true, "Require GC futures RVOL wall inside PRZ", group=groupTrigger,
+     tooltip="Exchange-traded GC contract volume validates/arms the PRZ only. It never sends an entry by itself.")
+gcRvolMin      = input.float(1.20, "GC minimum RVOL", minval=0.5, step=0.05, group=groupTrigger)
+gcLevelAtrTolerance = input.float(0.35, "GC S/R proximity (ATR)", minval=0.05, step=0.05, group=groupTrigger)
+entryMaxDistanceAtr = input.float(0.75, "Maximum HA confirmation distance from PRZ (ATR)", minval=0.1, step=0.05, group=groupTrigger,
+     tooltip="Cancels an armed setup when the second HA candle forms in the middle between demand and supply.")
+entryArmTtl    = input.int(8, "PRZ state TTL (15m bars)", minval=2, maxval=12, group=groupTrigger,
+     tooltip="Keeps GC-RVOL wall evidence and confirmed PA alive while price remains in the PRZ, unless an opposite BOS invalidates the wall.")
 
 groupStructure = "05. Structure Permission"
 structureLookback     = input.int(5, "BOS / CHoCH lookback", minval=2, group=groupStructure)
@@ -103,14 +107,18 @@ f_confirmed_swing_range(int _lookback, int _pivotBars) =>
     _rawLow = na(_lastLow) ? _fallbackLow : _lastLow
     [math.max(_rawHigh, _rawLow)[1], math.min(_rawHigh, _rawLow)[1]]
 
-f_confirmed_trigger(_bbLen, _bbMult, _volLen) =>
+f_confirmed_trigger(_bbLen, _bbMult) =>
     _basis = ta.sma(close, _bbLen)
     _dev = ta.stdev(close, _bbLen) * _bbMult
     _upper = _basis + _dev
     _lower = _basis - _dev
+    _atr = ta.atr(14)
+    [open[1], high[1], low[1], close[1], _basis[1], _upper[1], _lower[1], _atr[1]]
+
+f_confirmed_gc(_volLen) =>
     _volAvg = ta.sma(volume, _volLen)
     _atr = ta.atr(14)
-    [open[1], high[1], low[1], close[1], volume[1], _basis[1], _upper[1], _lower[1], _volAvg[1], _atr[1]]
+    [open[1], high[1], low[1], close[1], volume[1], _volAvg[1], _atr[1]]
 
 f_confirmed_structure(_lookback) =>
     _bullBreak = close > ta.highest(high, _lookback)[1]
@@ -160,6 +168,10 @@ f_send_signal(string _action, string _direction, string _reason, float _entry, f
     _payload = '{"key":"' + webhookKey + '","status":"SIGNAL","source":"PINE","strategy":"ALPHABUFF_V2_4","action":"' + _action + '","direction":"' + _direction + '","symbol":"' + syminfo.ticker + '","ticker_id":"' + syminfo.tickerid + '","timeframe":"' + timeframe.period + '","signal_id":"' + _signalId + '","entry_price":' + f_num(_entry) + ',"exit_price":' + f_num(_exit) + ',"sl_price":' + f_num(_sl) + ',"tp1_price":' + f_num(_tp1) + ',"tp2_price":' + f_num(_tp2) + ',"score":' + str.tostring(_score) + ',"target_source":"' + _targetSource + '","reason":"' + _reason + '"}'
     alert(_payload, alert.freq_once_per_bar_close)
 
+f_send_reverse_close(string _direction, string _reason, float _entry, float _exit, float _sl, float _tp1, float _tp2, int _score, string _signalId, string _targetSource, string _reverseDirection, float _reverseEntry, float _reverseSl, float _reverseTp1, float _reverseTp2, int _reverseScore, string _reverseSignalId, string _reverseTargetSource) =>
+    _payload = '{"key":"' + webhookKey + '","status":"SIGNAL","source":"PINE","strategy":"ALPHABUFF_V2_4","action":"CLOSE","direction":"' + _direction + '","symbol":"' + syminfo.ticker + '","ticker_id":"' + syminfo.tickerid + '","timeframe":"' + timeframe.period + '","signal_id":"' + _signalId + '","entry_price":' + f_num(_entry) + ',"exit_price":' + f_num(_exit) + ',"sl_price":' + f_num(_sl) + ',"tp1_price":' + f_num(_tp1) + ',"tp2_price":' + f_num(_tp2) + ',"score":' + str.tostring(_score) + ',"target_source":"' + _targetSource + '","reason":"' + _reason + '","reverse_direction":"' + _reverseDirection + '","reverse_entry_price":' + f_num(_reverseEntry) + ',"reverse_sl_price":' + f_num(_reverseSl) + ',"reverse_tp1_price":' + f_num(_reverseTp1) + ',"reverse_tp2_price":' + f_num(_reverseTp2) + ',"reverse_score":' + str.tostring(_reverseScore) + ',"reverse_signal_id":"' + _reverseSignalId + '","reverse_target_source":"' + _reverseTargetSource + '","reverse_reason":"PRZ_GC_RVOL_WALL_PA_HA15_ACK_REVERSE"}'
+    alert(_payload, alert.freq_once_per_bar_close)
+
 // =============================================================================
 // 3. CONFIRMED MULTI-TIMEFRAME DATA (NON-REPAINT)
 // =============================================================================
@@ -185,21 +197,25 @@ f_send_signal(string _action, string _direction, string _reason, float _entry, f
      syminfo.tickerid, rangeTfH1, f_confirmed_swing_range(lookbackH1, swingPivotBars),
      gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
 
-[triggerOpen, triggerHigh, triggerLow, triggerClose, triggerVolume, bbBasis, bbUpper, bbLower, triggerVolAvg, triggerAtr] = request.security(
-     syminfo.tickerid, triggerTf, f_confirmed_trigger(bbLen, bbMult, vsaVolLen),
+[triggerOpen, triggerHigh, triggerLow, triggerClose, bbBasis, bbUpper, bbLower, triggerAtr] = request.security(
+     syminfo.tickerid, triggerTf, f_confirmed_trigger(bbLen, bbMult),
      gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+[gcOpen, gcHigh, gcLow, gcClose, gcVolume, gcVolAvg, gcAtr] = request.security(
+     gcSymbol, triggerTf, f_confirmed_gc(gcVolumeLen),
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on, ignore_invalid_symbol=true)
+
+[gcResistanceH1, gcSupportH1] = request.security(
+     gcSymbol, rangeTfH1, f_confirmed_swing_range(lookbackH1, swingPivotBars),
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on, ignore_invalid_symbol=true)
 
 haTicker = ticker.heikinashi(syminfo.tickerid)
 [ha15Open, ha15Close, ha15PrevOpen, ha15PrevClose] = request.security(
      haTicker, triggerTf, [open[1], close[1], open[2], close[2]],
      gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
 
-[ha5Open, ha5Close, ha5PrevOpen, ha5PrevClose] = request.security(
-     haTicker, exitTf, [open[1], close[1], open[2], close[2]],
-     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-
-[h1RegularOpen, h1RegularClose] = request.security(
-     syminfo.tickerid, entryConfirmTf, [open[1], close[1]],
+[h1RegularOpen, h1RegularHigh, h1RegularLow, h1RegularClose] = request.security(
+     syminfo.tickerid, entryConfirmTf, [open[1], high[1], low[1], close[1]],
      gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
 
 [h1HaOpen, h1HaClose] = request.security(
@@ -325,7 +341,7 @@ else
         sellClusterHi := math.max(sellClusterHi, sellH4Hi)
 
 // =============================================================================
-// 5. DIRECTIONAL CONTEXT, PA / BB / VSA, AND STRUCTURE
+// 5. DIRECTIONAL CONTEXT, PA / BB, GC FUTURES RVOL WALL, AND STRUCTURE
 // =============================================================================
 
 emaBuy = contextClose > contextEma
@@ -340,36 +356,42 @@ sellContextScore = (emaSell ? 1 : 0) + (rsiSell ? 1 : 0) + (dxySell ? 1 : 0)
 buyContextOk = buyContextScore >= contextThreshold
 sellContextOk = sellContextScore >= contextThreshold
 
-triggerRange = math.max(triggerHigh - triggerLow, syminfo.mintick)
 triggerBody = math.max(math.abs(triggerClose - triggerOpen), syminfo.mintick)
 lowerWick = math.min(triggerOpen, triggerClose) - triggerLow
 upperWick = triggerHigh - math.max(triggerOpen, triggerClose)
 
 bullPin = lowerWick >= triggerBody * pinWickRatio and upperWick <= triggerBody
 bearPin = upperWick >= triggerBody * pinWickRatio and lowerWick <= triggerBody
-haBullReversal = ha15PrevClose <= ha15PrevOpen and ha15Close > ha15Open
-haBearReversal = ha15PrevClose >= ha15PrevOpen and ha15Close < ha15Open
-
-hasUsableVolume = not na(triggerVolume) and not na(triggerVolAvg) and triggerVolAvg > 0
-vsaVolumeWall = hasUsableVolume and triggerVolume >= triggerVolAvg * vsaVolMult
-bullVsaWall = vsaVolumeWall and lowerWick / triggerRange >= vsaWickPct and triggerClose >= triggerLow + triggerRange * 0.60
-bearVsaWall = vsaVolumeWall and upperWick / triggerRange >= vsaWickPct and triggerClose <= triggerHigh - triggerRange * 0.60
+gcHasData = not na(gcClose) and not na(gcVolume) and not na(gcVolAvg) and gcVolAvg > 0 and not na(gcAtr)
+gcRvol = gcHasData ? gcVolume / gcVolAvg : na
+gcLevelTolerance = gcHasData ? math.max(gcAtr * gcLevelAtrTolerance, syminfo.mintick) : na
+gcAtSupport = gcHasData and not na(gcSupportH1) and gcLow <= gcSupportH1 + gcLevelTolerance and gcHigh >= gcSupportH1 - gcLevelTolerance
+gcAtResistance = gcHasData and not na(gcResistanceH1) and gcHigh >= gcResistanceH1 - gcLevelTolerance and gcLow <= gcResistanceH1 + gcLevelTolerance
+gcBuyRvolWall = gcAtSupport and gcRvol >= gcRvolMin and gcClose >= gcOpen
+gcSellRvolWall = gcAtResistance and gcRvol >= gcRvolMin and gcClose <= gcOpen
+gcBuyPermission = not requireGcRvolAtLevel or gcBuyRvolWall
+gcSellPermission = not requireGcRvolAtLevel or gcSellRvolWall
 
 bbBuyReject = triggerLow <= bbLower and triggerClose > bbLower
 bbSellReject = triggerHigh >= bbUpper and triggerClose < bbUpper
-buyPaTrigger = bullPin or haBullReversal or bullVsaWall
-sellPaTrigger = bearPin or haBearReversal or bearVsaWall
 buyBbOk = not requireBbTouch or bbBuyReject
 sellBbOk = not requireBbTouch or bbSellReject
 buyH1NormalCandle = h1RegularClose > h1RegularOpen
 sellH1HeikinAshi = h1HaClose < h1HaOpen
+h1Range = math.max(h1RegularHigh - h1RegularLow, syminfo.mintick)
+h1Body = math.max(math.abs(h1RegularClose - h1RegularOpen), syminfo.mintick)
+h1LowerWick = math.min(h1RegularOpen, h1RegularClose) - h1RegularLow
+h1UpperWick = h1RegularHigh - math.max(h1RegularOpen, h1RegularClose)
+h1BullPin = h1LowerWick >= h1Body * pinWickRatio and h1UpperWick <= h1Body
+h1BearPin = h1UpperWick >= h1Body * pinWickRatio and h1LowerWick <= h1Body
+buyReversalPin = bullPin or h1BullPin
+sellReversalPin = bearPin or h1BearPin
 buyH1Permission = not requireAsymmetricH1 or buyH1NormalCandle
 sellH1Permission = not requireAsymmetricH1 or sellH1HeikinAshi
 
 newTriggerBar = timeframe.change(triggerTf)
 newStructureBar = timeframe.change(structureTf)
 newEntryConfirmBar = timeframe.change(entryConfirmTf)
-newExitBar = timeframe.change(exitTf)
 
 var int structureBias = 0
 var string structureEvent = "NONE"
@@ -391,6 +413,19 @@ var float buySweepLow = na
 var float sellSweepHigh = na
 var int buySweepAge = 0
 var int sellSweepAge = 0
+// GC futures RVOL is evidence attached to the PRZ, never an entry trigger.
+var bool buyGcRvolWallArmed = false
+var bool sellGcRvolWallArmed = false
+var int buyGcRvolWallAge = 0
+var int sellGcRvolWallAge = 0
+var bool buyPaZoneArmed = false
+var bool sellPaZoneArmed = false
+var int buyPaZoneAge = 0
+var int sellPaZoneAge = 0
+var bool buyEntryArmed = false
+var bool sellEntryArmed = false
+var int buyEntryArmAge = 0
+var int sellEntryArmAge = 0
 var bool previousAsia = isAsia
 
 var int tradeDirection = 0
@@ -406,12 +441,24 @@ if isAsia != previousAsia
     sellSweepHigh := na
     buySweepAge := 0
     sellSweepAge := 0
+    buyGcRvolWallArmed := false
+    sellGcRvolWallArmed := false
+    buyGcRvolWallAge := 0
+    sellGcRvolWallAge := 0
+    buyPaZoneArmed := false
+    sellPaZoneArmed := false
+    buyPaZoneAge := 0
+    sellPaZoneAge := 0
+    buyEntryArmed := false
+    sellEntryArmed := false
+    buyEntryArmAge := 0
+    sellEntryArmAge := 0
     previousAsia := isAsia
 
 bool buyReclaimNow = false
 bool sellReclaimNow = false
 
-if barstate.isconfirmed and newTriggerBar and tradeDirection == 0
+if barstate.isconfirmed and newTriggerBar
     if buySweepArmed
         buySweepAge += 1
         buySweepLow := math.min(buySweepLow, triggerLow)
@@ -449,13 +496,20 @@ if barstate.isconfirmed and newTriggerBar and tradeDirection == 0
 buyClusterTouch = triggerLow <= buyClusterHi and triggerHigh >= buyClusterLo
 sellClusterTouch = triggerHigh >= sellClusterLo and triggerLow <= sellClusterHi
 
+entryDistanceBuffer = triggerAtr * entryMaxDistanceAtr
+buyDecisionZone = triggerClose >= buyClusterLo - triggerAtr * reclaimAtr and triggerClose <= buyClusterHi + entryDistanceBuffer
+sellDecisionZone = triggerClose <= sellClusterHi + triggerAtr * reclaimAtr and triggerClose >= sellClusterLo - entryDistanceBuffer
+buyDirectionalZone = buyDecisionZone and not sellDecisionZone
+sellDirectionalZone = sellDecisionZone and not buyDecisionZone
+middleLocation = not buyDecisionZone and not sellDecisionZone
+ambiguousLocation = buyDecisionZone and sellDecisionZone
+
 buyLocationOk = (isAsia or not requireDeepSweep) ? buyClusterTouch : buyReclaimNow
 sellLocationOk = (isAsia or not requireDeepSweep) ? sellClusterTouch : sellReclaimNow
 buyClusterOk = buyClusterCount >= minimumCluster
 sellClusterOk = sellClusterCount >= minimumCluster
 
 chartSeconds = timeframe.in_seconds()
-exitSeconds = timeframe.in_seconds(exitTf)
 triggerSeconds = timeframe.in_seconds(triggerTf)
 structureSeconds = timeframe.in_seconds(structureTf)
 entryConfirmSeconds = timeframe.in_seconds(entryConfirmTf)
@@ -463,13 +517,124 @@ contextSeconds = timeframe.in_seconds(contextTf)
 rangeDSeconds = timeframe.in_seconds(rangeTfD)
 rangeH4Seconds = timeframe.in_seconds(rangeTfH4)
 rangeH1Seconds = timeframe.in_seconds(rangeTfH1)
-safeTimeframe = chartSeconds <= exitSeconds and chartSeconds <= triggerSeconds and chartSeconds <= structureSeconds and chartSeconds <= entryConfirmSeconds and chartSeconds <= contextSeconds and chartSeconds <= rangeDSeconds and chartSeconds <= rangeH4Seconds and chartSeconds <= rangeH1Seconds
+safeTimeframe = chartSeconds <= triggerSeconds and chartSeconds <= structureSeconds and chartSeconds <= entryConfirmSeconds and chartSeconds <= contextSeconds and chartSeconds <= rangeDSeconds and chartSeconds <= rangeH4Seconds and chartSeconds <= rangeH1Seconds
 timeframeGate = not enforceSafeTf or safeTimeframe
 buyStructureEntryOk = not requireStructureEntry or structureBias == 1
 sellStructureEntryOk = not requireStructureEntry or structureBias == -1
 
-buySetup = marketOpen and timeframeGate and buyContextOk and buyClusterOk and buyLocationOk and buyBbOk and buyPaTrigger and buyH1Permission and buyStructureEntryOk
-sellSetup = marketOpen and timeframeGate and sellContextOk and sellClusterOk and sellLocationOk and sellBbOk and sellPaTrigger and sellH1Permission and sellStructureEntryOk
+buyPrzBosThrough = newStructureBar and bearStructureBreak
+sellPrzBosThrough = newStructureBar and bullStructureBreak
+
+// GC contract RVOL validates the PRZ location. It cannot arm an executable entry.
+buyGcRvolWallSetup = marketOpen and timeframeGate and buyClusterOk and buyLocationOk and buyDirectionalZone and gcBuyPermission and not buyPrzBosThrough
+sellGcRvolWallSetup = marketOpen and timeframeGate and sellClusterOk and sellLocationOk and sellDirectionalZone and gcSellPermission and not sellPrzBosThrough
+
+// GC RVOL wall and PA are two properties of the same PRZ. Either may appear first;
+// neither can enter. Only the completed evidence latch may wait for HA15 #2.
+buyPaZoneSetup = marketOpen and timeframeGate and buyContextOk and buyClusterOk and buyLocationOk and buyDirectionalZone and buyBbOk and buyReversalPin and buyH1Permission and buyStructureEntryOk and not buyPrzBosThrough
+sellPaZoneSetup = marketOpen and timeframeGate and sellContextOk and sellClusterOk and sellLocationOk and sellDirectionalZone and sellBbOk and sellReversalPin and sellH1Permission and sellStructureEntryOk and not sellPrzBosThrough
+buyArmSetup = (buyGcRvolWallArmed or buyGcRvolWallSetup) and (buyPaZoneArmed or buyPaZoneSetup)
+sellArmSetup = (sellGcRvolWallArmed or sellGcRvolWallSetup) and (sellPaZoneArmed or sellPaZoneSetup)
+
+buyPrzConfirmationPermission = marketOpen and timeframeGate and buyContextOk and buyDirectionalZone and buyH1Permission and buyStructureEntryOk and not buyPrzBosThrough
+sellPrzConfirmationPermission = marketOpen and timeframeGate and sellContextOk and sellDirectionalZone and sellH1Permission and sellStructureEntryOk and not sellPrzBosThrough
+buyConfirmationPermission = buyPrzConfirmationPermission
+sellConfirmationPermission = sellPrzConfirmationPermission
+
+// The second confirmed HA candle must close beyond the whole body of the first.
+// Minute 10 may be displayed as a forming candidate, but no EA command is sent
+// before the 15m candle closes; this preserves the non-repaint contract.
+ha15TwoBullHigher = ha15Close > ha15Open and ha15PrevClose > ha15PrevOpen and ha15Close > math.max(ha15PrevOpen, ha15PrevClose)
+ha15TwoBearLower = ha15Close < ha15Open and ha15PrevClose < ha15PrevOpen and ha15Close < math.min(ha15PrevOpen, ha15PrevClose)
+
+bool buyEntryConfirmed = false
+bool sellEntryConfirmed = false
+if barstate.isconfirmed and newTriggerBar
+    if buyGcRvolWallArmed
+        buyGcRvolWallAge += 1
+        if buyGcRvolWallAge > entryArmTtl or not buyDirectionalZone
+            buyGcRvolWallArmed := false
+            buyGcRvolWallAge := 0
+    if sellGcRvolWallArmed
+        sellGcRvolWallAge += 1
+        if sellGcRvolWallAge > entryArmTtl or not sellDirectionalZone
+            sellGcRvolWallArmed := false
+            sellGcRvolWallAge := 0
+    if buyPaZoneArmed
+        buyPaZoneAge += 1
+        if buyPaZoneAge > entryArmTtl or not buyDirectionalZone
+            buyPaZoneArmed := false
+            buyPaZoneAge := 0
+    if sellPaZoneArmed
+        sellPaZoneAge += 1
+        if sellPaZoneAge > entryArmTtl or not sellDirectionalZone
+            sellPaZoneArmed := false
+            sellPaZoneAge := 0
+
+    if buyPrzBosThrough
+        buyGcRvolWallArmed := false
+        buyGcRvolWallAge := 0
+        buyPaZoneArmed := false
+        buyPaZoneAge := 0
+        buyEntryArmed := false
+        buyEntryArmAge := 0
+    if sellPrzBosThrough
+        sellGcRvolWallArmed := false
+        sellGcRvolWallAge := 0
+        sellPaZoneArmed := false
+        sellPaZoneAge := 0
+        sellEntryArmed := false
+        sellEntryArmAge := 0
+
+    if buyGcRvolWallSetup
+        buyGcRvolWallArmed := true
+        buyGcRvolWallAge := 0
+    if sellGcRvolWallSetup
+        sellGcRvolWallArmed := true
+        sellGcRvolWallAge := 0
+    if buyPaZoneSetup
+        buyPaZoneArmed := true
+        buyPaZoneAge := 0
+    if sellPaZoneSetup
+        sellPaZoneArmed := true
+        sellPaZoneAge := 0
+
+    if buyEntryArmed
+        buyEntryArmAge += 1
+        if buyEntryArmAge > entryArmTtl or not buyDirectionalZone
+            buyEntryArmed := false
+            buyEntryArmAge := 0
+    if sellEntryArmed
+        sellEntryArmAge += 1
+        if sellEntryArmAge > entryArmTtl or not sellDirectionalZone
+            sellEntryArmed := false
+            sellEntryArmAge := 0
+
+    // Confirmation uses a location that was armed on an earlier confirmed bar.
+    buyEntryConfirmed := buyEntryArmed and ha15TwoBullHigher and buyConfirmationPermission
+    sellEntryConfirmed := sellEntryArmed and ha15TwoBearLower and sellConfirmationPermission
+
+    if buyEntryConfirmed
+        buyEntryArmed := false
+        buyEntryArmAge := 0
+    else if buyArmSetup
+        buyEntryArmed := true
+        buyEntryArmAge := 0
+        buyGcRvolWallArmed := false
+        buyGcRvolWallAge := 0
+        buyPaZoneArmed := false
+        buyPaZoneAge := 0
+
+    if sellEntryConfirmed
+        sellEntryArmed := false
+        sellEntryArmAge := 0
+    else if sellArmSetup
+        sellEntryArmed := true
+        sellEntryArmAge := 0
+        sellGcRvolWallArmed := false
+        sellGcRvolWallAge := 0
+        sellPaZoneArmed := false
+        sellPaZoneAge := 0
 
 // =============================================================================
 // 7. SIGNAL AND VIRTUAL TRADE LIFECYCLE
@@ -495,9 +660,18 @@ string exitReason = ""
 string exitedDirection = "NONE"
 float exitPrice = na
 float noExitPrice = na
+string reverseDirection = "NONE"
+float reverseEntry = na
+float reverseSl = na
+float reverseRisk = na
+float reverseTp1 = na
+float reverseTp2 = na
+int reverseScore = 0
+string reverseSignalId = ""
+string reverseTargetSource = "NONE"
 
 if barstate.isconfirmed and newTriggerBar and tradeDirection == 0 and cooldown == 0
-    if buySetup and not sellSetup
+    if buyEntryConfirmed and not sellEntryConfirmed
         buySignal := true
         tradeDirection := 1
         tradeEntry := close
@@ -515,8 +689,8 @@ if barstate.isconfirmed and newTriggerBar and tradeDirection == 0 and cooldown =
         entryBar := bar_index
         lifecycle := "OPEN_BUY"
         if marketOpen
-            f_send_signal("OPEN", "BUY", "PRZ_SWEEP_RECLAIM_H1_CANDLE_15M_TRIGGER", tradeEntry, noExitPrice, tradeInitialStop, tradeBeTrigger, tradeTp2, tradeScore, tradeSignalId, tradeTargetSource)
-    else if sellSetup and not buySetup
+            f_send_signal("OPEN", "BUY", "PRZ_GC_RVOL_WALL_PA_HA15_BUY", tradeEntry, noExitPrice, tradeInitialStop, tradeBeTrigger, tradeTp2, tradeScore, tradeSignalId, tradeTargetSource)
+    else if sellEntryConfirmed and not buyEntryConfirmed
         sellSignal := true
         tradeDirection := -1
         tradeEntry := close
@@ -534,7 +708,7 @@ if barstate.isconfirmed and newTriggerBar and tradeDirection == 0 and cooldown =
         entryBar := bar_index
         lifecycle := "OPEN_SELL"
         if marketOpen
-            f_send_signal("OPEN", "SELL", "PRZ_SWEEP_RECLAIM_H1_HA_15M_TRIGGER", tradeEntry, noExitPrice, tradeInitialStop, tradeBeTrigger, tradeTp2, tradeScore, tradeSignalId, tradeTargetSource)
+            f_send_signal("OPEN", "SELL", "PRZ_GC_RVOL_WALL_PA_HA15_SELL", tradeEntry, noExitPrice, tradeInitialStop, tradeBeTrigger, tradeTp2, tradeScore, tradeSignalId, tradeTargetSource)
 
     if buySignal or sellSignal
         buySweepArmed := false
@@ -543,9 +717,19 @@ if barstate.isconfirmed and newTriggerBar and tradeDirection == 0 and cooldown =
         sellSweepHigh := na
         buySweepAge := 0
         sellSweepAge := 0
+        buyGcRvolWallArmed := false
+        sellGcRvolWallArmed := false
+        buyGcRvolWallAge := 0
+        sellGcRvolWallAge := 0
+        buyPaZoneArmed := false
+        sellPaZoneArmed := false
+        buyPaZoneAge := 0
+        sellPaZoneAge := 0
+        buyEntryArmed := false
+        sellEntryArmed := false
+        buyEntryArmAge := 0
+        sellEntryArmAge := 0
 
-ha5TwoBear = ha5Close < ha5Open and ha5PrevClose < ha5PrevOpen
-ha5TwoBull = ha5Close > ha5Open and ha5PrevClose > ha5PrevOpen
 beStop = tradeDirection == 1 ? tradeEntry + syminfo.mintick * beOffsetTicks : tradeEntry - syminfo.mintick * beOffsetTicks
 activeStop = tradeDirection == 0 ? na : breakEvenArmed ? beStop : tradeInitialStop
 
@@ -565,9 +749,20 @@ if barstate.isconfirmed and tradeDirection != 0 and bar_index > entryBar
         else if breakEvenArmed and high >= tradeTp2
             exitReason := tradeTargetSource == "SUPPLY_PRZ" ? "OPPOSING_PRZ_TARGET" : "R_FALLBACK_TARGET"
             exitPrice := tradeTp2
-        else if breakEvenArmed and newExitBar and ha5TwoBear
-            exitReason := "HA5_TWO_BEAR"
+        else if newTriggerBar and sellEntryConfirmed
+            exitReason := "HA15_TWO_BEAR_LOWER_REVERSE"
             exitPrice := close
+            reverseDirection := "SELL"
+            reverseEntry := close
+            reverseStopAnchor = math.max(sellClusterHi, na(sellSweepHigh) ? sellClusterHi : sellSweepHigh)
+            reverseSl := reverseStopAnchor + triggerAtr * slAtrBuffer
+            reverseRisk := math.max(reverseSl - reverseEntry, syminfo.mintick)
+            reverseTp1 := reverseEntry - reverseRisk * beAtR
+            reversePrzTarget = f_target_below(reverseEntry, reverseRisk * minimumPrzTargetR, buyDHi, buyH4Hi, buyH1Hi)
+            reverseTp2 := na(reversePrzTarget) ? reverseEntry - reverseRisk * tp2AtR : reversePrzTarget
+            reverseTargetSource := na(reversePrzTarget) ? "R_FALLBACK" : "DEMAND_PRZ"
+            reverseScore := sellClusterScore
+            reverseSignalId := str.replace_all(str.replace_all(syminfo.ticker + "-" + str.tostring(time_close) + "-REV-SELL", ":", ""), "/", "")
         else if runnerActive and exitOnStructureFlip and newStructureBar and bearStructureBreak
             exitReason := "BEAR_STRUCTURE_FLIP"
             exitPrice := close
@@ -586,9 +781,20 @@ if barstate.isconfirmed and tradeDirection != 0 and bar_index > entryBar
         else if breakEvenArmed and low <= tradeTp2
             exitReason := tradeTargetSource == "DEMAND_PRZ" ? "OPPOSING_PRZ_TARGET" : "R_FALLBACK_TARGET"
             exitPrice := tradeTp2
-        else if breakEvenArmed and newExitBar and ha5TwoBull
-            exitReason := "HA5_TWO_BULL"
+        else if newTriggerBar and buyEntryConfirmed
+            exitReason := "HA15_TWO_BULL_HIGHER_REVERSE"
             exitPrice := close
+            reverseDirection := "BUY"
+            reverseEntry := close
+            reverseStopAnchor = math.min(buyClusterLo, na(buySweepLow) ? buyClusterLo : buySweepLow)
+            reverseSl := reverseStopAnchor - triggerAtr * slAtrBuffer
+            reverseRisk := math.max(reverseEntry - reverseSl, syminfo.mintick)
+            reverseTp1 := reverseEntry + reverseRisk * beAtR
+            reversePrzTarget = f_target_above(reverseEntry, reverseRisk * minimumPrzTargetR, sellDLo, sellH4Lo, sellH1Lo)
+            reverseTp2 := na(reversePrzTarget) ? reverseEntry + reverseRisk * tp2AtR : reversePrzTarget
+            reverseTargetSource := na(reversePrzTarget) ? "R_FALLBACK" : "SUPPLY_PRZ"
+            reverseScore := buyClusterScore
+            reverseSignalId := str.replace_all(str.replace_all(syminfo.ticker + "-" + str.tostring(time_close) + "-REV-BUY", ":", ""), "/", "")
         else if runnerActive and exitOnStructureFlip and newStructureBar and bullStructureBreak
             exitReason := "BULL_STRUCTURE_FLIP"
             exitPrice := close
@@ -596,25 +802,65 @@ if barstate.isconfirmed and tradeDirection != 0 and bar_index > entryBar
 if exitReason != ""
     exitSignal := true
     exitedDirection := tradeDirection == 1 ? "BUY" : "SELL"
+    isReverse = reverseDirection != "NONE"
     if marketOpen
-        f_send_signal("CLOSE", exitedDirection, exitReason, tradeEntry, exitPrice, activeStop, tradeBeTrigger, tradeTp2, tradeScore, tradeSignalId, tradeTargetSource)
-    tradeDirection := 0
-    tradeEntry := na
-    tradeInitialStop := na
-    tradeRisk := na
-    tradeBeTrigger := na
-    tradeTp2 := na
-    tradeTargetSource := "NONE"
-    tradeSignalId := ""
-    tradeScore := 0
-    breakEvenArmed := false
-    runnerActive := false
-    entryBar := na
-    cooldown := cooldownBars
-    lifecycle := "COOLDOWN"
+        if isReverse
+            f_send_reverse_close(exitedDirection, exitReason, tradeEntry, exitPrice, activeStop, tradeBeTrigger, tradeTp2, tradeScore, tradeSignalId, tradeTargetSource, reverseDirection, reverseEntry, reverseSl, reverseTp1, reverseTp2, reverseScore, reverseSignalId, reverseTargetSource)
+        else
+            f_send_signal("CLOSE", exitedDirection, exitReason, tradeEntry, exitPrice, activeStop, tradeBeTrigger, tradeTp2, tradeScore, tradeSignalId, tradeTargetSource)
+    if isReverse
+        tradeDirection := reverseDirection == "BUY" ? 1 : -1
+        tradeEntry := reverseEntry
+        tradeInitialStop := reverseSl
+        tradeRisk := reverseRisk
+        tradeBeTrigger := reverseTp1
+        tradeTp2 := reverseTp2
+        tradeTargetSource := reverseTargetSource
+        tradeSignalId := reverseSignalId
+        tradeScore := reverseScore
+        breakEvenArmed := false
+        runnerActive := false
+        entryBar := bar_index
+        cooldown := 0
+        buySignal := reverseDirection == "BUY"
+        sellSignal := reverseDirection == "SELL"
+        buyEntryArmed := false
+        sellEntryArmed := false
+        buyEntryArmAge := 0
+        sellEntryArmAge := 0
+        buyGcRvolWallArmed := false
+        sellGcRvolWallArmed := false
+        buyGcRvolWallAge := 0
+        sellGcRvolWallAge := 0
+        buyPaZoneArmed := false
+        sellPaZoneArmed := false
+        buyPaZoneAge := 0
+        sellPaZoneAge := 0
+        buySweepArmed := false
+        sellSweepArmed := false
+        buySweepLow := na
+        sellSweepHigh := na
+        buySweepAge := 0
+        sellSweepAge := 0
+        lifecycle := reverseDirection == "BUY" ? "REVERSE_PENDING_BUY_ACK" : "REVERSE_PENDING_SELL_ACK"
+    else
+        tradeDirection := 0
+        tradeEntry := na
+        tradeInitialStop := na
+        tradeRisk := na
+        tradeBeTrigger := na
+        tradeTp2 := na
+        tradeTargetSource := "NONE"
+        tradeSignalId := ""
+        tradeScore := 0
+        breakEvenArmed := false
+        runnerActive := false
+        entryBar := na
+        cooldown := cooldownBars
+        lifecycle := "COOLDOWN"
 
 if tradeDirection == 0 and cooldown == 0
-    lifecycle := buySweepArmed ? "BUY_SWEEP_ARMED" : sellSweepArmed ? "SELL_SWEEP_ARMED" : "WAIT_LOCATION"
+    lifecycle := buyEntryArmed ? "BUY_PRZ_READY_WAIT_HA15_2" : sellEntryArmed ? "SELL_PRZ_READY_WAIT_HA15_2" : buyGcRvolWallArmed ? "BUY_WAIT_PA" : sellGcRvolWallArmed ? "SELL_WAIT_PA" : buyPaZoneArmed ? "BUY_WAIT_GC_RVOL" : sellPaZoneArmed ? "SELL_WAIT_GC_RVOL" : buySweepArmed ? "BUY_SWEEP_ARMED" : sellSweepArmed ? "SELL_SWEEP_ARMED" : "WAIT_LOCATION"
 
 // =============================================================================
 // 8. VISUALS AND DASHBOARD
@@ -729,23 +975,27 @@ plot(showTrade and tradeDirection != 0 ? tradeTp2 : na, "TP2", color=color.aqua,
 plotshape(buySignal, title="BUY signal", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small, text="BUY")
 plotshape(sellSignal, title="SELL signal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="SELL")
 plotshape(exitSignal, title="Lifecycle exit", style=shape.xcross, location=location.abovebar, color=color.orange, size=size.tiny, text="EXIT")
-plotshape(bullVsaWall and newTriggerBar, title="Bull VSA wall", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 20), size=size.tiny)
-plotshape(bearVsaWall and newTriggerBar, title="Bear VSA wall", style=shape.circle, location=location.abovebar, color=color.new(color.red, 20), size=size.tiny)
+plotshape(gcBuyRvolWall and buyDirectionalZone and newTriggerBar, title="GC futures RVOL wall inside demand PRZ", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 15), size=size.tiny)
+plotshape(gcSellRvolWall and sellDirectionalZone and newTriggerBar, title="GC futures RVOL wall inside supply PRZ", style=shape.circle, location=location.abovebar, color=color.new(color.red, 15), size=size.tiny)
 plotshape(showH1SourceDots and newEntryConfirmBar and buyH1NormalCandle, title="H1 normal-candle BUY permission", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 20), size=size.tiny)
 plotshape(showH1SourceDots and newEntryConfirmBar and sellH1HeikinAshi, title="H1 HA SELL permission", style=shape.circle, location=location.abovebar, color=color.new(color.red, 20), size=size.tiny)
 
-var table dashboard = table.new(position.bottom_left, 2, 16, bgcolor=color.new(color.rgb(25, 25, 25), 5), border_width=1)
+var table dashboard = table.new(position.bottom_left, 2, 18, bgcolor=color.new(color.rgb(25, 25, 25), 5), border_width=1)
 if showDashboard and barstate.islast
     contextBias = buyContextOk and not sellContextOk ? "BUY" : sellContextOk and not buyContextOk ? "SELL" : "NEUTRAL"
-    triggerText = buyPaTrigger and buyBbOk ? "BUY READY" : sellPaTrigger and sellBbOk ? "SELL READY" : "WAIT"
+    triggerText = buyEntryConfirmed ? "BUY HA15 #2" : sellEntryConfirmed ? "SELL HA15 #2" : buyEntryArmed ? "BUY WAIT #2" : sellEntryArmed ? "SELL WAIT #2" : "WAIT PRZ"
     h1EntryText = buyH1NormalCandle and sellH1HeikinAshi ? "BUY CANDLE + SELL HA" : buyH1NormalCandle ? "BUY CANDLE" : sellH1HeikinAshi ? "SELL HA" : "WAIT"
+    gcPermissionText = gcBuyRvolWall ? "BUY SUPPORT" : gcSellRvolWall ? "SELL RESIST" : gcHasData ? "NO LEVEL" : "NO DATA"
+    decisionZoneText = buyDirectionalZone ? "BUY PRZ" : sellDirectionalZone ? "SELL PRZ" : ambiguousLocation ? "OVERLAP WAIT" : "MID NO ENTRY"
     table.cell(dashboard, 0, 0, "ALPHA BUFF", text_color=color.white, bgcolor=color.rgb(40, 40, 40))
     table.cell(dashboard, 1, 0, "PINE v2.4.2", text_color=color.yellow, bgcolor=color.rgb(40, 40, 40))
     table.cell(dashboard, 0, 1, "Market / TF", text_color=color.white)
     table.cell(dashboard, 1, 1, (marketOpen ? "OPEN" : "CLOSED") + " / " + (safeTimeframe ? "SAFE" : "USE 5m"), text_color=marketOpen and safeTimeframe ? color.lime : color.orange)
     table.cell(dashboard, 0, 2, "Spot / GC+F", text_color=color.white)
-    table.cell(dashboard, 1, 2, str.tostring(close, "#.##") + " / " + str.tostring(close + displaySpread, "#.##"), text_color=color.white)
-    table.cell(dashboard, 0, 3, "Context", text_color=color.white)
+    table.cell(dashboard, 1, 2, str.tostring(close, "#.##") + " / " + (gcHasData ? str.tostring(gcClose, "#.##") : "N/A"), text_color=color.white)
+    // This is macro trend context only. The Railway FinalGate owns the actual
+    // one-way harmonic execution bias read from the Newday market map.
+    table.cell(dashboard, 0, 3, "Trend Context", text_color=color.white)
     table.cell(dashboard, 1, 3, contextBias + "  " + str.tostring(buyContextScore) + "/" + str.tostring(sellContextScore), text_color=contextBias == "BUY" ? color.lime : contextBias == "SELL" ? color.red : color.yellow)
     table.cell(dashboard, 0, 4, "Demand PRZ", text_color=color.white)
     table.cell(dashboard, 1, 4, str.tostring(buyClusterLo, "#.##") + "-" + str.tostring(buyClusterHi, "#.##"), text_color=color.lime)
@@ -757,10 +1007,10 @@ if showDashboard and barstate.islast
     table.cell(dashboard, 1, 7, str.tostring(sellClusterCount) + " levels / Score " + str.tostring(sellClusterScore), text_color=color.red)
     table.cell(dashboard, 0, 8, "Fib profile", text_color=color.white)
     table.cell(dashboard, 1, 8, (isAsia ? "ASIA " : "DEEP ") + str.tostring(fibNear, "#.###") + "-" + str.tostring(fibDeep, "#.###"), text_color=color.aqua)
-    table.cell(dashboard, 0, 9, "Sweep", text_color=color.white)
-    table.cell(dashboard, 1, 9, buySweepArmed ? "BUY ARMED" : sellSweepArmed ? "SELL ARMED" : "WAIT", text_color=buySweepArmed ? color.lime : sellSweepArmed ? color.red : color.gray)
+    table.cell(dashboard, 0, 9, "PRZ State", text_color=color.white)
+    table.cell(dashboard, 1, 9, buyPrzBosThrough ? "BUY BOS FAIL" : sellPrzBosThrough ? "SELL BOS FAIL" : buyEntryArmed ? "BUY READY" : sellEntryArmed ? "SELL READY" : buyGcRvolWallArmed ? "BUY WAIT PA" : sellGcRvolWallArmed ? "SELL WAIT PA" : buyPaZoneArmed ? "BUY WAIT GC RVOL" : sellPaZoneArmed ? "SELL WAIT GC RVOL" : buySweepArmed ? "BUY SWEEP" : sellSweepArmed ? "SELL SWEEP" : "WAIT", text_color=buyEntryArmed or buyGcRvolWallArmed or buyPaZoneArmed or buySweepArmed ? color.lime : sellEntryArmed or sellGcRvolWallArmed or sellPaZoneArmed or sellSweepArmed ? color.red : color.gray)
     table.cell(dashboard, 0, 10, "15m Trigger", text_color=color.white)
-    table.cell(dashboard, 1, 10, triggerText, text_color=triggerText == "BUY READY" ? color.lime : triggerText == "SELL READY" ? color.red : color.gray)
+    table.cell(dashboard, 1, 10, triggerText, text_color=str.contains(triggerText, "BUY") ? color.lime : str.contains(triggerText, "SELL") ? color.red : color.gray)
     table.cell(dashboard, 0, 11, "H1 Entry Source", text_color=color.white)
     table.cell(dashboard, 1, 11, h1EntryText, text_color=buyH1NormalCandle ? color.lime : sellH1HeikinAshi ? color.red : color.gray)
     table.cell(dashboard, 0, 12, "Structure", text_color=color.white)
@@ -771,5 +1021,9 @@ if showDashboard and barstate.islast
     table.cell(dashboard, 1, 14, tradeDirection == 0 ? "-" : str.tostring(tradeEntry, "#.##") + " / " + str.tostring(activeStop, "#.##") + " / " + str.tostring(tradeTp2, "#.##"), text_color=color.white)
     table.cell(dashboard, 0, 15, "TP2 Source / EA", text_color=color.white)
     table.cell(dashboard, 1, 15, tradeTargetSource + " / SIGNAL ONLY", text_color=tradeTargetSource == "SUPPLY_PRZ" or tradeTargetSource == "DEMAND_PRZ" ? color.aqua : color.gray)
+    table.cell(dashboard, 0, 16, "GC Contract RVOL", text_color=color.white)
+    table.cell(dashboard, 1, 16, (gcHasData ? str.tostring(gcRvol, "#.##") : "N/A") + " / " + gcPermissionText, text_color=gcBuyRvolWall ? color.lime : gcSellRvolWall ? color.red : color.gray)
+    table.cell(dashboard, 0, 17, "Decision Zone", text_color=color.white)
+    table.cell(dashboard, 1, 17, decisionZoneText, text_color=str.contains(decisionZoneText, "BUY") ? color.lime : str.contains(decisionZoneText, "SELL") ? color.red : color.yellow)
 
 // Create one TradingView alert using: Condition -> "Any alert() function call".

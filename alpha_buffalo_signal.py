@@ -31,6 +31,7 @@ try:
     from engine_v4.indicators import add_indicators
     from engine_v4.router import SignalRouter
     from engine_v4.final_gate import FinalGate
+    from engine_v4.harmonic_bias_gate import evaluate_harmonic_bias
     from engine_v4.buy_engine import BuySignalEngine
     from engine_v4.sell_engine import SellSignalEngine
 except Exception as exc:  # pragma: no cover - runtime diagnostic path
@@ -38,6 +39,7 @@ except Exception as exc:  # pragma: no cover - runtime diagnostic path
     add_indicators = None
     SignalRouter = None
     FinalGate = None
+    evaluate_harmonic_bias = None
     BuySignalEngine = None
     SellSignalEngine = None
 
@@ -71,6 +73,9 @@ API_LICENSE_KEY = os.getenv("ALPHA_API_KEY", os.getenv("LICENSE_KEY", "DEMO123")
 SIGNAL_SOURCE = os.getenv("ALPHA_SIGNAL_SOURCE", "PYTHON").strip().upper()
 if SIGNAL_SOURCE not in {"PYTHON", "PINE", "HYBRID"}:
     SIGNAL_SOURCE = "PYTHON"
+REQUIRE_HARMONIC_BIAS = os.getenv(
+    "ALPHA_REQUIRE_HARMONIC_BIAS", "true"
+).lower() in {"1", "true", "yes", "on"}
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_IDS = [
     chat_id.strip()
@@ -307,6 +312,89 @@ def fetch_multi_tf(symbol: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFram
     df_1h = _fetch_cached_tf(symbol, "1h")
     df_15m = _fetch_cached_tf(symbol, "15min")
     return df_4h, df_1h, df_15m
+
+
+def _harmonic_gate_context(blueprint) -> Dict:
+    """Normalize ScenarioBlueprint into the one V4/V5 bias contract."""
+    if blueprint is None:
+        return {
+            "found": False,
+            "direction": "NONE",
+            "state": "MISSING",
+            "pattern": "",
+            "source": "NONE",
+            "tunnel_state": "NONE",
+        }
+    return {
+        "found": bool(getattr(blueprint, "harmonic_is_real", False)),
+        "direction": str(getattr(blueprint, "harmonic_direction", "NONE") or "NONE").upper(),
+        "approach_direction": str(getattr(blueprint, "harmonic_approach_direction", "NONE") or "NONE").upper(),
+        "state": str(getattr(blueprint, "harmonic_state", "NONE") or "NONE").upper(),
+        "pattern": str(getattr(blueprint, "harmonic_pattern", "") or ""),
+        "source": str(getattr(blueprint, "harmonic_source", "NONE") or "NONE"),
+        "source_tf": str(getattr(blueprint, "harmonic_source_tf", "NONE") or "NONE"),
+        "pattern_state": str(getattr(blueprint, "harmonic_pattern_state", "NONE") or "NONE"),
+        "projection_mode": str(getattr(blueprint, "harmonic_projection_mode", "NONE") or "NONE"),
+        "execution_authority": bool(getattr(blueprint, "harmonic_execution_authority", True)),
+        "tunnel_broken": bool(getattr(blueprint, "harmonic_tunnel_broken", False)),
+        "candidate_patterns": list(getattr(blueprint, "harmonic_candidate_patterns", []) or []),
+        "current_xad": _safe_float(getattr(blueprint, "harmonic_current_xad", 0.0)),
+        "current_bcd": _safe_float(getattr(blueprint, "harmonic_current_bcd", 0.0)),
+        "next_xad": _safe_float(getattr(blueprint, "harmonic_next_xad", 0.0)),
+        "d_point": _safe_float(getattr(blueprint, "harmonic_d_point", 0.0)),
+        "prz_low": _safe_float(getattr(blueprint, "harmonic_prz_low", 0.0)),
+        "prz_high": _safe_float(getattr(blueprint, "harmonic_prz_high", 0.0)),
+        "current_price": _safe_float(getattr(blueprint, "current_price", 0.0)),
+        "tunnel_state": str(getattr(blueprint, "tunnel_state", "NONE") or "NONE").upper(),
+        "tunnel_valid": bool(getattr(blueprint, "tunnel_valid", False)),
+    }
+
+
+def _live_harmonic_gate_context(public_symbol: str) -> Dict:
+    """Read the Newday harmonic map with current cached multi-TF location."""
+    clean_symbol = str(public_symbol or PUBLIC_SYMBOL_DEFAULT).replace("/", "").upper()
+    default_clean = str(PUBLIC_SYMBOL_DEFAULT).replace("/", "").upper()
+    data_symbol = SYMBOL_DEFAULT if clean_symbol == default_clean else public_symbol
+    df_4h, df_1h, df_15m = fetch_multi_tf(data_symbol)
+    blueprint = ScenarioScanner().scan(
+        df_4h,
+        df_1h,
+        df_15m,
+        symbol=clean_symbol,
+    )
+    return _harmonic_gate_context(blueprint)
+
+
+def _pine_entry_permission(direction: str, public_symbol: str) -> GateResult:
+    """Single production gate for a fresh Pine OPEN (including ACK reverse)."""
+    direction = str(direction or "").upper()
+    if direction not in {"BUY", "SELL"}:
+        return GateResult(False, "INVALID_ENTRY_DIRECTION")
+    if FinalGate is None:
+        return GateResult(False, "FINAL_GATE_UNAVAILABLE")
+
+    try:
+        harmonic_context = _live_harmonic_gate_context(public_symbol)
+    except Exception as exc:
+        print(
+            "AlphaBuffalo harmonic entry gate failed | "
+            f"symbol={public_symbol} direction={direction} "
+            f"error={type(exc).__name__}:{exc}",
+            flush=True,
+        )
+        return GateResult(False, "HARMONIC_CONTEXT_UNAVAILABLE")
+
+    clock = SessionClock()
+    risk_permissions = execution_lifecycle.risk_permissions(
+        str(public_symbol or PUBLIC_SYMBOL_DEFAULT).replace("/", "").upper()
+    )
+    return FinalGate(clock).evaluate(
+        clock.get(),
+        direction,
+        **risk_permissions,
+        harmonic_context=harmonic_context,
+        require_harmonic=REQUIRE_HARMONIC_BIAS,
+    )
 
 
 def fetch_management_m5(symbol: str) -> pd.DataFrame | None:
@@ -571,12 +659,14 @@ def format_telegram_signal(payload: Dict) -> str:
     tp = _safe_float(ea.get("tp_final"))
     tp1, tp2 = _public_targets(direction, entry, tp, engine)
     timestamp = signal.get("timestamp") or ea.get("signal_id") or ""
+    source = str(payload.get("source") or signal.get("source") or "PYTHON").upper()
+    signal_type = "PINE_V2_4" if source == "PINE" else "V4_SESSION"
 
     return "\n".join([
         f"{side_icon} <b>Alpha Buffalo.</b> {_clean_text(side_label)}",
         "━━━━━━━━━━━━━━━━━━━━━",
         f"📌 Asset    : <b>{_clean_text(symbol)}</b>",
-        "📊 Type     : V4_SESSION",
+        f"📊 Type     : {signal_type}",
         f"🎯 Entry    : ~{entry:,.2f}",
         f"🛡️ SL Zone  : {_price_zone(sl, direction)}",
         f"🎯 TP1      : {tp1:,.1f}  (M15 ~30min)",
@@ -607,6 +697,11 @@ def send_telegram_message(text: str) -> bool:
     if not _telegram_market_is_open():
         return False
     if not _telegram_enabled():
+        print(
+            "AlphaBuffalo Telegram disabled | "
+            f"token_set={bool(TELEGRAM_TOKEN)} chat_ids={len(TELEGRAM_CHAT_IDS)}",
+            flush=True,
+        )
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -821,12 +916,12 @@ def maybe_broadcast_trend_update(payload: Dict) -> None:
 
     send_telegram_message(format_telegram_trend_update(payload))
 
-def maybe_broadcast_signal(payload: Dict) -> None:
-    """Broadcast only Clean V5 OPEN signals that passed RR/levels/setup/VSA gates."""
+def maybe_broadcast_signal(payload: Dict) -> bool:
+    """Broadcast only validated OPEN signals that passed RR/levels/setup/VSA gates."""
     global LAST_TELEGRAM_SIGNAL_KEY
 
     if not _telegram_market_is_open(payload):
-        return
+        return False
 
     ea = payload.get("ea", {}) or {}
     signal = payload.get("signal", {}) or {}
@@ -834,32 +929,39 @@ def maybe_broadcast_signal(payload: Dict) -> None:
 
     # No Telegram for WAIT by default. Even if TELEGRAM_NOTIFY_WAIT=true, never send invalid low-quality trade alerts.
     if action != "OPEN":
-        return
+        return False
 
     rr = _safe_float(ea.get("rr"))
     if rr < TELEGRAM_MIN_RR:
-        return
+        return False
 
     if not bool(ea.get("directional_levels_ok")):
-        return
+        return False
     if not bool(ea.get("levels_ready")):
-        return
+        return False
     if not bool(ea.get("rr_ok")):
-        return
+        return False
     if not bool(ea.get("setup_ok", True)):
-        return
+        return False
     if not bool(ea.get("zone_ok", True)):
-        return
+        return False
     if not bool(ea.get("vsa_gate_ok", True)):
-        return
+        return False
 
     signal_key = _telegram_signal_key(payload)
     with LAST_TELEGRAM_LOCK:
         if signal_key and signal_key == LAST_TELEGRAM_SIGNAL_KEY:
-            return
+            return False
+        previous_key = LAST_TELEGRAM_SIGNAL_KEY
         LAST_TELEGRAM_SIGNAL_KEY = signal_key
 
-    send_telegram_message(format_telegram_signal(payload))
+    sent = send_telegram_message(format_telegram_signal(payload))
+    if not sent:
+        # Do not permanently deduplicate a delivery that never reached Telegram.
+        with LAST_TELEGRAM_LOCK:
+            if LAST_TELEGRAM_SIGNAL_KEY == signal_key:
+                LAST_TELEGRAM_SIGNAL_KEY = previous_key
+    return sent
 
 def _df_with_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize TwelveData dataframe for engine_v4 without changing fetch contract."""
@@ -941,6 +1043,7 @@ def _ensure_engine_v4_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
 def _run_engine_v4_baseline(
     df_15m: pd.DataFrame,
     symbol: str = PUBLIC_SYMBOL_DEFAULT,
+    blueprint=None,
 ) -> Dict | None:
 
     if add_indicators is None or SignalRouter is None or FinalGate is None or BuySignalEngine is None or SellSignalEngine is None:
@@ -974,12 +1077,53 @@ def _run_engine_v4_baseline(
         df = add_indicators(df)
         session_clock = SessionClock()
         risk_permissions = execution_lifecycle.risk_permissions(symbol)
+        harmonic_context = _harmonic_gate_context(blueprint) if blueprint else None
+        if REQUIRE_HARMONIC_BIAS and evaluate_harmonic_bias is not None:
+            harmonic_direction = str(
+                (harmonic_context or {}).get("direction", "NONE")
+            ).upper()
+            harmonic_state = str(
+                (harmonic_context or {}).get("state", "NONE")
+            ).upper()
+            approach_direction = str(
+                (harmonic_context or {}).get("approach_direction", "NONE")
+            ).upper()
+            requested_direction = (
+                approach_direction
+                if harmonic_state == "FORMING" and approach_direction in {"BUY", "SELL"}
+                else
+                harmonic_direction
+                if harmonic_direction in {"BUY", "SELL"}
+                else "BUY"
+            )
+            bias_gate = evaluate_harmonic_bias(
+                requested_direction,
+                harmonic_context,
+                require_harmonic=True,
+            )
+            if not bias_gate.allowed:
+                blocked_direction = (
+                    harmonic_direction
+                    if harmonic_direction in {"BUY", "SELL"}
+                    else None
+                )
+                return {
+                    "status": BLOCKED,
+                    "direction": blocked_direction,
+                    "reason": bias_gate.reason,
+                    "harmonic_bias": bias_gate.to_dict(),
+                }
         routed = SignalRouter(
             clock=session_clock,
             gate=FinalGate(session_clock),
             buy_engine=BuySignalEngine(),
             sell_engine=SellSignalEngine(),
-        ).process(df, **risk_permissions)
+        ).process(
+            df,
+            **risk_permissions,
+            harmonic_context=harmonic_context,
+            require_harmonic=REQUIRE_HARMONIC_BIAS,
+        )
         signal = routed[0] if routed else None
 
         tail = df.tail(int(os.getenv("ENGINE_V4_LOOKBACK_BARS", "6")))
@@ -1482,6 +1626,8 @@ def build_api_signal_response(symbol: str, signal: Dict, ea: Dict) -> Dict:
 
     if signal_status == ERROR:
         status = ERROR
+    elif signal_status == BLOCKED:
+        status = BLOCKED
     elif direction is None:
         status = NO_SIGNAL
     elif signal_status == SIGNAL and ea.get("action") == "OPEN":
@@ -1586,7 +1732,11 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
         # Production baseline overlay:
         # v12 scanner/blueprint stays intact, but proven engine_v4 BUY/SELL baseline
         # becomes the actual trade source when it produces confirmed levels.
-        engine_v4_signal = _run_engine_v4_baseline(df_15m, public_symbol)
+        engine_v4_signal = _run_engine_v4_baseline(
+            df_15m,
+            public_symbol,
+            blueprint=blueprint,
+        )
         signal = _apply_engine_v4_signal(signal, engine_v4_signal)
         ea = build_ea_payload(public_symbol, signal)
         ea = _attach_execution_lifecycle(
@@ -1849,11 +1999,19 @@ async def execution_ack(request: Request):
                 public_symbol,
                 r_multiple=_safe_float(body.get("r_multiple")),
             )
+        promoted_command = result.get("promoted_command")
+        telegram_notified = False
+        if isinstance(promoted_command, dict):
+            promoted_payload = build_pine_api_payload(promoted_command)
+            _set_latest_signal(promoted_payload)
+            telegram_notified = maybe_broadcast_signal(promoted_payload)
         return {
             "status": "accepted",
             "source": "PINE",
             "result": result,
             "position": close_state,
+            "next_command": promoted_command,
+            "telegram_notified": telegram_notified,
         }
 
     try:
@@ -1902,10 +2060,34 @@ async def webhook_tv(request: Request):
     if action in {"OPEN", "ENTRY"} and not _market_open_gate()["market_open"]:
         raise HTTPException(status_code=409, detail="MARKET_CLOSED")
 
+    effective_payload = dict(payload)
+    public_symbol = str(payload.get("symbol") or PUBLIC_SYMBOL_DEFAULT).replace("/", "").upper()
+    reverse_blocked_reason = ""
+
+    if action in {"OPEN", "ENTRY"}:
+        entry_gate = _pine_entry_permission(payload.get("direction"), public_symbol)
+        if not entry_gate.allowed:
+            raise HTTPException(status_code=409, detail=entry_gate.reason)
+
+    # CLOSE must always pass.  A requested reverse is a new entry and therefore
+    # must pass the same time/risk/harmonic gate; if it fails, keep the close
+    # command but strip only the reverse leg.
+    reverse_direction = str(payload.get("reverse_direction") or "").upper()
+    if action in {"CLOSE", "EXIT", "CLOSE_ALL"} and reverse_direction:
+        reverse_gate = _pine_entry_permission(reverse_direction, public_symbol)
+        if not reverse_gate.allowed:
+            reverse_blocked_reason = reverse_gate.reason
+            for field in list(effective_payload):
+                if str(field).startswith("reverse_"):
+                    effective_payload.pop(field, None)
+
     try:
-        command = pine_signal_bridge.ingest(payload)
+        command = pine_signal_bridge.ingest(effective_payload)
     except PineSignalError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if reverse_blocked_reason:
+        command["reverse_blocked_reason"] = reverse_blocked_reason
 
     if command.get("action") == "HOLD":
         return {
@@ -1917,9 +2099,11 @@ async def webhook_tv(request: Request):
 
     public_payload = build_pine_api_payload(command)
     _set_latest_signal(public_payload)
+    telegram_notified = maybe_broadcast_signal(public_payload)
     return {
         "status": "accepted",
         "source": "PINE",
         "command": command,
         "signal": public_payload,
+        "telegram_notified": telegram_notified,
     }

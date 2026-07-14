@@ -77,8 +77,7 @@ def main() -> None:
                 "sellH1HeikinAshi",
                 "buyH1Permission",
                 "sellH1Permission",
-                "H1_CANDLE_15M_TRIGGER",
-                "H1_HA_15M_TRIGGER",
+                "requireAsymmetricH1",
             )
         ),
         "legacy shared confluence removed": "confluence_ok" not in source,
@@ -110,15 +109,95 @@ def main() -> None:
                 "sellReclaimNow",
             )
         ),
-        "BB and VSA trigger": all(
+        "BB and PA trigger": all(
             marker in source
-            for marker in ("bbBuyReject", "bbSellReject", "bullVsaWall", "bearVsaWall")
+            for marker in ("bbBuyReject", "bbSellReject", "buyReversalPin", "sellReversalPin")
+        ) and "bullVsaWall" not in source and "bearVsaWall" not in source,
+        "real GC futures RVOL at confirmed support resistance": all(
+            marker in source
+            for marker in (
+                'gcSymbol          = input.symbol("COMEX:GC1!"',
+                "f_confirmed_gc",
+                "gcResistanceH1",
+                "gcSupportH1",
+                "gcRvol",
+                "gcBuyRvolWall",
+                "gcSellRvolWall",
+                "gcBuyPermission",
+                "gcSellPermission",
+            )
+        ) and "close + displaySpread" not in source,
+        "PRZ reversal requires confirmed M15 or H1 pinbar": all(
+            marker in source
+            for marker in (
+                "h1BullPin",
+                "h1BearPin",
+                "buyReversalPin = bullPin or h1BullPin",
+                "sellReversalPin = bearPin or h1BearPin",
+                "buyPaZoneSetup",
+                "sellPaZoneSetup",
+            )
+        ),
+        "GC futures RVOL and PA latch inside PRZ but never enter directly": all(
+            marker in source
+            for marker in (
+                "buyGcRvolWallArmed",
+                "sellGcRvolWallArmed",
+                "buyGcRvolWallSetup",
+                "sellGcRvolWallSetup",
+                "buyPaZoneArmed",
+                "sellPaZoneArmed",
+                "buyPaZoneSetup",
+                "sellPaZoneSetup",
+                "buyArmSetup = (buyGcRvolWallArmed or buyGcRvolWallSetup) and (buyPaZoneArmed or buyPaZoneSetup)",
+                "sellArmSetup = (sellGcRvolWallArmed or sellGcRvolWallSetup) and (sellPaZoneArmed or sellPaZoneSetup)",
+                "PRZ_GC_RVOL_WALL_PA_HA15_BUY",
+                "PRZ_GC_RVOL_WALL_PA_HA15_SELL",
+            )
+        ) and "MidContinuationSetup" not in source
+        and "MID_VSA" not in source,
+        "opposite BOS invalidates PRZ evidence before entry": all(
+            marker in source
+            for marker in (
+                "buyPrzBosThrough = newStructureBar and bearStructureBreak",
+                "sellPrzBosThrough = newStructureBar and bullStructureBreak",
+                "if buyPrzBosThrough",
+                "if sellPrzBosThrough",
+                "buyEntryArmed := false",
+                "sellEntryArmed := false",
+            )
         ),
         "structure runner permission": all(
             marker in source for marker in ("requireStructureRun", "structureBias")
         ),
-        "mirrored HA5 exit": all(
-            marker in source for marker in ("HA5_TWO_BEAR", "HA5_TWO_BULL")
+        "PRZ location is armed before HA confirmation": all(
+            marker in source
+            for marker in (
+                "buyEntryArmed",
+                "sellEntryArmed",
+                "buyArmSetup",
+                "sellArmSetup",
+                "entryArmTtl",
+            )
+        ),
+        "mirrored confirmed HA15 second-candle trigger": all(
+            marker in source
+            for marker in (
+                "ha15TwoBearLower",
+                "ha15TwoBullHigher",
+                "HA15_TWO_BEAR_LOWER_REVERSE",
+                "HA15_TWO_BULL_HIGHER_REVERSE",
+            )
+        ) and "HA5_TWO_" not in source,
+        "ACK-gated reverse payload": all(
+            marker in source
+            for marker in (
+                "f_send_reverse_close",
+                '"reverse_direction":"',
+                '"reverse_signal_id":"',
+                "REVERSE_PENDING_SELL_ACK",
+                "REVERSE_PENDING_BUY_ACK",
+            )
         ),
         "market alert guard": source.count("if marketOpen") >= 3,
         "trade state reset": all(

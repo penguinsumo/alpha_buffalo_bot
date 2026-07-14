@@ -16,6 +16,7 @@ import pandas as pd
 
 from session_clock import SessionClock
 from engine_v4.final_gate import FinalGate
+from engine_v4.harmonic_bias_gate import evaluate_harmonic_bias
 from engine_v4.buy_engine import BuySignalEngine
 from engine_v4.sell_engine import SellSignalEngine
 from signal_schema import SIGNAL, normalize_engine_candidate
@@ -39,6 +40,8 @@ class SignalRouter:
         df: pd.DataFrame,
         daily_dd_ok: bool = True,
         consec_loss_ok: bool = True,
+        harmonic_context=None,
+        require_harmonic: bool = False,
     ) -> List[dict]:
         if not isinstance(df.index, pd.DatetimeIndex):
             raise TypeError("DataFrame must have DatetimeIndex")
@@ -68,11 +71,20 @@ class SignalRouter:
                 idx=idx,
                 daily_dd_ok=daily_dd_ok,
                 consec_loss_ok=consec_loss_ok,
+                harmonic_context=harmonic_context,
+                require_harmonic=require_harmonic,
             )
             buy_raw = self.buy_engine.evaluate(df, idx, session_state, gate_buy)
             if buy_raw:
                 buy = normalize_engine_candidate(buy_raw)
-                self._enrich_signal(buy, idx, age_bars, row)
+                self._enrich_signal(
+                    buy,
+                    idx,
+                    age_bars,
+                    row,
+                    harmonic_context=harmonic_context,
+                    require_harmonic=require_harmonic,
+                )
                 signals.append(buy)
 
             gate_sell = self.gate.evaluate(
@@ -82,11 +94,20 @@ class SignalRouter:
                 idx=idx,
                 daily_dd_ok=daily_dd_ok,
                 consec_loss_ok=consec_loss_ok,
+                harmonic_context=harmonic_context,
+                require_harmonic=require_harmonic,
             )
             sell_raw = self.sell_engine.evaluate(df, idx, session_state, gate_sell)
             if sell_raw:
                 sell = normalize_engine_candidate(sell_raw)
-                self._enrich_signal(sell, idx, age_bars, row)
+                self._enrich_signal(
+                    sell,
+                    idx,
+                    age_bars,
+                    row,
+                    harmonic_context=harmonic_context,
+                    require_harmonic=require_harmonic,
+                )
                 signals.append(sell)
 
         if not signals:
@@ -94,8 +115,22 @@ class SignalRouter:
 
         return [max(signals, key=self._rank)]
 
-    def _enrich_signal(self, sig: dict, idx: int, age_bars: int, row) -> None:
+    def _enrich_signal(
+        self,
+        sig: dict,
+        idx: int,
+        age_bars: int,
+        row,
+        *,
+        harmonic_context=None,
+        require_harmonic: bool = False,
+    ) -> None:
         direction = str(sig.get("direction", "")).upper()
+        harmonic_gate = evaluate_harmonic_bias(
+            direction,
+            harmonic_context,
+            require_harmonic=require_harmonic,
+        )
         setup_state = str(sig.get("setup_state") or f"{direction}_SETUP").upper()
         is_cf_ready = setup_state.endswith("CF_READY")
 
@@ -114,6 +149,7 @@ class SignalRouter:
         )
         sig["zone_confluence"] = bool(sig.get("bb_prz_confluence"))
         sig["close_at_signal"] = float(row.get("close", 0.0) or 0.0)
+        sig["harmonic_bias"] = harmonic_gate.to_dict()
 
     def _rank(self, sig: dict) -> tuple:
         # Location first. Do not add SELL/BUY bias here.

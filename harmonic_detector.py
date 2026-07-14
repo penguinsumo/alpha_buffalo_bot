@@ -1,12 +1,16 @@
 
-# ═══ Pattern Weights (จากสถิติ 1 ปี) ═══
+# ═══ Neutral pattern weights ═══
+# No repository-owned, pattern-specific sample currently validates a frequency
+# or win-rate ranking.  Keep these neutral until the Newday statistics pipeline
+# has a reproducible sample size, date range, symbol and timeframe.
 PATTERN_WEIGHTS = {
-    "Bat": 1.0,        # 38% — default
-    "Gartley": 0.9,    # 28% — high confidence
-    "Butterfly": 0.7,  # 18% — medium
-    "Crab": 0.5,       # 12% — lower
-    "Shark": 0.3,      # 4%  — rare, stop hunt
+    "Bat": 1.0,
+    "Gartley": 1.0,
+    "Butterfly": 1.0,
+    "Crab": 1.0,
+    "Shark": 1.0,
 }
+PATTERN_STATISTICS_STATUS = "INSUFFICIENT_SAMPLE"
 """
 harmonic_detector.py — Alpha Buffalo v5
 Harmonic Pattern Detector: ทุก Pattern + PRZ Zone
@@ -20,7 +24,7 @@ Output: PRZ Zone ส่งให้ micro_engine จับ entry บน 15M
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 from kivanc_vsaob import find_pivot_highs, find_pivot_lows, PivotPoint
 
 # ── Tolerance สำหรับ Fibo ratio matching ──────────────────
@@ -61,16 +65,18 @@ HARMONIC_PATTERNS = {
         "CD": (0.826, 0.946),   # 0.886
     },
     "Bullish_ABCD": {
-        "direction": "BUY", "priority": 1, "reliability": "high",
-        "AB": (0.558, 0.678),   # 0.618
-        "BC": (0.558, 0.678),   # 0.618
-        "CD": (1.212, 1.332),   # 1.272
+        "direction": "BUY", "priority": 1, "reliability": "unvalidated",
+        "structure": "ABCD",
+        "c_retrace": (0.382, 0.886),
+        "bc_projection": (1.130, 2.618),
+        "cd_ab": (0.940, 1.060),
     },
     "Bearish_ABCD": {
-        "direction": "SELL", "priority": 1, "reliability": "high",
-        "AB": (0.558, 0.678),
-        "BC": (0.558, 0.678),
-        "CD": (1.212, 1.332),
+        "direction": "SELL", "priority": 1, "reliability": "unvalidated",
+        "structure": "ABCD",
+        "c_retrace": (0.382, 0.886),
+        "bc_projection": (1.130, 2.618),
+        "cd_ab": (0.940, 1.060),
     },
 
     # ── Priority 2: เกิดน้อย แต่ Move ใหญ่ ───────────────
@@ -152,12 +158,78 @@ HARMONIC_PATTERNS = {
 SCORE_THRESHOLD = {1: 3, 2: 5, 3: 7}
 
 
+# XABC projection rules.  These are used before D exists.  XAB and ABC decide
+# which families remain possible; XAD and BCD project the future D/PRZ ladder.
+# A broad Extended_XABCD route is kept as an honest fallback when the geometry
+# is clear but no strict named family matches both projection methods yet.
+FORMING_PATTERN_RULES = {
+    "Gartley": {
+        "xab": (0.558, 0.678),
+        "abc": (0.322, 0.946),
+        "xad": (0.726, 0.846),
+        "bcd": (1.212, 1.678),
+        "priority": 1,
+    },
+    "Bat": {
+        "xab": (0.322, 0.558),
+        "abc": (0.322, 0.946),
+        "xad": (0.826, 0.946),
+        "bcd": (1.558, 2.678),
+        "priority": 1,
+    },
+    "Butterfly": {
+        "xab": (0.726, 0.846),
+        "abc": (0.322, 0.946),
+        "xad": (1.212, 1.678),
+        "bcd": (1.558, 2.678),
+        "priority": 2,
+    },
+    "Crab": {
+        "xab": (0.322, 0.678),
+        "abc": (0.322, 0.946),
+        "xad": (1.558, 1.678),
+        "bcd": (2.180, 3.678),
+        "priority": 2,
+    },
+    "DeepCrab": {
+        "xab": (0.826, 0.946),
+        "abc": (0.322, 0.946),
+        "xad": (1.558, 1.678),
+        "bcd": (2.000, 3.678),
+        "priority": 3,
+    },
+    "Extended_XABCD": {
+        "xab": (0.300, 0.900),
+        "abc": (0.300, 0.950),
+        "xad": (1.130, 1.618),
+        "bcd": (2.000, 3.618),
+        "priority": 4,
+        "fallback": True,
+    },
+}
+
+# AB=CD is the four-point base structure embedded inside five-point harmonic
+# families.  The reciprocal projection is the important constraint:
+# C=0.618 -> BC projection=1.618, C=0.786 -> BC projection=1.272.
+# Source of the ratio model: Scott Carney / HarmonicTrader AB=CD definition.
+ABCD_C_RETRACE = (0.382, 0.886)
+ABCD_BC_PROJECTION = (1.130, 2.618)
+
+
 # ── Data Classes ──────────────────────────────────────────
 @dataclass
 class HarmonicPoint:
     """จุด X, A, B, C, D"""
     x: float; a: float; b: float; c: float; d: float
     x_idx: int; a_idx: int; b_idx: int; c_idx: int; d_idx: int
+
+
+@dataclass(frozen=True)
+class HarmonicProjectionPoint:
+    """Four confirmed pivots used to project D before it is printed."""
+    x: float; a: float; b: float; c: float
+    x_idx: int; a_idx: int; b_idx: int; c_idx: int
+    reversal_direction: str
 
 
 @dataclass
@@ -215,9 +287,358 @@ def xabcd_ratios(pts: HarmonicPoint) -> dict[str, float]:
     }
 
 
+def embedded_abcd_ratios(pts: HarmonicPoint) -> dict[str, float]:
+    """Return reciprocal ratios for the A-B-C-D route inside X-A-B-C-D."""
+    ab = pts.b - pts.a
+    bc = pts.c - pts.b
+    cd = pts.d - pts.c
+    return {
+        "BC_AB": calc_ratio(ab, bc),
+        "CD_BC": calc_ratio(bc, cd),
+        "CD_AB": calc_ratio(ab, cd),
+    }
+
+
+def xabc_ratios(pts: HarmonicProjectionPoint) -> dict[str, float]:
+    """Ratios already knowable after X-A-B-C are confirmed."""
+    xa = pts.a - pts.x
+    ab = pts.b - pts.a
+    bc = pts.c - pts.b
+    return {
+        "XAB": calc_ratio(xa, ab),
+        "ABC": calc_ratio(ab, bc),
+    }
+
+
+def _project_price_range(
+    anchor: float,
+    leg_size: float,
+    ratios: tuple[float, float],
+    reversal_direction: str,
+) -> tuple[float, float]:
+    lo_ratio, hi_ratio = ratios
+    if reversal_direction == "BUY":
+        values = (anchor - leg_size * lo_ratio, anchor - leg_size * hi_ratio)
+    else:
+        values = (anchor + leg_size * lo_ratio, anchor + leg_size * hi_ratio)
+    return min(values), max(values)
+
+
+def _project_embedded_abcd(
+    pts: HarmonicProjectionPoint,
+    current_price: float,
+    *,
+    armed_distance_pct: float,
+) -> Optional[dict[str, Any]]:
+    """Project the A-B-C-D base route contained by an X-A-B-C route.
+
+    AB and CD are projected as equal price legs.  The BC projection must be
+    reciprocal to the C retracement, so both calculations converge on one D.
+    Harmonic geometry only grants directional permission; the entry engines
+    must still confirm the reversal candle breakout and HTF structure.
+    """
+    ab_size = abs(pts.b - pts.a)
+    bc_size = abs(pts.c - pts.b)
+    if ab_size <= 0 or bc_size <= 0:
+        return None
+
+    c_retrace = bc_size / ab_size
+    if not ratio_ok(c_retrace, *ABCD_C_RETRACE):
+        return None
+    reciprocal_projection = 1.0 / c_retrace
+    if not ratio_ok(reciprocal_projection, *ABCD_BC_PROJECTION):
+        return None
+
+    if pts.reversal_direction == "BUY":
+        d_point = pts.c - ab_size
+    else:
+        d_point = pts.c + ab_size
+
+    prz_half = max(ab_size * 0.005, 0.50)
+    prz_low = d_point - prz_half
+    prz_high = d_point + prz_half
+    in_prz = prz_low <= current_price <= prz_high
+    distance = (
+        0.0
+        if in_prz
+        else min(abs(current_price - prz_low), abs(current_price - prz_high))
+    )
+    distance_pct = distance / d_point if d_point else 999.0
+    passed = bool(
+        (pts.reversal_direction == "BUY" and current_price < prz_low)
+        or (pts.reversal_direction == "SELL" and current_price > prz_high)
+    )
+    if in_prz:
+        state = "ACTIVE"
+    elif passed:
+        state = "PASSED"
+    elif distance_pct <= armed_distance_pct:
+        state = "ARMED"
+    else:
+        state = "FORMING"
+
+    current_cd = abs(float(current_price) - pts.c)
+    pattern_side = "Bullish" if pts.reversal_direction == "BUY" else "Bearish"
+    approach_direction = "SELL" if pts.reversal_direction == "BUY" else "BUY"
+    return {
+        "found": True,
+        "pattern": f"{pattern_side}_ABCD",
+        "family": "ABCD",
+        "direction": pts.reversal_direction,
+        "approach_direction": approach_direction,
+        "state": state,
+        "pattern_state": "FORMING_ABC_TO_D",
+        "projection_mode": "FORMING_ABC_TO_D",
+        "x": pts.x,
+        "a": pts.a,
+        "b": pts.b,
+        "c": pts.c,
+        "d_point": d_point,
+        "x_idx": pts.x_idx,
+        "a_idx": pts.a_idx,
+        "b_idx": pts.b_idx,
+        "c_idx": pts.c_idx,
+        "ratios": {
+            "BC_AB": c_retrace,
+            "TARGET_CD_AB": 1.0,
+            "TARGET_CD_BC": reciprocal_projection,
+            "CURRENT_CD_AB": current_cd / ab_size,
+            "CURRENT_CD_BC": current_cd / bc_size,
+        },
+        "current_xad": 0.0,
+        "current_bcd": current_cd / bc_size,
+        "current_cd_ab": current_cd / ab_size,
+        "next_xad": 0.0,
+        "prz_low": prz_low,
+        "prz_high": prz_high,
+        "distance": distance,
+        "distance_pct": distance_pct,
+        "in_prz": in_prz,
+        "priority": 1,
+        "fallback": False,
+        "execution_authority": True,
+        "ratio_model": "RECIPROCAL_AB_EQUALS_CD",
+        "confirmation_required": [
+            "PRZ_REVERSAL_CANDLE",
+            "DIRECTIONAL_CANDLE_BREAKOUT",
+            "HTF_STRUCTURE_ALIGNMENT",
+        ],
+        "stop_reference": "CONFIRMATION_CANDLE_EXTREME",
+        # The clip's bearish example targets C first, then A. Mirrored for BUY.
+        "tp1": pts.c,
+        "tp2": pts.a,
+        "tp3": 0.0,
+        "statistics_status": PATTERN_STATISTICS_STATUS,
+        "statistics_sample_size": 0,
+        "statistics_source": "NONE",
+        "source": "harmonic_detector.project_abcd",
+    }
+
+
+def project_harmonic_from_xabc(
+    pts: HarmonicProjectionPoint,
+    current_price: float,
+    *,
+    armed_distance_pct: float = 0.005,
+) -> list[dict[str, Any]]:
+    """Project every still-possible D family from four confirmed pivots.
+
+    The output is a ladder, not a forced single label.  When price passes a
+    shallow completion (for example Gartley 0.786), that candidate becomes
+    PASSED and the next deeper Bat/Butterfly/Crab projection remains visible.
+    """
+    ratios = xabc_ratios(pts)
+    xab = ratios["XAB"]
+    abc = ratios["ABC"]
+    xa_size = abs(pts.a - pts.x)
+    bc_size = abs(pts.c - pts.b)
+    if xa_size <= 0 or bc_size <= 0:
+        return []
+
+    approach_direction = "SELL" if pts.reversal_direction == "BUY" else "BUY"
+    pattern_side = "Bullish" if pts.reversal_direction == "BUY" else "Bearish"
+    current_xad = abs(float(current_price) - pts.a) / xa_size
+    current_bcd = abs(float(current_price) - pts.c) / bc_size
+    candidates: list[dict[str, Any]] = []
+
+    embedded_abcd = _project_embedded_abcd(
+        pts,
+        current_price,
+        armed_distance_pct=armed_distance_pct,
+    )
+    if embedded_abcd is not None:
+        candidates.append(embedded_abcd)
+
+    for family, rule in FORMING_PATTERN_RULES.items():
+        if not ratio_ok(xab, *rule["xab"]) or not ratio_ok(abc, *rule["abc"]):
+            continue
+
+        xa_low, xa_high = _project_price_range(
+            pts.a, xa_size, rule["xad"], pts.reversal_direction
+        )
+        bc_low, bc_high = _project_price_range(
+            pts.c, bc_size, rule["bcd"], pts.reversal_direction
+        )
+        prz_low = max(xa_low, bc_low)
+        prz_high = min(xa_high, bc_high)
+        if prz_low > prz_high:
+            # XAD and BCD do not converge, so it is not a valid PRZ candidate.
+            continue
+
+        prz_mid = (prz_low + prz_high) / 2.0
+        in_prz = prz_low <= current_price <= prz_high
+        distance = (
+            0.0
+            if in_prz
+            else min(abs(current_price - prz_low), abs(current_price - prz_high))
+        )
+        distance_pct = distance / prz_mid if prz_mid else 999.0
+        passed = bool(
+            (pts.reversal_direction == "BUY" and current_price < prz_low)
+            or (pts.reversal_direction == "SELL" and current_price > prz_high)
+        )
+        if in_prz:
+            status = "ACTIVE"
+        elif passed:
+            status = "PASSED"
+        elif distance_pct <= armed_distance_pct:
+            status = "ARMED"
+        else:
+            status = "FORMING"
+
+        xad_lo, xad_hi = rule["xad"]
+        if current_xad < xad_lo:
+            next_xad = xad_lo
+        elif current_xad < xad_hi:
+            next_xad = xad_hi
+        else:
+            next_xad = 0.0
+
+        candidates.append(
+            {
+                "found": True,
+                "pattern": f"{pattern_side}_{family}",
+                "family": family,
+                "direction": pts.reversal_direction,
+                "approach_direction": approach_direction,
+                "state": status,
+                "pattern_state": "FORMING_XABC",
+                "x": pts.x,
+                "a": pts.a,
+                "b": pts.b,
+                "c": pts.c,
+                "d_point": prz_mid,
+                "x_idx": pts.x_idx,
+                "a_idx": pts.a_idx,
+                "b_idx": pts.b_idx,
+                "c_idx": pts.c_idx,
+                "ratios": {
+                    "XAB": xab,
+                    "ABC": abc,
+                    "CURRENT_XAD": current_xad,
+                    "CURRENT_BCD": current_bcd,
+                    "TARGET_XAD_MIN": xad_lo,
+                    "TARGET_XAD_MAX": xad_hi,
+                    "TARGET_BCD_MIN": rule["bcd"][0],
+                    "TARGET_BCD_MAX": rule["bcd"][1],
+                },
+                "current_xad": current_xad,
+                "current_bcd": current_bcd,
+                "next_xad": next_xad,
+                "prz_low": prz_low,
+                "prz_high": prz_high,
+                "distance": distance,
+                "distance_pct": distance_pct,
+                "in_prz": in_prz,
+                "priority": int(rule.get("priority", 9)),
+                "fallback": bool(rule.get("fallback", False)),
+                # A broad geometry fallback is useful on the dashboard, but
+                # only a named ratio family may own execution bias.
+                "execution_authority": not bool(rule.get("fallback", False)),
+                "ratio_model": "XABCD_PRZ_CONVERGENCE",
+                "confirmation_required": [
+                    "PRZ_REVERSAL_CANDLE",
+                    "DIRECTIONAL_CANDLE_BREAKOUT",
+                    "HTF_STRUCTURE_ALIGNMENT",
+                ],
+                "stop_reference": "CONFIRMATION_CANDLE_EXTREME",
+                "statistics_status": PATTERN_STATISTICS_STATUS,
+                "statistics_sample_size": 0,
+                "statistics_source": "NONE",
+                "source": "harmonic_detector.project_xabc",
+            }
+        )
+
+    state_rank = {"ACTIVE": 0, "ARMED": 1, "FORMING": 2, "PASSED": 3}
+    candidates.sort(
+        key=lambda item: (
+            state_rank.get(str(item.get("state")), 9),
+            1 if item.get("fallback") else 0,
+            int(item.get("priority", 9)),
+            float(item.get("distance_pct", 999.0)),
+        )
+    )
+
+    # Morphing is a measured candidate transition, never a hard-coded story
+    # such as Gartley->Butterfly. A deeper candidate is exposed only when the
+    # current XABC geometry supports it and price has passed an earlier PRZ.
+    passed_named = [
+        str(item.get("family", ""))
+        for item in candidates
+        if item.get("state") == "PASSED" and not item.get("fallback", False)
+    ]
+    for item in candidates:
+        if item.get("state") != "PASSED" and passed_named:
+            item["morph_state"] = "ADVANCED_AFTER_PASSED_PRZ"
+            item["morph_from"] = list(passed_named)
+            item["morph_to"] = str(item.get("family", ""))
+            item["morph_reason"] = (
+                "PRICE_PASSED_PRIOR_PRZ_AND_CURRENT_GEOMETRY_SUPPORTS_CANDIDATE"
+            )
+        else:
+            item["morph_state"] = "BASE_PROJECTION"
+            item["morph_from"] = []
+            item["morph_to"] = str(item.get("family", ""))
+            item["morph_reason"] = "NONE"
+    return candidates
+
+
+def select_harmonic_projection(
+    candidates: list[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Select the next named D candidate without letting fallback flip bias."""
+    strict_actionable = [
+        candidate
+        for candidate in candidates
+        if candidate.get("state") != "PASSED" and not candidate.get("fallback", False)
+    ]
+    if strict_actionable:
+        return strict_actionable[0]
+    actionable = [candidate for candidate in candidates if candidate.get("state") != "PASSED"]
+    if actionable:
+        return actionable[0]
+    return candidates[0] if candidates else None
+
+
 # ── Pattern Validation ────────────────────────────────────
 def validate_xabcd(pts: HarmonicPoint, pattern: dict) -> bool:
     """ตรวจ XABCD ratios ทุก leg"""
+    if pattern.get("structure") == "ABCD":
+        ratios = embedded_abcd_ratios(pts)
+        direction = str(pattern.get("direction", "NONE")).upper()
+        if direction == "BUY":
+            direction_ok = pts.a > pts.b and pts.c > pts.b and pts.d < pts.c
+        elif direction == "SELL":
+            direction_ok = pts.a < pts.b and pts.c < pts.b and pts.d > pts.c
+        else:
+            direction_ok = False
+        return bool(
+            direction_ok
+            and ratio_ok(ratios["BC_AB"], *pattern["c_retrace"])
+            and ratio_ok(ratios["CD_BC"], *pattern["bc_projection"])
+            and ratio_ok(ratios["CD_AB"], *pattern["cd_ab"])
+        )
+
     ratios = xabcd_ratios(pts)
     checks = []
 
@@ -278,20 +699,35 @@ def build_prz(pts: HarmonicPoint, pattern_name: str, pattern: dict) -> PRZZone:
     """สร้าง PRZ zone จาก D point"""
     direction = pattern["direction"]
     d = pts.d
-    xa_range  = abs(pts.a - pts.x)
+    xa_range = (
+        abs(pts.b - pts.a)
+        if pattern.get("structure") == "ABCD"
+        else abs(pts.a - pts.x)
+    )
 
     # PRZ width = 0.5% ของ XA range หรือ minimum 0.5 USD
     prz_half  = max(xa_range * 0.005, 0.50)
 
     prz_high = d + prz_half
     prz_low  = d - prz_half
-    ratios = xabcd_ratios(pts)
+    ratios = (
+        embedded_abcd_ratios(pts)
+        if pattern.get("structure") == "ABCD"
+        else xabcd_ratios(pts)
+    )
 
     label = (
         f"🦋 {pattern_name} | D:{d:.2f} "
         f"| PRZ:{prz_low:.2f}-{prz_high:.2f}"
-        f"| {direction} | XAB:{ratios['XAB']:.3f}"
-        f" BCD:{ratios['BCD']:.3f} XAD:{ratios['XAD']:.3f}"
+        f"| {direction} | "
+        + (
+            f"BC/AB:{ratios['BC_AB']:.3f} CD/BC:{ratios['CD_BC']:.3f}"
+            if pattern.get("structure") == "ABCD"
+            else (
+                f"XAB:{ratios['XAB']:.3f}"
+                f" BCD:{ratios['BCD']:.3f} XAD:{ratios['XAD']:.3f}"
+            )
+        )
     )
 
     return PRZZone(
@@ -325,6 +761,81 @@ def extract_swings(df: pd.DataFrame, n: int = 3) -> list[PivotPoint]:
     all_p = highs + lows
     all_p.sort(key=lambda p: p.index)
     return all_p
+
+
+def make_xabc(
+    swings: list[PivotPoint],
+    i: int,
+) -> Optional[HarmonicProjectionPoint]:
+    """Build one non-repainting XABC route from four confirmed pivots."""
+    if i + 3 >= len(swings):
+        return None
+    points = swings[i:i + 4]
+    kinds = [str(point.kind).lower() for point in points]
+    if not all(kinds[j] != kinds[j + 1] for j in range(3)):
+        return None
+    if kinds == ["low", "high", "low", "high"]:
+        reversal_direction = "BUY"
+    elif kinds == ["high", "low", "high", "low"]:
+        reversal_direction = "SELL"
+    else:
+        return None
+    return HarmonicProjectionPoint(
+        x=float(points[0].price),
+        a=float(points[1].price),
+        b=float(points[2].price),
+        c=float(points[3].price),
+        x_idx=int(points[0].index),
+        a_idx=int(points[1].index),
+        b_idx=int(points[2].index),
+        c_idx=int(points[3].index),
+        reversal_direction=reversal_direction,
+    )
+
+
+def scan_forming_harmonic(
+    df: pd.DataFrame,
+    pivot_n: int = 3,
+) -> dict[str, Any]:
+    """Return the latest XABC projection and its complete D-level ladder."""
+    if df is None or getattr(df, "empty", True) or "close" not in df:
+        return {"found": False, "state": "NO_DATA", "candidates": []}
+    swings = extract_swings(df, pivot_n)
+    if len(swings) < 4:
+        return {"found": False, "state": "NO_XABC", "candidates": []}
+
+    current_price = float(df["close"].iloc[-1])
+    # Only the newest valid XABC route is authoritative. Older routes must not
+    # keep bias locked after a newer C pivot has formed.
+    for i in range(len(swings) - 4, -1, -1):
+        points = make_xabc(swings, i)
+        if not points:
+            continue
+        candidates = project_harmonic_from_xabc(points, current_price)
+        if not candidates:
+            continue
+
+        selected = select_harmonic_projection(candidates)
+        if selected is None:
+            continue
+        ladder = sorted(
+            candidates,
+            key=lambda item: (
+                float(item["prz_high"])
+                if points.reversal_direction == "BUY"
+                else -float(item["prz_low"])
+            ),
+            reverse=points.reversal_direction == "BUY",
+        )
+        return {
+            **selected,
+            "found": True,
+            "candidates": ladder,
+            "selected_pattern": selected["pattern"],
+            "latest_c_idx": points.c_idx,
+        }
+
+    return {"found": False, "state": "NO_VALID_XABC", "candidates": []}
 
 
 def make_xabcd(swings: list[PivotPoint], i: int) -> Optional[HarmonicPoint]:

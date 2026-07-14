@@ -35,6 +35,7 @@ class DecisionEngine:
             )
 
         score = int(bp.base_score)
+        harmonic_bias = self._active_harmonic_direction(bp)
 
         if bp.decision_bias == "STRONG":
             score += 2
@@ -64,6 +65,13 @@ class DecisionEngine:
 
         if bp.trade_plan == "NO_TRADE":
             score -= 3
+
+        if harmonic_bias in ("BUY", "SELL"):
+            score += 1
+            if bp.watch_bias in ("BUY", "SELL") and bp.watch_bias != harmonic_bias:
+                # Trend/context may disagree at a reversal D. It must not
+                # outvote the harmonic PRZ direction.
+                score -= 1
 
         if bp.zone_invalidated:
             score -= 2
@@ -105,6 +113,8 @@ class DecisionEngine:
             f"|plan={bp.trade_plan}|executable={executable}|prz={bp.prz_state}"
             f"|broken={bp.micro_prz_broken}|bos={bp.bos_triggered}"
             f"|smc={bp.smc_confirmed}|vsa={bp.vsa_confirmed}"
+            f"|harmonic_bias={harmonic_bias}|harmonic_state={bp.harmonic_state}"
+            f"|tunnel={bp.tunnel_state}"
         )
 
         return Decision(
@@ -116,6 +126,10 @@ class DecisionEngine:
         )
 
     def _resolve_watch_direction(self, bp: ScenarioBlueprint) -> str:
+        harmonic_bias = self._active_harmonic_direction(bp)
+        if harmonic_bias in ("BUY", "SELL"):
+            return harmonic_bias
+
         if bp.watch_bias in ("BUY", "SELL"):
             return bp.watch_bias
 
@@ -128,6 +142,23 @@ class DecisionEngine:
         if bp.delta_alignment in ("M15_H1_SELL", "BEARISH"):
             return "SELL"
 
+        return "NONE"
+
+    def _active_harmonic_direction(self, bp: ScenarioBlueprint) -> str:
+        if not bp.harmonic_execution_authority or bp.harmonic_tunnel_broken:
+            return "NONE"
+        direction = str(bp.harmonic_direction or "NONE").upper()
+        approach = str(bp.harmonic_approach_direction or "NONE").upper()
+        state = str(bp.harmonic_state or "NONE").upper()
+        if bp.harmonic_is_real and state in {"ARMED", "ACTIVE"} and direction in {"BUY", "SELL"}:
+            return direction
+        if bp.harmonic_is_real and state == "FORMING" and approach in {"BUY", "SELL"}:
+            tunnel = str(bp.tunnel_state or "NONE").upper()
+            aligned = (
+                (direction == "BUY" and tunnel == "DOWNTREND")
+                or (direction == "SELL" and tunnel == "UPTREND")
+            )
+            return approach if aligned else "NONE"
         return "NONE"
 
     def _is_executable(self, bp: ScenarioBlueprint) -> bool:
