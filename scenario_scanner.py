@@ -26,6 +26,33 @@ INTRADAY_HARMONIC_SCAN_ENABLED = os.getenv(
 MARKET_MAP_DIR = os.getenv("ALPHA_MARKET_MAP_DIR", "data/market_maps")
 
 
+def detect_confirmed_tunnel_sweep(
+    *,
+    high: float,
+    low: float,
+    close: float,
+    upper: float,
+    lower: float,
+    tolerance: float,
+    tunnel_state: str,
+) -> Dict[str, bool]:
+    """Mirror Pine's confirmed tunnel touch/reclaim without creating a trade."""
+    state = str(tunnel_state or "FLAT").upper()
+    tolerance = max(float(tolerance or 0.0), 0.0)
+    return {
+        "BUY": bool(
+            state in {"UPTREND", "FLAT"}
+            and float(low) <= float(lower) + tolerance
+            and float(close) > float(lower)
+        ),
+        "SELL": bool(
+            state in {"DOWNTREND", "FLAT"}
+            and float(high) >= float(upper) - tolerance
+            and float(close) < float(upper)
+        ),
+    }
+
+
 class ScenarioScanner:
     def scan(self, df_4h: pd.DataFrame, df_1h: pd.DataFrame, df_15m: pd.DataFrame, symbol: str = "XAUUSD") -> ScenarioBlueprint:
         self._validate_df(df_4h, "4h")
@@ -50,6 +77,14 @@ class ScenarioScanner:
         tunnel_upper = float(df_15m["high"].tail(30).max())
         tunnel_lower = float(df_15m["low"].tail(30).min())
         tunnel_mid = float((tunnel_upper + tunnel_lower) / 2)
+
+        # The sweep boundary excludes the latest confirmed candle, otherwise
+        # its wick would repaint the rolling tunnel and hide its own sweep.
+        pre_sweep_window = df_15m.iloc[-31:-1] if len(df_15m) >= 31 else df_15m.iloc[:-1].tail(30)
+        if pre_sweep_window.empty:
+            pre_sweep_window = df_15m.tail(30)
+        tunnel_sweep_upper = float(pre_sweep_window["high"].max())
+        tunnel_sweep_lower = float(pre_sweep_window["low"].min())
 
         prior_window = df_15m.iloc[-60:-30] if len(df_15m) >= 60 else df_15m.tail(30)
         prior_tunnel_upper = float(prior_window["high"].max())
@@ -142,6 +177,19 @@ class ScenarioScanner:
         else:
             tunnel_state = "FLAT"
 
+        latest_bar = df_15m.iloc[-1]
+        tunnel_sweeps = detect_confirmed_tunnel_sweep(
+            high=float(latest_bar["high"]),
+            low=float(latest_bar["low"]),
+            close=current_price,
+            upper=tunnel_sweep_upper,
+            lower=tunnel_sweep_lower,
+            tolerance=atr_15m * 0.10,
+            tunnel_state=tunnel_state,
+        )
+        buy_tunnel_sweep = tunnel_sweeps["BUY"]
+        sell_tunnel_sweep = tunnel_sweeps["SELL"]
+
         inside_tunnel = tunnel_lower <= current_price <= tunnel_upper
         near_tunnel_upper = abs(current_price - tunnel_upper) <= tunnel_tolerance
         near_tunnel_mid = abs(current_price - tunnel_mid) <= tunnel_tolerance
@@ -149,6 +197,8 @@ class ScenarioScanner:
         tunnel_retest_valid = (
             (trend_h4 == "UP" and tunnel_state in ("UPTREND", "FLAT") and (near_tunnel_lower or near_tunnel_mid))
             or (trend_h4 == "DOWN" and tunnel_state in ("DOWNTREND", "FLAT") and (near_tunnel_upper or near_tunnel_mid))
+            or buy_tunnel_sweep
+            or sell_tunnel_sweep
         )
 
         smc_confirmed = self._smc_proxy(df_15m, current_price)
@@ -242,7 +292,11 @@ class ScenarioScanner:
 
         reversal_allowed = prz_state in ("ACTIVE", "RECLAIMED") and not micro_prz_broken
 
-        if micro_prz_broken and tunnel_state in ("UPTREND", "DOWNTREND"):
+        if sell_tunnel_sweep:
+            trade_plan = "SELL_TUNNEL_SWEEP_ARMED"
+        elif buy_tunnel_sweep:
+            trade_plan = "BUY_TUNNEL_SWEEP_ARMED"
+        elif micro_prz_broken and tunnel_state in ("UPTREND", "DOWNTREND"):
             trade_plan = "TUNNEL_WATCH"
         elif micro_prz_broken:
             trade_plan = "NO_TRADE"
@@ -476,6 +530,10 @@ class ScenarioScanner:
             near_tunnel_mid=bool(near_tunnel_mid),
             near_tunnel_lower=bool(near_tunnel_lower),
             tunnel_retest_valid=bool(tunnel_retest_valid),
+            buy_tunnel_sweep=bool(buy_tunnel_sweep),
+            sell_tunnel_sweep=bool(sell_tunnel_sweep),
+            tunnel_sweep_upper=round(tunnel_sweep_upper, 3),
+            tunnel_sweep_lower=round(tunnel_sweep_lower, 3),
             trade_plan=trade_plan,
             execution_state="WATCH",
             is_valid=len(errors) == 0,
