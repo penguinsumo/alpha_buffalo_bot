@@ -132,6 +132,7 @@ class ScenarioBlueprint:
     harmonic_source_tf: str = "NONE"
     harmonic_source: str = "NONE"
     harmonic_direction: str = "NONE"
+    harmonic_approach_direction: str = "NONE"
     harmonic_pattern_state: str = "NONE"
     harmonic_is_real: bool = False
     harmonic_d_point: float = 0.0
@@ -144,6 +145,14 @@ class ScenarioBlueprint:
     harmonic_tp2: float = 0.0
     harmonic_tp3: float = 0.0
     harmonic_invalidation: float = 0.0
+    harmonic_projection_mode: str = "COMPLETED_XABCD"
+    harmonic_execution_authority: bool = True
+    harmonic_tunnel_broken: bool = False
+    harmonic_selected_pattern: str = ""
+    harmonic_candidate_patterns: List[Dict] = field(default_factory=list)
+    harmonic_current_xad: float = 0.0
+    harmonic_current_bcd: float = 0.0
+    harmonic_next_xad: float = 0.0
 
     htf_prz_timeframe: str = "1H"
     htf_prz_source: str = "df_1h_prz_zone_proxy"
@@ -317,6 +326,7 @@ class ScenarioBlueprint:
                 "source_tf": self.harmonic_source_tf,
                 "source": self.harmonic_source,
                 "direction": self.harmonic_direction,
+                "approach_direction": self.harmonic_approach_direction,
                 "is_real_harmonic": self.harmonic_is_real,
                 "x": self.harmonic_x_price,
                 "a": self.harmonic_a_price,
@@ -332,6 +342,14 @@ class ScenarioBlueprint:
                 "tp2": self.harmonic_tp2,
                 "tp3": self.harmonic_tp3,
                 "invalidation": self.harmonic_invalidation,
+                "projection_mode": self.harmonic_projection_mode,
+                "execution_authority": self.harmonic_execution_authority,
+                "tunnel_broken": self.harmonic_tunnel_broken,
+                "selected_pattern": self.harmonic_selected_pattern,
+                "candidate_patterns": self.harmonic_candidate_patterns,
+                "current_xad": self.harmonic_current_xad,
+                "current_bcd": self.harmonic_current_bcd,
+                "next_xad": self.harmonic_next_xad,
                 "support_top": self.prz_support_top,
                 "support_bottom": self.prz_support_bottom,
             },

@@ -22,6 +22,7 @@ import telegram_bot as telegram_bot_runtime
 import telegram_guard as telegram_guard_runtime
 from engine_v4.buy_engine import BuySignalEngine
 from engine_v4.final_gate import FinalGate
+from engine_v4.harmonic_bias_gate import evaluate_harmonic_bias
 from engine_v4.indicators import (
     _apply_deep_sweep_reclaim_state,
     _apply_zone_pinbar_break_state,
@@ -199,6 +200,64 @@ def test_upper_zone_blocks_fresh_buy() -> None:
     )
     sig = BuySignalEngine().evaluate(frame([row]), 0, NY_SESSION, ALLOWED)
     assert_equal(sig, None, "upper-zone bearish setup must block fresh BUY")
+
+
+def test_harmonic_d_prz_is_one_direction_only() -> None:
+    context = {
+        "found": True,
+        "pattern": "Bullish_Symmetric_XABCD",
+        "direction": "BUY",
+        "state": "ARMED",
+        "source": "market_close_map",
+        "tunnel_state": "DOWNTREND",
+    }
+    buy = evaluate_harmonic_bias("BUY", context, require_harmonic=True)
+    sell = evaluate_harmonic_bias("SELL", context, require_harmonic=True)
+
+    assert_true(buy.allowed, "bullish harmonic D must license only BUY setup evaluation")
+    assert_true(not sell.allowed, "bullish harmonic D must hard-block fresh SELL")
+    assert_equal(sell.reason, "HARMONIC_BIAS_BUY_ONLY", "opposite harmonic reason")
+    assert_equal(
+        buy.tunnel_alignment,
+        "C_TO_D_APPROACH_ALIGNED",
+        "falling parallel tunnel is the normal approach into bullish D",
+    )
+
+
+def test_final_gate_combines_hours_risk_and_harmonic_bias() -> None:
+    gate = FinalGate(SessionClock())
+    context = {
+        "found": True,
+        "pattern": "Bullish_Bat",
+        "direction": "BUY",
+        "state": "ACTIVE",
+        "source": "market_close_map",
+        "tunnel_state": "FLAT",
+    }
+    allowed = gate.evaluate(
+        NY_SESSION,
+        "BUY",
+        harmonic_context=context,
+        require_harmonic=True,
+    )
+    blocked = gate.evaluate(
+        NY_SESSION,
+        "SELL",
+        harmonic_context=context,
+        require_harmonic=True,
+    )
+    waiting = gate.evaluate(
+        NY_SESSION,
+        "BUY",
+        harmonic_context={**context, "state": "WAIT_LOCATION"},
+        require_harmonic=True,
+    )
+
+    assert_true(allowed.allowed, "NY BUY + bullish D must pass the single entry gate")
+    assert_true(not blocked.allowed, "SELL must not bypass bullish harmonic bias")
+    assert_equal(blocked.reason, "HARMONIC_BIAS_BUY_ONLY", "hard bias reason")
+    assert_true(not waiting.allowed, "pattern far from D must not create an entry")
+    assert_equal(waiting.reason, "WAIT_HARMONIC_D_PRZ", "wait for D location")
 
 
 def test_low_rr_candidate_waits_in_ea_payload() -> None:
@@ -1091,6 +1150,8 @@ TESTS = [
     test_lower_buy_not_blocked_by_bearish_context,
     test_lower_zone_blocks_fresh_sell,
     test_upper_zone_blocks_fresh_buy,
+    test_harmonic_d_prz_is_one_direction_only,
+    test_final_gate_combines_hours_risk_and_harmonic_bias,
     test_low_rr_candidate_waits_in_ea_payload,
     test_buy_and_sell_share_one_api_schema,
     test_signal_latest_preserves_canonical_contract,

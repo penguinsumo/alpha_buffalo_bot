@@ -12,6 +12,7 @@ class HarmonicContext(BaseModel):
     found: bool = False
     pattern: str = ""
     direction: str = "NONE"
+    approach_direction: str = "NONE"
     timeframe: str = "NONE"
     source: str = "NONE"
     state: str = "NONE"
@@ -34,6 +35,23 @@ class HarmonicContext(BaseModel):
     invalidation: float = 0.0
     priority: int = 5
     reliability: str = "UNKNOWN"
+    projection_mode: str = "COMPLETED_XABCD"
+    execution_authority: bool = True
+    selected_pattern: str = ""
+    candidate_patterns: List[Dict] = Field(default_factory=list)
+    current_xad: float = 0.0
+    current_bcd: float = 0.0
+    next_xad: float = 0.0
+    ratio_model: str = "NONE"
+    confirmation_required: List[str] = Field(default_factory=list)
+    stop_reference: str = "NONE"
+    morph_state: str = "BASE_PROJECTION"
+    morph_from: List[str] = Field(default_factory=list)
+    morph_to: str = ""
+    morph_reason: str = "NONE"
+    statistics_status: str = "INSUFFICIENT_SAMPLE"
+    statistics_sample_size: int = 0
+    statistics_source: str = "NONE"
 
 
 class NewdayMarketMap(BaseModel):

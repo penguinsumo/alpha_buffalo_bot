@@ -11,9 +11,10 @@ import pandas as pd
 from scenario_blueprint import ScenarioBlueprint
 
 try:
-    from harmonic_detector import run_harmonic
+    from harmonic_detector import run_harmonic, scan_forming_harmonic
 except Exception as exc:
     run_harmonic = None
+    scan_forming_harmonic = None
     HARMONIC_IMPORT_ERROR = str(exc)
 else:
     HARMONIC_IMPORT_ERROR = ""
@@ -169,6 +170,38 @@ class ScenarioScanner:
             symbol=symbol,
             market_map=market_map,
         )
+        if selected_harmonic.get("found") and str(
+            selected_harmonic.get("state", "NONE")
+        ).upper() == "FORMING":
+            reversal_direction = str(
+                selected_harmonic.get("direction", "NONE") or "NONE"
+            ).upper()
+            projected_c = float(selected_harmonic.get("c", 0.0) or 0.0)
+            projected_d = float(selected_harmonic.get("d_point", 0.0) or 0.0)
+            harmonic_break_buffer = max(
+                projected_d * 0.0015,
+                abs(
+                    float(selected_harmonic.get("prz_high", 0.0) or 0.0)
+                    - float(selected_harmonic.get("prz_low", 0.0) or 0.0)
+                ) * 0.10,
+            )
+            c_leg_broken = bool(
+                projected_c > 0
+                and (
+                    (reversal_direction == "BUY" and current_price > projected_c + harmonic_break_buffer)
+                    or (reversal_direction == "SELL" and current_price < projected_c - harmonic_break_buffer)
+                )
+            )
+            prior_channel_broken = bool(
+                (reversal_direction == "BUY" and current_price > prior_tunnel_upper + tunnel_tolerance)
+                or (reversal_direction == "SELL" and current_price < prior_tunnel_lower - tunnel_tolerance)
+            )
+            if c_leg_broken or prior_channel_broken:
+                selected_harmonic = {
+                    **selected_harmonic,
+                    "state": "INVALIDATED",
+                    "tunnel_broken": True,
+                }
         real_harmonic = bool(selected_harmonic.get("found"))
 
         harmonic_prz_low = float(selected_harmonic.get("prz_low", 0.0)) if real_harmonic else 0.0
@@ -379,7 +412,8 @@ class ScenarioScanner:
             harmonic_source_tf=str(selected_harmonic.get("source_tf", "NONE")) if real_harmonic else "NONE",
             harmonic_source=str(selected_harmonic.get("source", "NONE")) if real_harmonic else "NONE",
             harmonic_direction=str(selected_harmonic.get("direction", "NONE")) if real_harmonic else "NONE",
-            harmonic_pattern_state=str(selected_harmonic.get("state", "NONE")) if real_harmonic else "NONE",
+            harmonic_approach_direction=str(selected_harmonic.get("approach_direction", "NONE")) if real_harmonic else "NONE",
+            harmonic_pattern_state=str(selected_harmonic.get("pattern_state", selected_harmonic.get("state", "NONE"))) if real_harmonic else "NONE",
             harmonic_is_real=bool(real_harmonic),
             harmonic_d_point=round(harmonic_d_point, 3) if real_harmonic else 0.0,
             harmonic_x_price=round(harmonic_x_point, 3) if real_harmonic else 0.0,
@@ -394,13 +428,23 @@ class ScenarioScanner:
             harmonic_tp2=round(float(selected_harmonic.get("tp2", 0.0)), 3) if real_harmonic else 0.0,
             harmonic_tp3=round(float(selected_harmonic.get("tp3", 0.0)), 3) if real_harmonic else 0.0,
             harmonic_invalidation=round(float(selected_harmonic.get("invalidation", 0.0)), 3) if real_harmonic else 0.0,
+            harmonic_projection_mode=str(selected_harmonic.get("projection_mode", "COMPLETED_XABCD")) if real_harmonic else "NONE",
+            harmonic_execution_authority=bool(selected_harmonic.get("execution_authority", True)) if real_harmonic else False,
+            harmonic_tunnel_broken=bool(selected_harmonic.get("tunnel_broken", False)) if real_harmonic else False,
+            harmonic_selected_pattern=str(selected_harmonic.get("selected_pattern", selected_harmonic.get("pattern", ""))) if real_harmonic else "",
+            harmonic_candidate_patterns=list(selected_harmonic.get("candidate_patterns") or []) if real_harmonic else [],
+            harmonic_current_xad=round(float(selected_harmonic.get("current_xad", 0.0)), 6) if real_harmonic else 0.0,
+            harmonic_current_bcd=round(float(selected_harmonic.get("current_bcd", 0.0)), 6) if real_harmonic else 0.0,
+            harmonic_next_xad=round(float(selected_harmonic.get("next_xad", 0.0)), 6) if real_harmonic else 0.0,
             harmonic_prz_timeframe=str(selected_harmonic.get("source_tf", "NONE")) if real_harmonic else "NONE",
             harmonic_prz_source=str(selected_harmonic.get("source", "NONE")) if real_harmonic else "NONE",
             prz_current=round(harmonic_d_point, 3) if real_harmonic else None,
             prz_next=round(harmonic_prz_high, 3) if real_harmonic else None,
             atr_15m=round(atr_15m, 3),
             atr_1h=round(atr_1h, 3),
-            win_rate_est=0.61,
+            # No reproducible pattern/session/timeframe sample is attached to
+            # this scenario yet. Never publish a hard-coded win probability.
+            win_rate_est=0.0,
             risk_reward_ratio=risk_reward_ratio,
             expected_value=expected_value,
             confidence=confidence,
@@ -474,17 +518,53 @@ class ScenarioScanner:
         in_prz = prz_low <= current_price <= prz_high
         distance = abs(float(current_price) - d_point)
         distance_pct = distance / d_point if d_point else 999.0
-        if in_prz:
+        direction = str(harmonic.get("direction", "NONE") or "NONE").upper()
+        approach_direction = str(
+            harmonic.get(
+                "approach_direction",
+                "SELL" if direction == "BUY" else "BUY" if direction == "SELL" else "NONE",
+            )
+            or "NONE"
+        ).upper()
+        raw_state = str(harmonic.get("state", "DISCOVERED") or "DISCOVERED").upper()
+        projection_mode = str(harmonic.get("projection_mode", "COMPLETED_XABCD") or "COMPLETED_XABCD")
+        is_forming_projection = projection_mode == "FORMING_XABC_TO_D" or raw_state == "FORMING"
+        c_point = float(harmonic.get("c_point", harmonic.get("c", 0.0)) or 0.0)
+        invalidation = float(harmonic.get("invalidation", 0.0) or 0.0)
+        # The pattern may wick beyond its narrow detector PRZ before reclaim.
+        # Give the D location a small XAU-relative buffer instead of declaring
+        # invalidation on the first liquidity sweep through the boundary.
+        invalidation_buffer = max(abs(prz_high - prz_low) * 2.0, d_point * 0.0015)
+        d_invalidated = bool(
+            (direction == "BUY" and invalidation > 0 and current_price < invalidation - invalidation_buffer)
+            or (direction == "SELL" and invalidation > 0 and current_price > invalidation + invalidation_buffer)
+        )
+        c_break_buffer = max(d_point * 0.0015, abs(prz_high - prz_low) * 0.10)
+        forming_tunnel_broken = bool(
+            is_forming_projection
+            and c_point > 0
+            and (
+                (direction == "BUY" and current_price > c_point + c_break_buffer)
+                or (direction == "SELL" and current_price < c_point - c_break_buffer)
+            )
+        )
+        invalidated = d_invalidated or forming_tunnel_broken
+        if invalidated:
+            state = "INVALIDATED"
+        elif in_prz:
             state = "ACTIVE"
         elif distance_pct <= 0.005:
             state = "ARMED"
+        elif is_forming_projection:
+            state = "FORMING"
         else:
-            state = str(harmonic.get("state", "DISCOVERED") or "DISCOVERED")
+            state = "WAIT_LOCATION"
 
         return {
             "found": True,
             "pattern": str(harmonic.get("pattern", "")),
-            "direction": str(harmonic.get("direction", "NONE")),
+            "direction": direction,
+            "approach_direction": approach_direction,
             "priority": int(harmonic.get("priority", 5) or 5),
             "reliability": str(harmonic.get("reliability", "MARKET_CLOSE")),
             "prz_low": prz_low,
@@ -493,12 +573,12 @@ class ScenarioScanner:
             "x": float(harmonic.get("x_point", harmonic.get("x", 0.0)) or 0.0),
             "a": float(harmonic.get("a_point", harmonic.get("a", 0.0)) or 0.0),
             "b": float(harmonic.get("b_point", harmonic.get("b", 0.0)) or 0.0),
-            "c": float(harmonic.get("c_point", harmonic.get("c", 0.0)) or 0.0),
+            "c": c_point,
             "ratios": dict(harmonic.get("ratios") or {}),
             "tp1": float(harmonic.get("tp1", 0.0) or 0.0),
             "tp2": float(harmonic.get("tp2", 0.0) or 0.0),
             "tp3": float(harmonic.get("tp3", 0.0) or 0.0),
-            "invalidation": float(harmonic.get("invalidation", 0.0) or 0.0),
+            "invalidation": invalidation,
             "score": 0,
             "in_prz": in_prz,
             "distance": distance,
@@ -506,6 +586,15 @@ class ScenarioScanner:
             "source_tf": str(harmonic.get("timeframe", "4H")),
             "source": "market_close_map",
             "state": state,
+            "pattern_state": raw_state,
+            "projection_mode": projection_mode,
+            "execution_authority": bool(harmonic.get("execution_authority", True)),
+            "selected_pattern": str(harmonic.get("selected_pattern", harmonic.get("pattern", "")) or ""),
+            "candidate_patterns": list(harmonic.get("candidate_patterns") or []),
+            "current_xad": float(harmonic.get("current_xad", 0.0) or 0.0),
+            "current_bcd": float(harmonic.get("current_bcd", 0.0) or 0.0),
+            "next_xad": float(harmonic.get("next_xad", 0.0) or 0.0),
+            "tunnel_broken": forming_tunnel_broken,
         }
 
     def _select_harmonic_prz(
@@ -526,6 +615,26 @@ class ScenarioScanner:
         mapped = self._harmonic_from_market_map(market_map, current_price)
         if mapped.get("found"):
             return mapped
+
+        # Predictive fallback: X/A/B/C are already confirmed, while D is
+        # projected. This is non-repainting and is intentionally available
+        # even when the overnight Newday JSON has not been written yet.
+        forming_candidates = []
+        for source_tf, source_df in (("1H", df_1h), ("4H", df_4h)):
+            projected = self._scan_forming_harmonic_tf(source_df, source_tf)
+            if projected.get("found"):
+                forming_candidates.append(projected)
+        if forming_candidates:
+            state_rank = {"ACTIVE": 0, "ARMED": 1, "FORMING": 2, "PASSED": 9}
+            tf_rank = {"1H": 0, "4H": 1}
+            forming_candidates.sort(
+                key=lambda item: (
+                    state_rank.get(str(item.get("state", "NONE")).upper(), 5),
+                    tf_rank.get(str(item.get("source_tf", "NONE")), 9),
+                    int(item.get("priority", 9) or 9),
+                )
+            )
+            return forming_candidates[0]
 
         if not INTRADAY_HARMONIC_SCAN_ENABLED:
             return {
@@ -578,10 +687,39 @@ class ScenarioScanner:
         elif float(selected.get("distance_pct", 999.0)) <= 0.005:
             selected["state"] = "ARMED"
         else:
-            selected["state"] = "DISCOVERED"
+            selected["state"] = "WAIT_LOCATION"
 
         selected["found"] = True
         return selected
+
+    def _scan_forming_harmonic_tf(
+        self,
+        df: pd.DataFrame,
+        source_tf: str,
+    ) -> Dict[str, Any]:
+        if scan_forming_harmonic is None or df is None or df.empty:
+            return {"found": False}
+        try:
+            projected = dict(scan_forming_harmonic(df) or {})
+        except Exception as exc:
+            print(
+                "AlphaBuffalo forming harmonic scan failed | "
+                f"tf={source_tf} error={exc}",
+                flush=True,
+            )
+            return {"found": False}
+        if not projected.get("found"):
+            return {"found": False}
+        projected["source_tf"] = source_tf
+        projected.setdefault("source", "harmonic_detector.project_xabc")
+        projected.setdefault("projection_mode", "FORMING_XABC_TO_D")
+        projected.setdefault("pattern_state", "FORMING_XABC")
+        projected.setdefault("candidate_patterns", list(projected.get("candidates") or []))
+        projected.setdefault("invalidation", 0.0)
+        projected.setdefault("tp1", 0.0)
+        projected.setdefault("tp2", 0.0)
+        projected.setdefault("tp3", 0.0)
+        return projected
 
     def _scan_harmonic_tf(
         self,
@@ -620,8 +758,12 @@ class ScenarioScanner:
                     "found": True,
                     "pattern": str(getattr(z, "pattern_name", "")),
                     "direction": str(getattr(z, "direction", "NONE")),
+                    "approach_direction": "SELL" if str(getattr(z, "direction", "NONE")) == "BUY" else "BUY",
                     "priority": int(getattr(z, "priority", 9) or 9),
                     "reliability": str(getattr(z, "reliability", "UNKNOWN")),
+                    "execution_authority": str(
+                        getattr(z, "reliability", "") or ""
+                    ).lower() != "context",
                     "prz_low": prz_low,
                     "prz_high": prz_high,
                     "d_point": d_point,
@@ -637,6 +779,7 @@ class ScenarioScanner:
                     "source_tf": source_tf,
                     "source": "harmonic_detector.run_harmonic",
                     "state": "ACTIVE" if in_prz else "DISCOVERED",
+                    "pattern_state": "COMPLETED_AT_D",
                 }
             )
 

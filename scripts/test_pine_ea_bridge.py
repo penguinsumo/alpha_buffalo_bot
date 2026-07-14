@@ -42,6 +42,23 @@ def sample_payload(action: str = "OPEN", direction: str = "BUY") -> dict:
     }
 
 
+def add_sell_reverse(payload: dict) -> dict:
+    payload.update(
+        {
+            "reverse_direction": "SELL",
+            "reverse_entry_price": 4140.0,
+            "reverse_sl_price": 4150.0,
+            "reverse_tp1_price": 4130.0,
+            "reverse_tp2_price": 4110.0,
+            "reverse_score": 5,
+            "reverse_signal_id": "XAUUSD-TEST-REV-SELL",
+            "reverse_target_source": "DEMAND_PRZ",
+            "reverse_reason": "KIVANC_PRZ_ARMED_HA15_ACK_REVERSE",
+        }
+    )
+    return payload
+
+
 def assert_rejected(bridge: PineSignalBridge, payload: dict, reason: str) -> None:
     try:
         bridge.ingest(payload)
@@ -90,10 +107,32 @@ def main() -> None:
         assert retry["action"] == "HOLD"
         assert retry["reason"] == "DUPLICATE_ACKED_SIGNAL"
 
-        close_payload = sample_payload(action="CLOSE")
+        close_payload = add_sell_reverse(sample_payload(action="CLOSE"))
+        # A trailing BE stop may sit beyond the original BUY entry. CLOSE must
+        # still be accepted because it is not a fresh directional entry plan.
+        close_payload["sl_price"] = 4121.0
         closed = reloaded.ingest(close_payload)
         assert closed["action"] == "CLOSE_ALL"
+        assert closed["after_ack"]["direction"] == "SELL"
         assert reloaded.pending_command("XAUUSD")["action"] == "CLOSE_ALL"
+
+        close_ack = reloaded.acknowledge(
+            symbol="XAUUSD",
+            command_id=closed["command_id"],
+            success=True,
+        )
+        assert close_ack["promoted_command"]["action"] == "OPEN"
+        assert close_ack["promoted_command"]["direction"] == "SELL"
+        promoted = reloaded.pending_command("XAUUSD")
+        assert promoted["command_id"] == "PINE:XAUUSD-TEST-REV-SELL:OPEN"
+
+        promoted_ack = reloaded.acknowledge(
+            symbol="XAUUSD",
+            command_id=promoted["command_id"],
+            success=True,
+        )
+        assert promoted_ack["acknowledged"] is True
+        assert reloaded.pending_command("XAUUSD")["action"] == "HOLD"
 
         no_signal = sample_payload()
         no_signal["status"] = "NO_SIGNAL"
@@ -107,13 +146,23 @@ def main() -> None:
         invalid_levels["sl_price"] = 4100.0
         assert_rejected(reloaded, invalid_levels, "INVALID_SELL_LEVELS")
 
+        invalid_reverse = add_sell_reverse(sample_payload(action="CLOSE"))
+        invalid_reverse["reverse_direction"] = "BUY"
+        assert_rejected(
+            reloaded,
+            invalid_reverse,
+            "REVERSE_DIRECTION_MUST_BE_OPPOSITE",
+        )
+
     print("PASS Pine OPEN is canonical and EA execution-only")
     print("PASS duplicate webhook delivery is idempotent")
     print("PASS ACK clears durable pending command")
     print("PASS duplicate ACKed signal never requeues")
     print("PASS Pine CLOSE becomes CLOSE_ALL")
+    print("PASS reverse OPEN is promoted only after CLOSE ACK")
+    print("PASS CLOSE accepts a trailed BE stop without treating it as a new entry")
     print("PASS NO_SIGNAL/non-Pine/invalid levels are rejected")
-    print("Summary: 6/6 Pine-EA bridge checks passed")
+    print("Summary: 8/8 Pine-EA bridge checks passed")
 
 
 if __name__ == "__main__":
