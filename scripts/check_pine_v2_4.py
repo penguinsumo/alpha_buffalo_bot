@@ -109,10 +109,19 @@ def main() -> None:
                 "sellReclaimNow",
             )
         ),
-        "confirmed tunnel sweep can arm but never enter alone": all(
+        "confirmed pivot parallel-channel sweep can arm but never enter alone": all(
             marker in source
             for marker in (
-                "f_confirmed_tunnel",
+                "f_confirmed_parallel_channel",
+                "_fallingStructure",
+                "_risingStructure",
+                "_highSlopePerMs",
+                "_lowSlopePerMs",
+                "tunnelAnchorVersion",
+                "f_tunnel_context_json",
+                '"tunnel_direction":"',
+                '"tunnel_anchor_time_1":',
+                '"tunnel_parallel_price":',
                 "tunnelUpper",
                 "tunnelLower",
                 "buyTunnelSweepNow",
@@ -127,7 +136,9 @@ def main() -> None:
                 "TUNNEL_SWEEP_GC_RVOL_WALL_PA_HA15_SELL",
             )
         ) and "sellSignal := sellTunnelSweepNow" not in source
-        and "buySignal := buyTunnelSweepNow" not in source,
+        and "buySignal := buyTunnelSweepNow" not in source
+        and "tunnelLookback" not in source
+        and "f_confirmed_tunnel" not in source,
         "BB and PA trigger": all(
             marker in source
             for marker in ("bbBuyReject", "bbSellReject", "buyReversalPin", "sellReversalPin")
