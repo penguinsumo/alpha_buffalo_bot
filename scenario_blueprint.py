@@ -48,6 +48,15 @@ class ScenarioBlueprint:
     tunnel_mid: float = 0.0
     tunnel_slope: float = 0.0
     tunnel_valid: bool = False
+    tunnel_timeframe: str = "1H"
+    tunnel_source: str = "confirmed_h1_pivots"
+    tunnel_anchor_time_1: int = 0
+    tunnel_anchor_price_1: float = 0.0
+    tunnel_anchor_time_2: int = 0
+    tunnel_anchor_price_2: float = 0.0
+    tunnel_parallel_time: int = 0
+    tunnel_parallel_price: float = 0.0
+    tunnel_anchor_version: int = 0
 
     golden_zone_low: float = 0.0
     golden_zone_high: float = 0.0
@@ -226,7 +235,7 @@ class ScenarioBlueprint:
     reversal_allowed: bool = True
 
     # Tunnel / Parallel channel state
-    tunnel_state: str = "FLAT"
+    tunnel_state: str = "NONE"
     inside_tunnel: bool = False
     near_tunnel_upper: bool = False
     near_tunnel_mid: bool = False
@@ -276,11 +285,20 @@ class ScenarioBlueprint:
                 "lower": self.bb_lower,
             },
             "tunnel": {
+                "timeframe": self.tunnel_timeframe,
+                "source": self.tunnel_source,
                 "upper": self.tunnel_upper,
                 "lower": self.tunnel_lower,
                 "mid": self.tunnel_mid,
                 "slope": self.tunnel_slope,
                 "valid": self.tunnel_valid,
+                "anchor_time_1": self.tunnel_anchor_time_1,
+                "anchor_price_1": self.tunnel_anchor_price_1,
+                "anchor_time_2": self.tunnel_anchor_time_2,
+                "anchor_price_2": self.tunnel_anchor_price_2,
+                "parallel_time": self.tunnel_parallel_time,
+                "parallel_price": self.tunnel_parallel_price,
+                "anchor_version": self.tunnel_anchor_version,
             },
             "golden_zone": {
                 "low": self.golden_zone_low,
@@ -486,8 +504,8 @@ class ScenarioBlueprint:
                     "reversal_allowed": self.reversal_allowed,
                 },
                 "tunnel_state": {
-                    "timeframe": "15M",
-                    "source": "df_15m_tunnel_proxy",
+                    "timeframe": self.tunnel_timeframe,
+                    "source": self.tunnel_source,
                     "state": self.tunnel_state,
                     "inside_tunnel": self.inside_tunnel,
                     "near_upper": self.near_tunnel_upper,
@@ -502,6 +520,14 @@ class ScenarioBlueprint:
                     "middle": self.tunnel_mid,
                     "lower": self.tunnel_lower,
                     "slope": self.tunnel_slope,
+                    "valid": self.tunnel_valid,
+                    "anchor_time_1": self.tunnel_anchor_time_1,
+                    "anchor_price_1": self.tunnel_anchor_price_1,
+                    "anchor_time_2": self.tunnel_anchor_time_2,
+                    "anchor_price_2": self.tunnel_anchor_price_2,
+                    "parallel_time": self.tunnel_parallel_time,
+                    "parallel_price": self.tunnel_parallel_price,
+                    "anchor_version": self.tunnel_anchor_version,
                 },
                 "bb_15m": {
                     "timeframe": "15M",
