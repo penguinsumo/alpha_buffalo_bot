@@ -109,6 +109,25 @@ def main() -> None:
                 "sellReclaimNow",
             )
         ),
+        "confirmed tunnel sweep can arm but never enter alone": all(
+            marker in source
+            for marker in (
+                "f_confirmed_tunnel",
+                "tunnelUpper",
+                "tunnelLower",
+                "buyTunnelSweepNow",
+                "sellTunnelSweepNow",
+                "buyTunnelSweepArmed",
+                "sellTunnelSweepArmed",
+                "buyTunnelLocationOk",
+                "sellTunnelLocationOk",
+                "BUY_TUNNEL_SWEEP_ARMED",
+                "SELL_TUNNEL_SWEEP_ARMED",
+                "TUNNEL_SWEEP_GC_RVOL_WALL_PA_HA15_BUY",
+                "TUNNEL_SWEEP_GC_RVOL_WALL_PA_HA15_SELL",
+            )
+        ) and "sellSignal := sellTunnelSweepNow" not in source
+        and "buySignal := buyTunnelSweepNow" not in source,
         "BB and PA trigger": all(
             marker in source
             for marker in ("bbBuyReject", "bbSellReject", "buyReversalPin", "sellReversalPin")
@@ -138,7 +157,7 @@ def main() -> None:
                 "sellPaZoneSetup",
             )
         ),
-        "GC futures RVOL and PA latch inside PRZ but never enter directly": all(
+        "GC futures RVOL and PA latch at PRZ or tunnel but never enter directly": all(
             marker in source
             for marker in (
                 "buyGcRvolWallArmed",
@@ -151,6 +170,8 @@ def main() -> None:
                 "sellPaZoneSetup",
                 "buyArmSetup = (buyGcRvolWallArmed or buyGcRvolWallSetup) and (buyPaZoneArmed or buyPaZoneSetup)",
                 "sellArmSetup = (sellGcRvolWallArmed or sellGcRvolWallSetup) and (sellPaZoneArmed or sellPaZoneSetup)",
+                "buyEvidenceLocationOk = buyPrzRouteOk or buyTunnelLocationOk",
+                "sellEvidenceLocationOk = sellPrzRouteOk or sellTunnelLocationOk",
                 "PRZ_GC_RVOL_WALL_PA_HA15_BUY",
                 "PRZ_GC_RVOL_WALL_PA_HA15_SELL",
             )
