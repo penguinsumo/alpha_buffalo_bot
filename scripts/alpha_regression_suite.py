@@ -33,7 +33,10 @@ from engine_v4.router import SignalRouter
 from engine_v4.sell_engine import SellSignalEngine
 from engine_v4.session_gate import GateResult
 from execution_lifecycle import ExecutionLifecycleManager, closed_ha5_evidence
-from scenario_scanner import detect_confirmed_tunnel_sweep
+from scenario_scanner import (
+    build_confirmed_parallel_channel,
+    detect_confirmed_tunnel_sweep,
+)
 from session_clock import SessionClock, SessionState, market_closed_reason
 from alpha_buffalo_signal import (
     API_LICENSE_KEY,
@@ -260,6 +263,85 @@ def test_confirmed_tunnel_sweep_arms_only_the_aligned_approach() -> None:
     )
     assert_true(buy["BUY"], "lower-tunnel wick and reclaim must mirror BUY")
     assert_true(not buy["SELL"], "rising tunnel must not arm SELL at its lower edge")
+
+
+def test_parallel_channel_uses_confirmed_h1_pivots_and_ignores_forming_wick() -> None:
+    index = pd.date_range("2026-07-01", periods=30, freq="h", tz="UTC")
+    turning_points = {
+        0: 105.0,
+        5: 120.0,
+        9: 90.0,
+        13: 110.0,
+        17: 80.0,
+        21: 100.0,
+        25: 70.0,
+        29: 85.0,
+    }
+    center = [0.0] * len(index)
+    points = sorted(turning_points)
+    for left, right in zip(points, points[1:]):
+        start, end = turning_points[left], turning_points[right]
+        for position in range(left, right + 1):
+            weight = (position - left) / (right - left)
+            center[position] = start + (end - start) * weight
+    frame = pd.DataFrame(
+        {
+            "open": center,
+            "high": [value + 1.0 for value in center],
+            "low": [value - 1.0 for value in center],
+            "close": center,
+            "volume": [1000.0] * len(index),
+        },
+        index=index,
+    )
+    baseline = build_confirmed_parallel_channel(
+        frame,
+        pivot_bars=3,
+        projection_time=index[-1],
+        minimum_width=1.0,
+    )
+    frame_with_news_wick = frame.copy()
+    frame_with_news_wick.loc[index[-1], "high"] = 180.0
+    after_wick = build_confirmed_parallel_channel(
+        frame_with_news_wick,
+        pivot_bars=3,
+        projection_time=index[-1],
+        minimum_width=1.0,
+    )
+
+    assert_true(baseline["valid"], "two lower highs/lows must form a valid channel")
+    assert_equal(baseline["state"], "DOWNTREND", "falling H1 channel state")
+    assert_equal(
+        after_wick["anchor_version"],
+        baseline["anchor_version"],
+        "forming news wick must not repaint confirmed anchors",
+    )
+    assert_equal(after_wick["upper"], baseline["upper"], "upper channel remains frozen")
+    assert_equal(after_wick["lower"], baseline["lower"], "lower channel remains parallel")
+
+    api_frame = frame.reset_index(names="datetime")
+    api_channel = build_confirmed_parallel_channel(
+        api_frame,
+        pivot_bars=3,
+        projection_time=api_frame["datetime"].iloc[-1],
+        minimum_width=1.0,
+    )
+    assert_equal(api_channel["upper"], baseline["upper"], "API datetime column projection")
+    assert_equal(api_channel["lower"], baseline["lower"], "API channel matches Pine time axis")
+
+    mirrored = frame.copy()
+    mirrored["open"] = 250.0 - frame["open"]
+    mirrored["close"] = 250.0 - frame["close"]
+    mirrored["high"] = 250.0 - frame["low"]
+    mirrored["low"] = 250.0 - frame["high"]
+    rising = build_confirmed_parallel_channel(
+        mirrored,
+        pivot_bars=3,
+        projection_time=index[-1],
+        minimum_width=1.0,
+    )
+    assert_true(rising["valid"], "mirrored higher highs/lows must form a channel")
+    assert_equal(rising["state"], "UPTREND", "rising H1 channel state")
 
 
 def test_final_gate_combines_hours_risk_and_harmonic_bias() -> None:
@@ -981,6 +1063,51 @@ def test_telegram_public_output_hides_engine_internals() -> None:
 
     assert_true("WAIT SETUP" in trend_text, "trend update should use public wait setup label")
     assert_true("V4_SESSION" in signal_text, "trade alert should use public V4_SESSION type")
+    assert_true("Signal accepted and queued" in signal_text, "trade alert should describe queue state")
+    assert_true("EA Executing" not in signal_text, "trade alert must not claim execution before EA ACK")
+
+
+def test_pine_monitor_is_observable_but_never_owns_a_trade() -> None:
+    base_payload = {
+        "symbol": "XAUUSD",
+        "signal": {
+            "timestamp": "2026-07-10T15:00:00+00:00",
+            "blueprint": {"current_price": 4100.0, "trend_h1": "UP", "trend_h4": "UP"},
+            "gates": {"session": "NY"},
+        },
+        "ea": {
+            "action": "OPEN",
+            "execution_state": "READY",
+            "direction": "BUY",
+            "entry": 4100.0,
+            "session": "NY",
+        },
+    }
+    original_pipeline = runtime.run_pipeline
+    try:
+        runtime.run_pipeline = lambda: base_payload
+        monitor = runtime._pine_monitor_payload()
+    finally:
+        runtime.run_pipeline = original_pipeline
+
+    assert_equal(monitor["source"], "PINE_MONITOR", "monitor source")
+    assert_equal(monitor["ea"]["action"], "WAIT", "monitor may never open")
+    assert_equal(monitor["ea"]["execution_state"], "WATCH", "monitor is watch-only")
+    assert_equal(monitor["ea"]["command_owner"], "PINE_TRADINGVIEW", "Pine retains ownership")
+    text = format_telegram_trend_update(monitor)
+    assert_true("PINE MONITOR" in text, "monitor must be visible in Telegram")
+    assert_true("Relay online" in text, "monitor confirms relay availability")
+
+    fresh = {
+        "signal": {"timestamp": pd.Timestamp.now(tz="UTC").isoformat()},
+        "ea": {},
+    }
+    stale = {
+        "signal": {"timestamp": "2026-01-01T00:00:00+00:00"},
+        "ea": {},
+    }
+    assert_true(runtime._telegram_open_signal_is_fresh(fresh), "fresh OPEN must notify")
+    assert_true(not runtime._telegram_open_signal_is_fresh(stale), "stale OPEN must not replay")
 
 
 def test_closed_market_suppresses_all_telegram() -> None:
@@ -1190,6 +1317,7 @@ TESTS = [
     test_upper_zone_blocks_fresh_buy,
     test_harmonic_d_prz_is_one_direction_only,
     test_confirmed_tunnel_sweep_arms_only_the_aligned_approach,
+    test_parallel_channel_uses_confirmed_h1_pivots_and_ignores_forming_wick,
     test_final_gate_combines_hours_risk_and_harmonic_bias,
     test_low_rr_candidate_waits_in_ea_payload,
     test_buy_and_sell_share_one_api_schema,
@@ -1212,6 +1340,7 @@ TESTS = [
     test_active_position_forces_ea_to_management_only,
     test_execution_api_fill_and_ack_round_trip,
     test_telegram_public_output_hides_engine_internals,
+    test_pine_monitor_is_observable_but_never_owns_a_trade,
     test_closed_market_suppresses_all_telegram,
     test_weekend_is_hard_closed_before_session_resolution,
     test_seasonal_bangkok_sessions_survive_conflict_resolution,
