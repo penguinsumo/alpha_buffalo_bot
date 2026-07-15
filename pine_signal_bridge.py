@@ -371,6 +371,8 @@ def build_pine_api_payload(command: Mapping[str, Any]) -> dict[str, Any]:
         "score": command.get("score", 0),
         "target_source": command.get("target_source"),
         "reason": command.get("reason"),
+        "received_at": command.get("received_at"),
+        "expires_at_epoch": command.get("expires_at_epoch"),
         # Pine owns the completed decision stack.  The bridge already validates
         # all four directional prices before an OPEN can reach this adapter.
         "levels_ready": bool(levels_ready),
@@ -396,6 +398,7 @@ def build_pine_api_payload(command: Mapping[str, Any]) -> dict[str, Any]:
             "symbol": command.get("symbol"),
             "source": "PINE",
             "target_source": command.get("target_source"),
+            "timestamp": command.get("received_at"),
         },
         "ea": ea,
     }
