@@ -212,6 +212,16 @@ def main() -> None:
                 "entryArmTtl",
             )
         ),
+        "dashboard separates location from trade direction": all(
+            marker in source
+            for marker in (
+                'table.cell(dashboard, 0, 17, "Location"',
+                'buyDirectionalZone ? "DEMAND PRZ"',
+                'sellDirectionalZone ? "SUPPLY PRZ"',
+                '"BUY BLOCKED: BEAR BOS"',
+                '"SELL BLOCKED: BULL BOS"',
+            )
+        ) and 'table.cell(dashboard, 0, 17, "Decision Zone"' not in source,
         "mirrored confirmed HA15 second-candle trigger": all(
             marker in source
             for marker in (
