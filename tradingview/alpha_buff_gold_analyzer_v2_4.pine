@@ -1,5 +1,5 @@
 //@version=6
-indicator("AlphaBuff Gold Analyzer v2.4.3 - Decision Stack", overlay=true, max_labels_count=300, max_boxes_count=30, max_lines_count=30)
+indicator("AlphaBuff Gold Analyzer v2.4.4 - Decision Stack", overlay=true, max_labels_count=300, max_boxes_count=30, max_lines_count=50)
 
 // Execution is designed to run on a 5-minute chart. H4 supplies PRZ/context,
 // H1 supplies the frozen tunnel geometry, and closed M15 supplies the sweep and
@@ -97,8 +97,12 @@ projectionBars = input.int(60, "PRZ box projection bars", minval=10, maxval=300,
 boxHistoryBars = input.int(48, "PRZ box bars to the left", minval=0, maxval=500, group=groupVisual)
 showBb        = input.bool(false, "Show confirmed 15m BB", group=groupVisual)
 showTunnel    = input.bool(true, "Show confirmed parallel channel", group=groupVisual)
+showHarmonicForecast = input.bool(true, "Show confirmed H1 XABC → D forecast", group=groupVisual,
+     tooltip="Visual guideline from confirmed H1 pivots. Railway remains the only harmonic execution authority.")
 showTrade     = input.bool(true, "Show entry / stop / targets", group=groupVisual)
 showH1SourceDots = input.bool(true, "Show H1 BUY-candle / SELL-HA dots", group=groupVisual)
+evidenceHistoryDays = input.int(14, "Evidence-dot history (days)", minval=1, maxval=90, group=groupVisual,
+     tooltip="Red/green GC-RVOL and H1-source dots older than this window are not rendered.")
 
 // =============================================================================
 // 2. HELPERS
@@ -204,6 +208,134 @@ f_confirmed_parallel_channel(int _pivotBars) =>
 
     [_direction[1], _upper[1], _lower[1], _slopePerMs[1], time_close[1], _mainTime1[1], _mainPrice1[1], _mainTime2[1], _mainPrice2[1], _parallelTime[1], _parallelPrice[1], _anchorVersion[1]]
 
+f_ratio_ok(float _value, float _minimum, float _maximum) =>
+    not na(_value) and _value >= _minimum and _value <= _maximum
+
+f_harmonic_prz(float _a, float _xaSize, float _c, float _bcSize, int _direction, float _xadMin, float _xadMax, float _bcdMin, float _bcdMax) =>
+    _xadPrice1 = _direction == 1 ? _a - _xaSize * _xadMin : _a + _xaSize * _xadMin
+    _xadPrice2 = _direction == 1 ? _a - _xaSize * _xadMax : _a + _xaSize * _xadMax
+    _bcdPrice1 = _direction == 1 ? _c - _bcSize * _bcdMin : _c + _bcSize * _bcdMin
+    _bcdPrice2 = _direction == 1 ? _c - _bcSize * _bcdMax : _c + _bcSize * _bcdMax
+    _low = math.max(math.min(_xadPrice1, _xadPrice2), math.min(_bcdPrice1, _bcdPrice2))
+    _high = math.min(math.max(_xadPrice1, _xadPrice2), math.max(_bcdPrice1, _bcdPrice2))
+    [_low <= _high, _low, _high]
+
+f_confirmed_harmonic_forecast(int _pivotBars) =>
+    // Four alternating H1 pivots are enough to project D before completion.
+    // Pivots need _pivotBars bars on the right, and the returned [1] adds one
+    // more closed source bar. The picture therefore cannot move intrabar.
+    _pivotHigh = ta.pivothigh(high, _pivotBars, _pivotBars)
+    _pivotLow = ta.pivotlow(low, _pivotBars, _pivotBars)
+    _hasPivot = not na(_pivotHigh) or not na(_pivotLow)
+    _pivotPrice = not na(_pivotHigh) ? _pivotHigh : _pivotLow
+    _pivotType = not na(_pivotHigh) ? 1 : -1
+    _pivotTime = time[_pivotBars]
+
+    _c = ta.valuewhen(_hasPivot, _pivotPrice, 0)
+    _b = ta.valuewhen(_hasPivot, _pivotPrice, 1)
+    _a = ta.valuewhen(_hasPivot, _pivotPrice, 2)
+    _x = ta.valuewhen(_hasPivot, _pivotPrice, 3)
+    _cType = ta.valuewhen(_hasPivot, _pivotType, 0)
+    _bType = ta.valuewhen(_hasPivot, _pivotType, 1)
+    _aType = ta.valuewhen(_hasPivot, _pivotType, 2)
+    _xType = ta.valuewhen(_hasPivot, _pivotType, 3)
+    _cTime = ta.valuewhen(_hasPivot, _pivotTime, 0)
+    _bTime = ta.valuewhen(_hasPivot, _pivotTime, 1)
+    _aTime = ta.valuewhen(_hasPivot, _pivotTime, 2)
+    _xTime = ta.valuewhen(_hasPivot, _pivotTime, 3)
+
+    _alternating = not na(_x) and not na(_a) and not na(_b) and not na(_c) and _xType != _aType and _aType != _bType and _bType != _cType
+    _chronological = not na(_xTime) and not na(_aTime) and not na(_bTime) and not na(_cTime) and _xTime < _aTime and _aTime < _bTime and _bTime < _cTime
+    _xaSize = math.abs(_a - _x)
+    _abSize = math.abs(_b - _a)
+    _bcSize = math.abs(_c - _b)
+    _legsValid = _alternating and _chronological and _xaSize > syminfo.mintick and _abSize > syminfo.mintick and _bcSize > syminfo.mintick
+    _xab = _legsValid ? _abSize / _xaSize : na
+    _abc = _legsValid ? _bcSize / _abSize : na
+    // A high C projects a lower bullish D; a low C is the bearish mirror.
+    int _direction = _legsValid and _cType == 1 ? 1 : _legsValid and _cType == -1 ? -1 : 0
+    int _patternCode = 0
+    float _przLow = na
+    float _przHigh = na
+    float _xadMin = na
+    float _xadMax = na
+    float _bcdMin = na
+    float _bcdMax = na
+
+    _abcNamed = f_ratio_ok(_abc, 0.322, 0.946)
+    if _direction != 0 and _abcNamed
+        // Prefer the tight named family first. Crab is retained as the deeper
+        // extension when the shallow XAD and BCD projections do not converge.
+        if f_ratio_ok(_xab, 0.558, 0.678)
+            [_ok, _lo, _hi] = f_harmonic_prz(_a, _xaSize, _c, _bcSize, _direction, 0.726, 0.846, 1.212, 1.678)
+            if _ok
+                _patternCode := 1
+                _przLow := _lo
+                _przHigh := _hi
+                _xadMin := 0.726
+                _xadMax := 0.846
+                _bcdMin := 1.212
+                _bcdMax := 1.678
+        if _patternCode == 0 and f_ratio_ok(_xab, 0.322, 0.558)
+            [_ok, _lo, _hi] = f_harmonic_prz(_a, _xaSize, _c, _bcSize, _direction, 0.826, 0.946, 1.558, 2.678)
+            if _ok
+                _patternCode := 2
+                _przLow := _lo
+                _przHigh := _hi
+                _xadMin := 0.826
+                _xadMax := 0.946
+                _bcdMin := 1.558
+                _bcdMax := 2.678
+        if _patternCode == 0 and f_ratio_ok(_xab, 0.726, 0.846)
+            [_ok, _lo, _hi] = f_harmonic_prz(_a, _xaSize, _c, _bcSize, _direction, 1.212, 1.678, 1.558, 2.678)
+            if _ok
+                _patternCode := 3
+                _przLow := _lo
+                _przHigh := _hi
+                _xadMin := 1.212
+                _xadMax := 1.678
+                _bcdMin := 1.558
+                _bcdMax := 2.678
+        if _patternCode == 0 and f_ratio_ok(_xab, 0.826, 0.946)
+            [_ok, _lo, _hi] = f_harmonic_prz(_a, _xaSize, _c, _bcSize, _direction, 1.558, 1.678, 2.000, 3.678)
+            if _ok
+                _patternCode := 5
+                _przLow := _lo
+                _przHigh := _hi
+                _xadMin := 1.558
+                _xadMax := 1.678
+                _bcdMin := 2.000
+                _bcdMax := 3.678
+        if _patternCode == 0 and f_ratio_ok(_xab, 0.322, 0.678)
+            [_ok, _lo, _hi] = f_harmonic_prz(_a, _xaSize, _c, _bcSize, _direction, 1.558, 1.678, 2.180, 3.678)
+            if _ok
+                _patternCode := 4
+                _przLow := _lo
+                _przHigh := _hi
+                _xadMin := 1.558
+                _xadMax := 1.678
+                _bcdMin := 2.180
+                _bcdMax := 3.678
+
+    // AB=CD is the transparent fallback embedded in every XABCD route.
+    // It remains a picture/guideline and never grants Pine entry authority.
+    if _patternCode == 0 and _direction != 0 and f_ratio_ok(_abc, 0.382, 0.886)
+        _reciprocal = 1.0 / _abc
+        if f_ratio_ok(_reciprocal, 1.130, 2.618)
+            _dAbcd = _direction == 1 ? _c - _abSize : _c + _abSize
+            _przHalf = math.max(_abSize * 0.005, 0.50)
+            _patternCode := 6
+            _przLow := _dAbcd - _przHalf
+            _przHigh := _dAbcd + _przHalf
+            _xadMin := 0.0
+            _xadMax := 0.0
+            _bcdMin := _reciprocal
+            _bcdMax := _reciprocal
+
+    _valid = _patternCode != 0 and not na(_przLow) and not na(_przHigh) and _przLow <= _przHigh
+    _d = _valid ? (_przLow + _przHigh) / 2.0 : na
+    [_valid[1], _direction[1], _patternCode[1], _x[1], _a[1], _b[1], _c[1], _xTime[1], _aTime[1], _bTime[1], _cTime[1], _d[1], _przLow[1], _przHigh[1], _xab[1], _abc[1], _xadMin[1], _xadMax[1], _bcdMin[1], _bcdMax[1], _cTime[1]]
+
 f_buy_zone(_high, _low, _fibNear, _fibDeep) =>
     _width = math.max(_high - _low, syminfo.mintick)
     [_high - _width * _fibDeep, _high - _width * _fibNear]
@@ -288,6 +420,10 @@ f_send_reverse_close(string _direction, string _reason, float _entry, float _exi
 
 [tunnelDirection, tunnelBaseUpper, tunnelBaseLower, tunnelSlopePerMs, tunnelProjectionTime, tunnelMainTime1, tunnelMainPrice1, tunnelMainTime2, tunnelMainPrice2, tunnelParallelTime, tunnelParallelPrice, tunnelAnchorVersion] = request.security(
      syminfo.tickerid, tunnelTf, f_confirmed_parallel_channel(swingPivotBars),
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+[harmonicValid, harmonicDirection, harmonicPatternCode, harmonicX, harmonicA, harmonicB, harmonicC, harmonicXTime, harmonicATime, harmonicBTime, harmonicCTime, harmonicD, harmonicPrzLow, harmonicPrzHigh, harmonicXab, harmonicAbc, harmonicXadMin, harmonicXadMax, harmonicBcdMin, harmonicBcdMax, harmonicAnchorVersion] = request.security(
+     syminfo.tickerid, tunnelTf, f_confirmed_harmonic_forecast(swingPivotBars),
      gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
 
 tunnelProjectionMs = not na(triggerCloseTime) and not na(tunnelProjectionTime) ? float(triggerCloseTime - tunnelProjectionTime) : 0.0
@@ -1255,6 +1391,51 @@ if barstate.islast
             line.delete(tunnelMiddleLine)
             tunnelMiddleLine := na
 
+// harmonicVisualOnly: the latest confirmed H1 X-A-B-C geometry is drawn as a
+// forward guideline. It is deliberately absent from every signal/alert gate;
+// Railway compares the forecast with Newday before any EA command is allowed.
+harmonicPatternName = harmonicPatternCode == 1 ? "GARTLEY" : harmonicPatternCode == 2 ? "BAT" : harmonicPatternCode == 3 ? "BUTTERFLY" : harmonicPatternCode == 4 ? "CRAB" : harmonicPatternCode == 5 ? "DEEP CRAB" : harmonicPatternCode == 6 ? "AB=CD" : "NONE"
+harmonicColor = harmonicDirection == 1 ? color.lime : harmonicDirection == -1 ? color.red : color.gray
+harmonicLegDuration = not na(harmonicBTime) and not na(harmonicCTime) ? math.max(harmonicCTime - harmonicBTime, 60 * 60 * 1000) : na
+harmonicDTime = not na(harmonicCTime) and not na(harmonicLegDuration) ? harmonicCTime + harmonicLegDuration : na
+harmonicLineReady = showHarmonicForecast and harmonicValid and not na(harmonicAnchorVersion) and not na(harmonicDTime) and not na(harmonicD)
+
+var array<line> harmonicForecastLines = array.new_line()
+var array<label> harmonicForecastLabels = array.new_label()
+var box harmonicPrzBox = na
+var int renderedHarmonicAnchor = na
+if barstate.islast
+    harmonicNeedsRefresh = harmonicLineReady and (na(renderedHarmonicAnchor) or renderedHarmonicAnchor != harmonicAnchorVersion)
+    if harmonicNeedsRefresh or not harmonicLineReady
+        if array.size(harmonicForecastLines) > 0
+            for harmonicLineIndex = 0 to array.size(harmonicForecastLines) - 1
+                line.delete(array.get(harmonicForecastLines, harmonicLineIndex))
+            array.clear(harmonicForecastLines)
+        if array.size(harmonicForecastLabels) > 0
+            for harmonicLabelIndex = 0 to array.size(harmonicForecastLabels) - 1
+                label.delete(array.get(harmonicForecastLabels, harmonicLabelIndex))
+            array.clear(harmonicForecastLabels)
+        if not na(harmonicPrzBox)
+            box.delete(harmonicPrzBox)
+            harmonicPrzBox := na
+        renderedHarmonicAnchor := na
+
+    if harmonicNeedsRefresh
+        harmonicLegColor = color.new(color.yellow, 5)
+        array.push(harmonicForecastLines, line.new(x1=harmonicXTime, y1=harmonicX, x2=harmonicATime, y2=harmonicA, xloc=xloc.bar_time, color=harmonicLegColor, width=2))
+        array.push(harmonicForecastLines, line.new(x1=harmonicATime, y1=harmonicA, x2=harmonicBTime, y2=harmonicB, xloc=xloc.bar_time, color=harmonicLegColor, width=2))
+        array.push(harmonicForecastLines, line.new(x1=harmonicBTime, y1=harmonicB, x2=harmonicCTime, y2=harmonicC, xloc=xloc.bar_time, color=harmonicLegColor, width=2))
+        array.push(harmonicForecastLines, line.new(x1=harmonicCTime, y1=harmonicC, x2=harmonicDTime, y2=harmonicD, xloc=xloc.bar_time, color=color.new(harmonicColor, 5), width=2, style=line.style_dashed))
+        harmonicPrzBox := box.new(left=harmonicCTime, top=harmonicPrzHigh, right=harmonicDTime, bottom=harmonicPrzLow, xloc=xloc.bar_time, bgcolor=color.new(harmonicColor, 88), border_color=color.new(harmonicColor, 25), border_style=line.style_dotted)
+        harmonicPointStyle = harmonicDirection == 1 ? label.style_label_down : label.style_label_up
+        array.push(harmonicForecastLabels, label.new(x=harmonicXTime, y=harmonicX, text="X", xloc=xloc.bar_time, style=harmonicPointStyle, color=color.new(color.yellow, 5), textcolor=color.black, size=size.tiny))
+        array.push(harmonicForecastLabels, label.new(x=harmonicATime, y=harmonicA, text="A", xloc=xloc.bar_time, style=harmonicPointStyle, color=color.new(color.yellow, 5), textcolor=color.black, size=size.tiny))
+        array.push(harmonicForecastLabels, label.new(x=harmonicBTime, y=harmonicB, text="B\nXAB " + str.tostring(harmonicXab, "#.###"), xloc=xloc.bar_time, style=harmonicPointStyle, color=color.new(color.yellow, 5), textcolor=color.black, size=size.tiny))
+        array.push(harmonicForecastLabels, label.new(x=harmonicCTime, y=harmonicC, text="C\nABC " + str.tostring(harmonicAbc, "#.###"), xloc=xloc.bar_time, style=harmonicPointStyle, color=color.new(color.yellow, 5), textcolor=color.black, size=size.tiny))
+        harmonicDText = "D  " + harmonicPatternName + "\nXAD " + str.tostring(harmonicXadMin, "#.###") + "-" + str.tostring(harmonicXadMax, "#.###") + " | BCD " + str.tostring(harmonicBcdMin, "#.###") + "-" + str.tostring(harmonicBcdMax, "#.###")
+        array.push(harmonicForecastLabels, label.new(x=harmonicDTime, y=harmonicD, text=harmonicDText, xloc=xloc.bar_time, style=harmonicPointStyle, color=color.new(harmonicColor, 5), textcolor=color.white, size=size.tiny))
+        renderedHarmonicAnchor := harmonicAnchorVersion
+
 plot(showTrade and tradeDirection != 0 ? tradeEntry : na, "Entry", color=color.white, linewidth=2, style=plot.style_linebr)
 plot(showTrade and tradeDirection != 0 ? activeStop : na, "Active stop", color=color.orange, linewidth=2, style=plot.style_linebr)
 plot(showTrade and tradeDirection != 0 ? tradeBeTrigger : na, "BE trigger / TP1", color=color.yellow, style=plot.style_linebr)
@@ -1265,10 +1446,11 @@ plotshape(sellSignal, title="SELL signal", style=shape.triangledown, location=lo
 plotshape(exitSignal, title="Lifecycle exit", style=shape.xcross, location=location.abovebar, color=color.orange, size=size.tiny, text="EXIT")
 plotshape(buyTunnelSweepNow and newTriggerBar, title="Confirmed lower-tunnel sweep/reclaim", style=shape.diamond, location=location.belowbar, color=color.new(color.aqua, 5), size=size.tiny, text="T")
 plotshape(sellTunnelSweepNow and newTriggerBar, title="Confirmed upper-tunnel sweep/reclaim", style=shape.diamond, location=location.abovebar, color=color.new(color.orange, 5), size=size.tiny, text="T")
-plotshape(gcBuyRvolWall and buyEvidenceLocationOk and newTriggerBar, title="GC futures RVOL wall at BUY decision location", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 15), size=size.tiny)
-plotshape(gcSellRvolWall and sellEvidenceLocationOk and newTriggerBar, title="GC futures RVOL wall at SELL decision location", style=shape.circle, location=location.abovebar, color=color.new(color.red, 15), size=size.tiny)
-plotshape(showH1SourceDots and newEntryConfirmBar and buyH1NormalCandle, title="H1 normal-candle BUY permission", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 20), size=size.tiny)
-plotshape(showH1SourceDots and newEntryConfirmBar and sellH1HeikinAshi, title="H1 HA SELL permission", style=shape.circle, location=location.abovebar, color=color.new(color.red, 20), size=size.tiny)
+recentEvidenceWindow = time >= last_bar_time - evidenceHistoryDays * 24 * 60 * 60 * 1000
+plotshape(recentEvidenceWindow and gcBuyRvolWall and buyEvidenceLocationOk and newTriggerBar, title="GC futures RVOL wall at BUY decision location", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 15), size=size.tiny)
+plotshape(recentEvidenceWindow and gcSellRvolWall and sellEvidenceLocationOk and newTriggerBar, title="GC futures RVOL wall at SELL decision location", style=shape.circle, location=location.abovebar, color=color.new(color.red, 15), size=size.tiny)
+plotshape(recentEvidenceWindow and showH1SourceDots and newEntryConfirmBar and buyH1NormalCandle, title="H1 normal-candle BUY permission", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 20), size=size.tiny)
+plotshape(recentEvidenceWindow and showH1SourceDots and newEntryConfirmBar and sellH1HeikinAshi, title="H1 HA SELL permission", style=shape.circle, location=location.abovebar, color=color.new(color.red, 20), size=size.tiny)
 
 var table dashboard = table.new(position.bottom_left, 2, 16, bgcolor=color.new(color.rgb(25, 25, 25), 5), border_width=1)
 if showDashboard and barstate.islast
@@ -1281,7 +1463,7 @@ if showDashboard and barstate.islast
     decisionZoneText = buyTunnelLocationOk ? "LOWER TUNNEL" : sellTunnelLocationOk ? "UPPER TUNNEL" : buyDirectionalZone ? "DEMAND PRZ" : sellDirectionalZone ? "SUPPLY PRZ" : ambiguousLocation ? "OVERLAP WAIT" : "MID NO ENTRY"
     tradeLevelsText = tradeDirection == 0 ? "-" : str.tostring(tradeEntry, "#.##") + " / " + str.tostring(activeStop, "#.##") + " / " + str.tostring(tradeBeTrigger, "#.##") + " / " + str.tostring(tradeTp2, "#.##")
     table.cell(dashboard, 0, 0, "ALPHA BUFF", text_color=color.white, bgcolor=color.rgb(40, 40, 40))
-    table.cell(dashboard, 1, 0, "PINE v2.4.3", text_color=color.yellow, bgcolor=color.rgb(40, 40, 40))
+    table.cell(dashboard, 1, 0, "PINE v2.4.4", text_color=color.yellow, bgcolor=color.rgb(40, 40, 40))
     table.cell(dashboard, 0, 1, "Market / TF", text_color=color.white)
     table.cell(dashboard, 1, 1, (marketOpen ? "OPEN" : "CLOSED") + " / " + (safeTimeframe ? "SAFE" : "USE 5m"), text_color=marketOpen and safeTimeframe ? color.lime : color.orange)
     table.cell(dashboard, 0, 2, "Spot / GC+F", text_color=color.white)
