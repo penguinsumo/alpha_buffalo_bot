@@ -1,22 +1,22 @@
 # Alpha Buffalo Fusion Contract
 
-This file captures what should be mined from older baseline work and how it
-must be blended into v12-core without breaking the PRZ/location-first engine.
+This file captures how the proven baseline is blended into v12-core without
+breaking the PRZ/Harmonic confirmation and execution contracts.
 
 ## Final Strategy Spine
 
-Alpha Buffalo v12-core must remain location-first.
+Alpha Buffalo v12-core is baseline-default, with asymmetric evidence-based
+entry rules.
 
 The engine order is:
 
-1. Locate price in a meaningful zone.
-2. Confirm local reaction with HA/Pinbar and VSA side pressure.
-3. Build V4 scalp/range candidate.
+1. SELL uses the historical H1/EMA + bearish sweep/upper-BB baseline.
+2. BUY requires its historical trend/sweep baseline and the current PRZ/PA/VSA setup together.
+3. A confirmed harmonic D/PRZ may override direction only when the matching local setup is active.
 4. Apply RR for execution readiness.
 5. Promote to V5 only when BOS/CHoCH/structure confirms.
 6. Take TP1, move the remainder to BE, then trail with two closed opposite HA5 bars.
-7. Use trend, H1, H4, and session as context and management, not as the first
-   V4 entry gate.
+7. Keep one canonical API/EA schema for both directions.
 
 ## Kivanc Wall/Reclaim State Machine
 
@@ -45,15 +45,16 @@ The engine order is:
 
 ## PRZ Rule That Must Survive Every Refactor
 
-Support side:
+Support side (normal BUY confirmation):
 
+- baseline H1/EMA/sweep permission
 - PRZ Support + BB Lower/lower reaction
 - HA/Pinbar bullish confirmation
 - VSA_BUY > VSA_SELL
 - RR >= `TRADE_MIN_RR`
 - result: BUY V4 entry
 
-Resistance side:
+Resistance side (harmonic SELL override confirmation):
 
 - PRZ Resistance + BB Upper/upper rejection
 - HA/Pinbar bearish confirmation
@@ -62,6 +63,8 @@ Resistance side:
 - result: SELL V4 entry
 
 BOS/CHoCH does not create V4 entry. It promotes a V4 setup into V5 journey.
+The normal SELL baseline can enter without a Pine PRZ flag; a counter-trend
+SELL cannot.
 
 ## What The Baseline Branches Contribute
 
@@ -75,15 +78,9 @@ BOS/CHoCH does not create V4 entry. It promotes a V4 setup into V5 journey.
 - consecutive-loss stop
 - the historical `811 -> 770 -> 41` Risk Gate proof
 
-These branches also contain logic that must not be copied directly:
-
-- BUY gated first by H1 trend and EMA alignment
-- SELL gated first by H1 trend and EMA alignment
-- single latest-bar router only
-- live-data baseline that changes with the current date
-
-The correct blend is to port the proof harness and risk accounting, not the
-trend-first entry gates.
+The correct blend restores the proven SELL entry filter, keeps BUY dual-
+confirmed by the current PRZ setup, and rejects the old single-latest-bar
+router and non-frozen live-data proof.
 
 ## What v12-core Already Owns
 
@@ -100,19 +97,18 @@ trend-first entry gates.
 
 `engine_v4/buy_engine.py`
 
-- lower-zone BUY candidate
-- local micro Lot0 SL
+- baseline trend/sweep plus lower-zone BUY candidate
+- 1.5 ATR baseline SL; local PRZ wall SL for harmonic override
 - BB mid/upper cashflow path
 - RR visibility
 
 `engine_v4/sell_engine.py`
 
-- upper-zone SELL candidate
+- baseline downtrend/EMA/sweep SELL candidate
 - lower-zone SELL veto
-- local micro Lot0 SL
-- BB lower / signal TP path
+- 1.5 ATR baseline SL; local PRZ wall SL for harmonic override
+- Fib 0.72 / next PRZ target path
 - RR visibility
-- trend context only for continuation when no V4 upper-zone setup exists
 
 `engine_v4/router.py`
 
@@ -181,16 +177,11 @@ contract and regression suite.
 
 ## Red Lines
 
-Never reintroduce these as V4 entry blockers:
-
-- H1 trend must agree before PRZ V4 entry
-- H4 trend must agree before PRZ V4 entry
-- EMA20/EMA50 must agree before PRZ V4 entry
-- BOS/CHoCH must pass before V4 entry
-- Telegram internals used as proof of signal correctness
-
-The only acceptable first blocker is being in the wrong location or having the
-wrong local reaction/side pressure for that location.
+- Never allow plain PRZ contact to override the baseline direction.
+- Never allow a forming/unconfirmed harmonic to open the D reversal.
+- Never let BOS/CHoCH become a V4 entry requirement.
+- Never use Telegram internals as proof of signal correctness.
+- Never change the canonical BUY/SELL API schema by strategy profile.
 
 ## Test Contract
 
@@ -203,8 +194,9 @@ PYTHONPYCACHEPREFIX=/private/tmp/alpha_pycache python3 scripts/alpha_regression_
 
 The regression suite must keep proving:
 
-- upper PRZ/BB resistance can SELL even when trend context is bullish
-- lower PRZ/BB support can BUY even when trend context is bearish
+- baseline SELL passes only with downtrend/EMA/sweep evidence
+- baseline BUY also requires the current PRZ setup
+- a confirmed harmonic D is the only counter-trend override
 - lower support blocks fresh SELL
 - upper resistance blocks fresh BUY
 - RR below minimum keeps EA waiting
