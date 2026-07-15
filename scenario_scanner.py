@@ -194,6 +194,91 @@ def build_confirmed_parallel_channel(
     }
 
 
+def confirmed_channel_boundary_broken(
+    channel: Dict[str, Any],
+    df_trigger: pd.DataFrame,
+    *,
+    tolerance: float = 0.0,
+) -> bool:
+    """Invalidate a frozen H1 channel only from closed trigger candles.
+
+    Pine latches the H1 anchor version after a confirmed M15 close breaks the
+    opposite boundary. Railway is stateless between scans, so it reconstructs
+    the same latch by checking every closed M15 candle since that anchor. The
+    latest row is treated as forming and cannot invalidate the channel.
+    """
+    if not channel.get("valid") or df_trigger is None or len(df_trigger) < 2:
+        return False
+
+    state = str(channel.get("state", "NONE")).upper()
+    if state not in ("UPTREND", "DOWNTREND"):
+        return False
+
+    tolerance = max(float(tolerance), 0.0)
+    closed = df_trigger.iloc[:-1].copy()
+    if closed.empty:
+        return False
+
+    parsed_times: pd.Series | pd.DatetimeIndex | None = None
+    if isinstance(closed.index, pd.DatetimeIndex):
+        parsed_times = pd.DatetimeIndex(closed.index)
+    else:
+        datetime_column = next(
+            (
+                name
+                for name in ("datetime", "timestamp", "time")
+                if name in closed.columns
+            ),
+            None,
+        )
+        if datetime_column:
+            candidate = pd.to_datetime(
+                closed[datetime_column], utc=True, errors="coerce"
+            )
+            if not candidate.isna().any():
+                parsed_times = candidate
+
+    def boundary_broken(close: float, upper: float, lower: float) -> bool:
+        if state == "UPTREND":
+            return close < lower - tolerance
+        return close > upper + tolerance
+
+    if parsed_times is None:
+        last_closed = float(closed["close"].iloc[-1])
+        return boundary_broken(
+            last_closed,
+            float(channel["upper"]),
+            float(channel["lower"]),
+        )
+
+    slope_per_hour = float(channel.get("slope", 0.0))
+    main_time_2 = int(channel.get("anchor_time_2", 0))
+    parallel_time = int(channel.get("parallel_time", 0))
+    anchor_version = int(channel.get("anchor_version", 0))
+    main_price_2 = float(channel.get("anchor_price_2", 0.0))
+    parallel_price = float(channel.get("parallel_price", 0.0))
+
+    for position, parsed_time in enumerate(parsed_times):
+        time_ms = int(pd.Timestamp(parsed_time).timestamp() * 1000)
+        if time_ms < anchor_version:
+            continue
+        main_boundary = main_price_2 + slope_per_hour * (
+            (time_ms - main_time_2) / 3_600_000.0
+        )
+        parallel_boundary = parallel_price + slope_per_hour * (
+            (time_ms - parallel_time) / 3_600_000.0
+        )
+        if state == "DOWNTREND":
+            upper, lower = main_boundary, parallel_boundary
+        else:
+            upper, lower = parallel_boundary, main_boundary
+        if upper <= lower:
+            return True
+        if boundary_broken(float(closed["close"].iloc[position]), upper, lower):
+            return True
+    return False
+
+
 class ScenarioScanner:
     def scan(self, df_4h: pd.DataFrame, df_1h: pd.DataFrame, df_15m: pd.DataFrame, symbol: str = "XAUUSD") -> ScenarioBlueprint:
         self._validate_df(df_4h, "4h")
@@ -232,6 +317,18 @@ class ScenarioScanner:
             projection_time=tunnel_projection_time,
             minimum_width=atr_1h * 0.50,
         )
+        tunnel_boundary_broken = confirmed_channel_boundary_broken(
+            channel,
+            df_15m,
+            tolerance=atr_15m * 0.10,
+        )
+        if tunnel_boundary_broken:
+            channel = {
+                **channel,
+                "valid": False,
+                "state": "NONE",
+                "invalidated": True,
+            }
         tunnel_upper = float(channel["upper"])
         tunnel_lower = float(channel["lower"])
         tunnel_mid = float(channel["middle"])
