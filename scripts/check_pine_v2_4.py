@@ -130,8 +130,6 @@ def main() -> None:
                 "sellTunnelSweepArmed",
                 "buyTunnelLocationOk",
                 "sellTunnelLocationOk",
-                "BUY_TUNNEL_SWEEP_ARMED",
-                "SELL_TUNNEL_SWEEP_ARMED",
                 "TUNNEL_SWEEP_GC_RVOL_WALL_PA_HA15_BUY",
                 "TUNNEL_SWEEP_GC_RVOL_WALL_PA_HA15_SELL",
             )
@@ -251,13 +249,24 @@ def main() -> None:
         "dashboard separates location from trade direction": all(
             marker in source
             for marker in (
-                'table.cell(dashboard, 0, 17, "Location"',
+                'table.cell(dashboard, 0, 15, "Location"',
                 'buyDirectionalZone ? "DEMAND PRZ"',
                 'sellDirectionalZone ? "SUPPLY PRZ"',
                 '"BUY BLOCKED: BEAR BOS"',
                 '"SELL BLOCKED: BULL BOS"',
             )
-        ) and 'table.cell(dashboard, 0, 17, "Decision Zone"' not in source,
+        ) and 'table.cell(dashboard, 0, 15, "Decision Zone"' not in source,
+        "dashboard removes duplicate Fib and lifecycle rows": all(
+            marker in source
+            for marker in (
+                "table.new(position.bottom_left, 2, 16",
+                '"Entry / SL / TP1 / TP2"',
+                "tradeLevelsText",
+                '"PINE v2.4.3"',
+            )
+        ) and 'table.cell(dashboard, 0, 8, "Fib profile"' not in source
+        and 'table.cell(dashboard, 0, 13, "Lifecycle"' not in source
+        and "var string lifecycle" not in source,
         "mirrored confirmed HA15 second-candle trigger": all(
             marker in source
             for marker in (
@@ -273,8 +282,10 @@ def main() -> None:
                 "f_send_reverse_close",
                 '"reverse_direction":"',
                 '"reverse_signal_id":"',
-                "REVERSE_PENDING_SELL_ACK",
-                "REVERSE_PENDING_BUY_ACK",
+                'reverseDirection := "SELL"',
+                'reverseDirection := "BUY"',
+                "if isReverse",
+                "tradeSignalId := reverseSignalId",
             )
         ),
         "market alert guard": source.count("if marketOpen") >= 3,
