@@ -9,6 +9,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+BROKER_SYMBOL = "XAUUSD-VIP"
 
 
 def payload(action: str) -> dict:
@@ -106,7 +107,7 @@ def main() -> None:
 
             polled = client.get(
                 "/execution/command",
-                params={"key": "PINE_TEST_KEY", "symbol": "XAUUSD"},
+                params={"key": "PINE_TEST_KEY", "symbol": BROKER_SYMBOL},
             )
             assert polled.status_code == 200, polled.text
             assert polled.json()["command"]["command_id"] == open_command["command_id"]
@@ -115,7 +116,7 @@ def main() -> None:
                 "/execution/fill",
                 json={
                     "key": "PINE_TEST_KEY",
-                    "symbol": "XAUUSD",
+                    "symbol": BROKER_SYMBOL,
                     "signal_id": "XAUUSD-E2E-BUY-001",
                     "ticket": "MT5-TEST-1",
                     "fill_price": 4120.0,
@@ -130,7 +131,7 @@ def main() -> None:
                 "/execution/ack",
                 json={
                     "key": "PINE_TEST_KEY",
-                    "symbol": "XAUUSD",
+                    "symbol": BROKER_SYMBOL,
                     "command_id": open_command["command_id"],
                     "success": True,
                 },
@@ -149,7 +150,7 @@ def main() -> None:
                 "/execution/ack",
                 json={
                     "key": "PINE_TEST_KEY",
-                    "symbol": "XAUUSD",
+                    "symbol": BROKER_SYMBOL,
                     "command_id": close_command["command_id"],
                     "success": True,
                     "r_multiple": 2.0,
@@ -165,7 +166,7 @@ def main() -> None:
 
             reverse_poll = client.get(
                 "/execution/command",
-                params={"key": "PINE_TEST_KEY", "symbol": "XAUUSD"},
+                params={"key": "PINE_TEST_KEY", "symbol": BROKER_SYMBOL},
             )
             assert reverse_poll.status_code == 200, reverse_poll.text
             reverse_command = reverse_poll.json()["command"]
@@ -173,7 +174,7 @@ def main() -> None:
 
             state = client.get(
                 "/execution/state",
-                params={"key": "PINE_TEST_KEY", "symbol": "XAUUSD"},
+                params={"key": "PINE_TEST_KEY", "symbol": BROKER_SYMBOL},
             )
             assert state.status_code == 200, state.text
             assert state.json()["position"] is None
@@ -186,6 +187,7 @@ def main() -> None:
             assert disabled.json()["detail"] == "PINE_SIGNAL_MODE_DISABLED"
 
     print("PASS Pine OPEN webhook becomes one EA OPEN command")
+    print("PASS broker symbol suffix resolves to the TradingView XAUUSD command")
     print("PASS EA fill survives relay restart and command ACK is accepted")
     print("PASS Pine CLOSE becomes EA CLOSE_ALL")
     print("PASS CLOSE ACK clears durable execution state")
@@ -194,7 +196,7 @@ def main() -> None:
     print("PASS Pine CLOSE and confirmed MT5 fill are visible in Telegram")
     print("PASS Telegram health exposes relay and pending-command state safely")
     print("PASS Python mode rejects Pine webhook ownership")
-    print("Summary: 9/9 webhook round-trip checks passed")
+    print("Summary: 10/10 webhook round-trip checks passed")
 
 
 if __name__ == "__main__":
