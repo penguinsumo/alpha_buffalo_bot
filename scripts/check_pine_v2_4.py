@@ -173,6 +173,47 @@ def main() -> None:
                 "activeTunnelDirection",
             )
         ),
+        "confirmed H1 XABC projects a visual-only harmonic D/PRZ": all(
+            marker in source
+            for marker in (
+                "f_confirmed_harmonic_forecast",
+                "f_harmonic_prz",
+                "harmonicPatternCode",
+                "harmonicXab",
+                "harmonicAbc",
+                "harmonicXadMin",
+                "harmonicBcdMin",
+                "harmonicD",
+                "harmonicPrzLow",
+                "harmonicPrzHigh",
+                "harmonicVisualOnly",
+                "harmonicForecastLines",
+                "harmonicForecastLabels",
+                "harmonicPrzBox",
+                "renderedHarmonicAnchor",
+                'harmonicPatternCode == 1 ? "GARTLEY"',
+                'harmonicPatternCode == 6 ? "AB=CD"',
+                'text="B\\nXAB "',
+                'text="C\\nABC "',
+                'harmonicDText = "D  "',
+            )
+        ) and "harmonicSignal" not in source
+        and "harmonicDirection and buySignal" not in source
+        and "harmonicDirection and sellSignal" not in source,
+        "harmonic forecast uses confirmed pivots and keeps one current object set": all(
+            marker in source
+            for marker in (
+                "_valid[1]",
+                "_direction[1]",
+                "_patternCode[1]",
+                "_cTime[1]",
+                "array.clear(harmonicForecastLines)",
+                "array.clear(harmonicForecastLabels)",
+                "box.delete(harmonicPrzBox)",
+                "renderedHarmonicAnchor != harmonicAnchorVersion",
+                "xloc=xloc.bar_time",
+            )
+        ),
         "BB and PA trigger": all(
             marker in source
             for marker in ("bbBuyReject", "bbSellReject", "buyReversalPin", "sellReversalPin")
@@ -262,11 +303,22 @@ def main() -> None:
                 "table.new(position.bottom_left, 2, 16",
                 '"Entry / SL / TP1 / TP2"',
                 "tradeLevelsText",
-                '"PINE v2.4.3"',
+                '"PINE v2.4.4"',
             )
         ) and 'table.cell(dashboard, 0, 8, "Fib profile"' not in source
         and 'table.cell(dashboard, 0, 13, "Lifecycle"' not in source
         and "var string lifecycle" not in source,
+        "red green evidence dots render only inside configurable 14-day window": all(
+            marker in source
+            for marker in (
+                'evidenceHistoryDays = input.int(14',
+                "recentEvidenceWindow = time >= last_bar_time",
+                "recentEvidenceWindow and gcBuyRvolWall",
+                "recentEvidenceWindow and gcSellRvolWall",
+                "recentEvidenceWindow and showH1SourceDots and newEntryConfirmBar and buyH1NormalCandle",
+                "recentEvidenceWindow and showH1SourceDots and newEntryConfirmBar and sellH1HeikinAshi",
+            )
+        ) and source.count("recentEvidenceWindow and") == 4,
         "mirrored confirmed HA15 second-candle trigger": all(
             marker in source
             for marker in (
