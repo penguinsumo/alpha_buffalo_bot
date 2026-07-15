@@ -1061,8 +1061,144 @@ def test_telegram_public_output_hides_engine_internals() -> None:
     for token in forbidden:
         assert_true(token not in combined, f"public Telegram output leaked {token}")
 
-    assert_true("WAIT SETUP" in trend_text, "trend update should use public wait setup label")
+    assert_true("Setup   : 🟡 WAIT" in trend_text, "WAIT candidate must not be promoted to a setup")
     assert_true("V4_SESSION" in signal_text, "trade alert should use public V4_SESSION type")
+    assert_true("Signal accepted and queued" in signal_text, "trade alert should describe queue state")
+    assert_true("EA Executing" not in signal_text, "trade alert must not claim execution before EA ACK")
+
+
+def test_pine_monitor_is_observable_but_never_owns_a_trade() -> None:
+    base_payload = {
+        "symbol": "XAUUSD",
+        "signal": {
+            "timestamp": "2026-07-10T15:00:00+00:00",
+            "blueprint": {"current_price": 4100.0, "trend_h1": "UP", "trend_h4": "UP"},
+            "gates": {"session": "NY"},
+        },
+        "ea": {
+            "action": "OPEN",
+            "execution_state": "READY",
+            "direction": "BUY",
+            "entry": 4100.0,
+            "session": "NY",
+        },
+    }
+    original_pipeline = runtime.run_pipeline
+    try:
+        runtime.run_pipeline = lambda: base_payload
+        monitor = runtime._pine_monitor_payload()
+    finally:
+        runtime.run_pipeline = original_pipeline
+
+    assert_equal(monitor["source"], "PINE_MONITOR", "monitor source")
+    assert_equal(monitor["ea"]["action"], "WAIT", "monitor may never open")
+    assert_equal(monitor["ea"]["execution_state"], "WATCH", "monitor is watch-only")
+    assert_equal(monitor["ea"]["command_owner"], "PINE_TRADINGVIEW", "Pine retains ownership")
+    text = format_telegram_trend_update(monitor)
+    assert_true("PINE MONITOR" in text, "monitor must be visible in Telegram")
+    assert_true("Relay online" in text, "monitor confirms relay availability")
+
+    fresh = {
+        "signal": {"timestamp": pd.Timestamp.now(tz="UTC").isoformat()},
+        "ea": {},
+    }
+    stale = {
+        "signal": {"timestamp": "2026-01-01T00:00:00+00:00"},
+        "ea": {},
+    }
+    assert_true(runtime._telegram_open_signal_is_fresh(fresh), "fresh OPEN must notify")
+    assert_true(not runtime._telegram_open_signal_is_fresh(stale), "stale OPEN must not replay")
+
+
+def test_pine_monitor_does_not_promote_blocked_buy_inside_sell_ha_context() -> None:
+    """Regression for the 15 Jul chart: Demand location is not BUY permission."""
+    payload = {
+        "symbol": "XAUUSD",
+        "signal": {
+            "timestamp": "2026-07-14T23:03:00+00:00",
+            "engine_v4": {
+                "V4_Buy_Setup": True,
+                "In_Pine_PRZ_Support": True,
+                "V4_Block_Sell_At_Lower": True,
+            },
+            "blueprint": {
+                "current_price": 4029.50,
+                "trend_h1": "DOWN",
+                "trend_h4": "DOWN",
+                "price_action": {
+                    "m15_phase": "PULLBACK_DOWN",
+                    "h1_phase": "PULLBACK_DOWN",
+                    "h4_phase": "IMPULSE_DOWN",
+                    "m15_delta": "DOWN",
+                    "h1_delta": "DOWN",
+                    "h4_delta": "DOWN",
+                    "ha_m15_bearish": True,
+                    "ha_h1_bearish": True,
+                    "watch_bias": "SELL",
+                },
+                "prz_layers": {
+                    "htf": {
+                        "support_low": 4018.82,
+                        "support_high": 4042.06,
+                        "resistance_low": 4103.54,
+                        "resistance_high": 4126.20,
+                    },
+                },
+            },
+        },
+        "ea": {
+            "action": "WAIT",
+            "execution_state": "WATCH",
+            "direction": "BUY",
+            "session": "ASIA",
+        },
+    }
+
+    text = format_telegram_trend_update(payload)
+    assert_true("Setup   : 🟡 WAIT" in text, "blocked BUY candidate remains WAIT")
+    assert_true("Bias    : 🔴 SELL" in text, "confirmed H1 HA and MTF down own public bias")
+    assert_true("Location: DEMAND PRZ" in text, "Demand is shown as location, not direction")
+    assert_true(
+        "SELL BIAS — DEMAND TARGET / BUY UNCONFIRMED" in text,
+        "support is a SELL target until a BUY reversal is confirmed",
+    )
+    assert_true("Setup   : 🟢 BUY" not in text, "monitor must never publish the blocked BUY as setup")
+    assert_true("WAIT SETUP 🟢 BUY" not in text, "legacy false BUY watch label is removed")
+
+    original_pipeline = runtime.run_pipeline
+    try:
+        runtime.run_pipeline = lambda: payload
+        monitor = runtime._pine_monitor_payload()
+    finally:
+        runtime.run_pipeline = original_pipeline
+    assert_equal(monitor["ea"]["direction"], "NONE", "watch-only monitor has no trade direction")
+    assert_equal(
+        monitor["ea"]["monitor_candidate_direction"],
+        "BUY",
+        "candidate is retained for private diagnostics only",
+    )
+
+
+def test_confirmed_open_is_the_only_public_directional_setup() -> None:
+    payload = {
+        "signal": {
+            "blueprint": {
+                "current_price": 4100.0,
+                "price_action": {"h1_phase": "IMPULSE_UP", "ha_h1_bullish": True},
+                "trend_h1": "UP",
+                "trend_h4": "UP",
+            },
+        },
+        "ea": {
+            "action": "OPEN",
+            "execution_state": "READY",
+            "direction": "BUY",
+            "session": "NY",
+        },
+    }
+    text = format_telegram_trend_update(payload)
+    assert_true("Setup   : 🟢 BUY" in text, "confirmed OPEN may publish BUY setup")
+    assert_true("Watch   : CONFIRMED 🟢 BUY" in text, "confirmed direction is explicit")
 
 
 def test_closed_market_suppresses_all_telegram() -> None:
@@ -1295,6 +1431,9 @@ TESTS = [
     test_active_position_forces_ea_to_management_only,
     test_execution_api_fill_and_ack_round_trip,
     test_telegram_public_output_hides_engine_internals,
+    test_pine_monitor_is_observable_but_never_owns_a_trade,
+    test_pine_monitor_does_not_promote_blocked_buy_inside_sell_ha_context,
+    test_confirmed_open_is_the_only_public_directional_setup,
     test_closed_market_suppresses_all_telegram,
     test_weekend_is_hard_closed_before_session_resolution,
     test_seasonal_bangkok_sessions_survive_conflict_resolution,

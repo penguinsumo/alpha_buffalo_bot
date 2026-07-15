@@ -53,6 +53,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         os.environ["ALPHA_SIGNAL_SOURCE"] = "PINE"
         os.environ["ALPHA_API_KEY"] = "PINE_TEST_KEY"
+        os.environ["TELEGRAM_PINE_MONITOR_ENABLED"] = "false"
         bridge_state = Path(temporary) / "bridge.json"
         os.environ["ALPHA_PINE_BRIDGE_STATE_FILE"] = str(bridge_state)
         os.environ["ALPHA_EXECUTION_STATE_FILE"] = str(Path(temporary) / "execution.json")
@@ -83,8 +84,18 @@ def main() -> None:
             assert len(telegram_messages) == 1
             assert "BUY" in telegram_messages[-1]
             assert "PINE_V2_4" in telegram_messages[-1]
+            assert "Signal accepted and queued" in telegram_messages[-1]
+            assert "EA Executing" not in telegram_messages[-1]
             open_command = opened.json()["command"]
             assert open_command["action"] == "OPEN"
+
+            telegram_status = client.get(
+                "/telegram/status",
+                params={"key": "PINE_TEST_KEY", "symbol": "XAUUSD"},
+            )
+            assert telegram_status.status_code == 200, telegram_status.text
+            assert telegram_status.json()["telegram_enabled"] is True
+            assert telegram_status.json()["pending_action"] == "OPEN"
 
             # Simulate loss of process memory and reload the still-pending
             # command from disk before the EA confirms its fill.
@@ -111,6 +122,9 @@ def main() -> None:
                 },
             )
             assert filled.status_code == 200, filled.text
+            assert filled.json()["telegram_notified"] is True
+            assert len(telegram_messages) == 2
+            assert "MT5 FILLED" in telegram_messages[-1]
 
             open_ack = client.post(
                 "/execution/ack",
@@ -127,6 +141,9 @@ def main() -> None:
             assert closed.status_code == 200, closed.text
             close_command = closed.json()["command"]
             assert close_command["action"] == "CLOSE_ALL"
+            assert closed.json()["telegram_notified"] is True
+            assert len(telegram_messages) == 3
+            assert "Alpha Buffalo CLOSE" in telegram_messages[-1]
 
             close_ack = client.post(
                 "/execution/ack",
@@ -143,7 +160,7 @@ def main() -> None:
             assert close_ack.json()["next_command"]["action"] == "OPEN"
             assert close_ack.json()["next_command"]["direction"] == "SELL"
             assert close_ack.json()["telegram_notified"] is True
-            assert len(telegram_messages) == 2
+            assert len(telegram_messages) == 4
             assert "SELL" in telegram_messages[-1]
 
             reverse_poll = client.get(
@@ -174,8 +191,10 @@ def main() -> None:
     print("PASS CLOSE ACK clears durable execution state")
     print("PASS CLOSE ACK promotes the queued reverse SELL OPEN")
     print("PASS Pine OPEN and promoted reverse OPEN notify Telegram exactly once")
+    print("PASS Pine CLOSE and confirmed MT5 fill are visible in Telegram")
+    print("PASS Telegram health exposes relay and pending-command state safely")
     print("PASS Python mode rejects Pine webhook ownership")
-    print("Summary: 7/7 webhook round-trip checks passed")
+    print("Summary: 9/9 webhook round-trip checks passed")
 
 
 if __name__ == "__main__":
