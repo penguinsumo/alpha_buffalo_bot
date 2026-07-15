@@ -109,6 +109,36 @@ def main() -> None:
                 "sellReclaimNow",
             )
         ),
+        "confirmed pivot parallel-channel sweep can arm but never enter alone": all(
+            marker in source
+            for marker in (
+                "f_confirmed_parallel_channel",
+                "_fallingStructure",
+                "_risingStructure",
+                "_highSlopePerMs",
+                "_lowSlopePerMs",
+                "tunnelAnchorVersion",
+                "f_tunnel_context_json",
+                '"tunnel_direction":"',
+                '"tunnel_anchor_time_1":',
+                '"tunnel_parallel_price":',
+                "tunnelUpper",
+                "tunnelLower",
+                "buyTunnelSweepNow",
+                "sellTunnelSweepNow",
+                "buyTunnelSweepArmed",
+                "sellTunnelSweepArmed",
+                "buyTunnelLocationOk",
+                "sellTunnelLocationOk",
+                "BUY_TUNNEL_SWEEP_ARMED",
+                "SELL_TUNNEL_SWEEP_ARMED",
+                "TUNNEL_SWEEP_GC_RVOL_WALL_PA_HA15_BUY",
+                "TUNNEL_SWEEP_GC_RVOL_WALL_PA_HA15_SELL",
+            )
+        ) and "sellSignal := sellTunnelSweepNow" not in source
+        and "buySignal := buyTunnelSweepNow" not in source
+        and "tunnelLookback" not in source
+        and "f_confirmed_tunnel" not in source,
         "BB and PA trigger": all(
             marker in source
             for marker in ("bbBuyReject", "bbSellReject", "buyReversalPin", "sellReversalPin")
@@ -138,7 +168,7 @@ def main() -> None:
                 "sellPaZoneSetup",
             )
         ),
-        "GC futures RVOL and PA latch inside PRZ but never enter directly": all(
+        "GC futures RVOL and PA latch at PRZ or tunnel but never enter directly": all(
             marker in source
             for marker in (
                 "buyGcRvolWallArmed",
@@ -151,6 +181,8 @@ def main() -> None:
                 "sellPaZoneSetup",
                 "buyArmSetup = (buyGcRvolWallArmed or buyGcRvolWallSetup) and (buyPaZoneArmed or buyPaZoneSetup)",
                 "sellArmSetup = (sellGcRvolWallArmed or sellGcRvolWallSetup) and (sellPaZoneArmed or sellPaZoneSetup)",
+                "buyEvidenceLocationOk = buyPrzRouteOk or buyTunnelLocationOk",
+                "sellEvidenceLocationOk = sellPrzRouteOk or sellTunnelLocationOk",
                 "PRZ_GC_RVOL_WALL_PA_HA15_BUY",
                 "PRZ_GC_RVOL_WALL_PA_HA15_SELL",
             )
@@ -180,6 +212,16 @@ def main() -> None:
                 "entryArmTtl",
             )
         ),
+        "dashboard separates location from trade direction": all(
+            marker in source
+            for marker in (
+                'table.cell(dashboard, 0, 17, "Location"',
+                'buyDirectionalZone ? "DEMAND PRZ"',
+                'sellDirectionalZone ? "SUPPLY PRZ"',
+                '"BUY BLOCKED: BEAR BOS"',
+                '"SELL BLOCKED: BULL BOS"',
+            )
+        ) and 'table.cell(dashboard, 0, 17, "Decision Zone"' not in source,
         "mirrored confirmed HA15 second-candle trigger": all(
             marker in source
             for marker in (

@@ -33,6 +33,10 @@ from engine_v4.router import SignalRouter
 from engine_v4.sell_engine import SellSignalEngine
 from engine_v4.session_gate import GateResult
 from execution_lifecycle import ExecutionLifecycleManager, closed_ha5_evidence
+from scenario_scanner import (
+    build_confirmed_parallel_channel,
+    detect_confirmed_tunnel_sweep,
+)
 from session_clock import SessionClock, SessionState, market_closed_reason
 from alpha_buffalo_signal import (
     API_LICENSE_KEY,
@@ -222,6 +226,122 @@ def test_harmonic_d_prz_is_one_direction_only() -> None:
         "C_TO_D_APPROACH_ALIGNED",
         "falling parallel tunnel is the normal approach into bullish D",
     )
+
+
+def test_confirmed_tunnel_sweep_arms_only_the_aligned_approach() -> None:
+    sell = detect_confirmed_tunnel_sweep(
+        high=100.10,
+        low=98.50,
+        close=99.20,
+        upper=100.00,
+        lower=95.00,
+        tolerance=0.10,
+        tunnel_state="DOWNTREND",
+    )
+    assert_true(sell["SELL"], "upper-tunnel wick and reclaim must arm SELL")
+    assert_true(not sell["BUY"], "falling tunnel must not arm BUY at its upper edge")
+
+    no_reclaim = detect_confirmed_tunnel_sweep(
+        high=100.50,
+        low=99.00,
+        close=100.20,
+        upper=100.00,
+        lower=95.00,
+        tolerance=0.10,
+        tunnel_state="DOWNTREND",
+    )
+    assert_true(not no_reclaim["SELL"], "wick without close back below tunnel is not a sweep/reclaim")
+
+    buy = detect_confirmed_tunnel_sweep(
+        high=101.00,
+        low=94.90,
+        close=95.40,
+        upper=105.00,
+        lower=95.00,
+        tolerance=0.10,
+        tunnel_state="UPTREND",
+    )
+    assert_true(buy["BUY"], "lower-tunnel wick and reclaim must mirror BUY")
+    assert_true(not buy["SELL"], "rising tunnel must not arm SELL at its lower edge")
+
+
+def test_parallel_channel_uses_confirmed_h1_pivots_and_ignores_forming_wick() -> None:
+    index = pd.date_range("2026-07-01", periods=30, freq="h", tz="UTC")
+    turning_points = {
+        0: 105.0,
+        5: 120.0,
+        9: 90.0,
+        13: 110.0,
+        17: 80.0,
+        21: 100.0,
+        25: 70.0,
+        29: 85.0,
+    }
+    center = [0.0] * len(index)
+    points = sorted(turning_points)
+    for left, right in zip(points, points[1:]):
+        start, end = turning_points[left], turning_points[right]
+        for position in range(left, right + 1):
+            weight = (position - left) / (right - left)
+            center[position] = start + (end - start) * weight
+    frame = pd.DataFrame(
+        {
+            "open": center,
+            "high": [value + 1.0 for value in center],
+            "low": [value - 1.0 for value in center],
+            "close": center,
+            "volume": [1000.0] * len(index),
+        },
+        index=index,
+    )
+    baseline = build_confirmed_parallel_channel(
+        frame,
+        pivot_bars=3,
+        projection_time=index[-1],
+        minimum_width=1.0,
+    )
+    frame_with_news_wick = frame.copy()
+    frame_with_news_wick.loc[index[-1], "high"] = 180.0
+    after_wick = build_confirmed_parallel_channel(
+        frame_with_news_wick,
+        pivot_bars=3,
+        projection_time=index[-1],
+        minimum_width=1.0,
+    )
+
+    assert_true(baseline["valid"], "two lower highs/lows must form a valid channel")
+    assert_equal(baseline["state"], "DOWNTREND", "falling H1 channel state")
+    assert_equal(
+        after_wick["anchor_version"],
+        baseline["anchor_version"],
+        "forming news wick must not repaint confirmed anchors",
+    )
+    assert_equal(after_wick["upper"], baseline["upper"], "upper channel remains frozen")
+    assert_equal(after_wick["lower"], baseline["lower"], "lower channel remains parallel")
+
+    api_frame = frame.reset_index(names="datetime")
+    api_channel = build_confirmed_parallel_channel(
+        api_frame,
+        pivot_bars=3,
+        projection_time=api_frame["datetime"].iloc[-1],
+        minimum_width=1.0,
+    )
+    assert_equal(api_channel["upper"], baseline["upper"], "API datetime column projection")
+    assert_equal(api_channel["lower"], baseline["lower"], "API channel matches Pine time axis")
+
+    mirrored = frame.copy()
+    mirrored["open"] = 250.0 - frame["open"]
+    mirrored["close"] = 250.0 - frame["close"]
+    mirrored["high"] = 250.0 - frame["low"]
+    mirrored["low"] = 250.0 - frame["high"]
+    rising = build_confirmed_parallel_channel(
+        mirrored,
+        pivot_bars=3,
+        projection_time=index[-1],
+        minimum_width=1.0,
+    )
+    assert_true(rising["valid"], "mirrored higher highs/lows must form a channel")
+    assert_equal(rising["state"], "UPTREND", "rising H1 channel state")
 
 
 def test_final_gate_combines_hours_risk_and_harmonic_bias() -> None:
@@ -1151,6 +1271,8 @@ TESTS = [
     test_lower_zone_blocks_fresh_sell,
     test_upper_zone_blocks_fresh_buy,
     test_harmonic_d_prz_is_one_direction_only,
+    test_confirmed_tunnel_sweep_arms_only_the_aligned_approach,
+    test_parallel_channel_uses_confirmed_h1_pivots_and_ignores_forming_wick,
     test_final_gate_combines_hours_risk_and_harmonic_bias,
     test_low_rr_candidate_waits_in_ea_payload,
     test_buy_and_sell_share_one_api_schema,

@@ -26,6 +26,174 @@ INTRADAY_HARMONIC_SCAN_ENABLED = os.getenv(
 MARKET_MAP_DIR = os.getenv("ALPHA_MARKET_MAP_DIR", "data/market_maps")
 
 
+def detect_confirmed_tunnel_sweep(
+    *,
+    high: float,
+    low: float,
+    close: float,
+    upper: float,
+    lower: float,
+    tolerance: float,
+    tunnel_state: str,
+) -> Dict[str, bool]:
+    """Mirror Pine's confirmed tunnel touch/reclaim without creating a trade."""
+    state = str(tunnel_state or "NONE").upper()
+    tolerance = max(float(tolerance or 0.0), 0.0)
+    return {
+        "BUY": bool(
+            state == "UPTREND"
+            and float(low) <= float(lower) + tolerance
+            and float(close) > float(lower)
+        ),
+        "SELL": bool(
+            state == "DOWNTREND"
+            and float(high) >= float(upper) - tolerance
+            and float(close) < float(upper)
+        ),
+    }
+
+
+def build_confirmed_parallel_channel(
+    df_1h: pd.DataFrame,
+    *,
+    pivot_bars: int = 3,
+    projection_time: Any = None,
+    minimum_width: float = 0.0,
+) -> Dict[str, Any]:
+    """Build the same frozen swing-anchored H1 channel used by Pine.
+
+    The final H1 row is treated as forming.  A pivot is usable only after the
+    requested number of bars has closed on its right.  Falling channels require
+    both lower highs and lower lows; rising channels require both higher lows
+    and higher highs.  A single news wick therefore cannot move an anchor.
+    """
+    pivot_bars = max(int(pivot_bars), 2)
+    empty = {
+        "valid": False,
+        "state": "NONE",
+        "upper": 0.0,
+        "lower": 0.0,
+        "middle": 0.0,
+        "slope": 0.0,
+        "anchor_time_1": 0,
+        "anchor_price_1": 0.0,
+        "anchor_time_2": 0,
+        "anchor_price_2": 0.0,
+        "parallel_time": 0,
+        "parallel_price": 0.0,
+        "anchor_version": 0,
+        "source": "confirmed_h1_pivots",
+        "timeframe": "1H",
+    }
+    if df_1h is None or len(df_1h) < pivot_bars * 2 + 6:
+        return empty
+
+    source = df_1h.iloc[:-1].copy()
+    if len(source) < pivot_bars * 2 + 5:
+        return empty
+
+    datetime_axis = isinstance(source.index, pd.DatetimeIndex)
+    if datetime_axis:
+        axis = [float(pd.Timestamp(value).timestamp()) for value in source.index]
+    else:
+        datetime_column = next(
+            (
+                name
+                for name in ("datetime", "timestamp", "time")
+                if name in source.columns
+            ),
+            None,
+        )
+        parsed = (
+            pd.to_datetime(source[datetime_column], utc=True, errors="coerce")
+            if datetime_column
+            else None
+        )
+        if parsed is not None and not parsed.isna().any():
+            axis = [float(value.timestamp()) for value in parsed]
+            datetime_axis = True
+        else:
+            axis = [float(index) for index in range(len(source))]
+
+    def confirmed_pivots(column: str, side: str) -> list[tuple[int, float]]:
+        values = source[column].astype(float).reset_index(drop=True)
+        pivots: list[tuple[int, float]] = []
+        for index in range(pivot_bars, len(values) - pivot_bars):
+            window = values.iloc[index - pivot_bars : index + pivot_bars + 1]
+            candidate = float(values.iloc[index])
+            extreme = float(window.max() if side == "HIGH" else window.min())
+            if candidate == extreme and int((window == extreme).sum()) == 1:
+                pivots.append((index, candidate))
+        return pivots
+
+    highs = confirmed_pivots("high", "HIGH")
+    lows = confirmed_pivots("low", "LOW")
+    if len(highs) < 2 or len(lows) < 2:
+        return empty
+
+    high1, high0 = highs[-2], highs[-1]
+    low1, low0 = lows[-2], lows[-1]
+    falling = high0[1] < high1[1] and low0[1] < low1[1]
+    rising = high0[1] > high1[1] and low0[1] > low1[1]
+    if not falling and not rising:
+        return empty
+
+    if datetime_axis:
+        try:
+            projection = float(pd.Timestamp(projection_time).timestamp())
+        except Exception:
+            projection = axis[-1]
+    else:
+        projection = axis[-1]
+
+    if falling:
+        main1, main2, parallel = high1, high0, low0
+        state = "DOWNTREND"
+    else:
+        main1, main2, parallel = low1, low0, high0
+        state = "UPTREND"
+
+    time1, time2 = axis[main1[0]], axis[main2[0]]
+    if time2 <= time1:
+        return empty
+    slope_per_axis = (main2[1] - main1[1]) / (time2 - time1)
+    main_at_projection = main2[1] + slope_per_axis * (projection - time2)
+    parallel_time = axis[parallel[0]]
+    parallel_at_projection = parallel[1] + slope_per_axis * (
+        projection - parallel_time
+    )
+    if falling:
+        upper, lower = main_at_projection, parallel_at_projection
+    else:
+        upper, lower = parallel_at_projection, main_at_projection
+    width = upper - lower
+    if width <= 0 or width < max(float(minimum_width), 0.0):
+        return empty
+
+    def metadata_time(position: int) -> int:
+        return int(round(axis[position] * 1000)) if datetime_axis else int(position)
+
+    slope = slope_per_axis * 3600.0 if datetime_axis else slope_per_axis
+    return {
+        **empty,
+        "valid": True,
+        "state": state,
+        "upper": float(upper),
+        "lower": float(lower),
+        "middle": float((upper + lower) / 2.0),
+        "slope": float(slope),
+        "anchor_time_1": metadata_time(main1[0]),
+        "anchor_price_1": float(main1[1]),
+        "anchor_time_2": metadata_time(main2[0]),
+        "anchor_price_2": float(main2[1]),
+        "parallel_time": metadata_time(parallel[0]),
+        "parallel_price": float(parallel[1]),
+        "anchor_version": max(
+            metadata_time(main2[0]), metadata_time(parallel[0])
+        ),
+    }
+
+
 class ScenarioScanner:
     def scan(self, df_4h: pd.DataFrame, df_1h: pd.DataFrame, df_15m: pd.DataFrame, symbol: str = "XAUUSD") -> ScenarioBlueprint:
         self._validate_df(df_4h, "4h")
@@ -47,19 +215,31 @@ class ScenarioScanner:
             else False
         )
 
-        tunnel_upper = float(df_15m["high"].tail(30).max())
-        tunnel_lower = float(df_15m["low"].tail(30).min())
-        tunnel_mid = float((tunnel_upper + tunnel_lower) / 2)
-
-        prior_window = df_15m.iloc[-60:-30] if len(df_15m) >= 60 else df_15m.tail(30)
-        prior_tunnel_upper = float(prior_window["high"].max())
-        prior_tunnel_lower = float(prior_window["low"].min())
-        prior_tunnel_mid = float((prior_tunnel_upper + prior_tunnel_lower) / 2)
-
         gz_low, gz_high = self._golden_zone(df_4h)
 
         atr_15m = self._atr(df_15m)
         atr_1h = self._atr(df_1h)
+        tunnel_projection_time = (
+            df_15m["datetime"].iloc[-1]
+            if "datetime" in df_15m.columns
+            else df_15m["timestamp"].iloc[-1]
+            if "timestamp" in df_15m.columns
+            else df_15m.index[-1]
+        )
+        channel = build_confirmed_parallel_channel(
+            df_1h,
+            pivot_bars=3,
+            projection_time=tunnel_projection_time,
+            minimum_width=atr_1h * 0.50,
+        )
+        tunnel_upper = float(channel["upper"])
+        tunnel_lower = float(channel["lower"])
+        tunnel_mid = float(channel["middle"])
+        tunnel_slope = float(channel["slope"])
+        tunnel_state = str(channel["state"])
+        tunnel_valid = bool(channel["valid"])
+        tunnel_sweep_upper = tunnel_upper
+        tunnel_sweep_lower = tunnel_lower
 
         ha_m15_bullish, ha_m15_bearish = self._heikin_ashi_state(df_15m)
         ha_h1_bullish, ha_h1_bearish = self._heikin_ashi_state(df_1h)
@@ -77,11 +257,11 @@ class ScenarioScanner:
 
         previous_close = float(df_15m["close"].iloc[-2]) if len(df_15m) > 1 else current_price
         price_reclaimed_bb_middle = previous_close <= bb_middle <= current_price
-        price_reclaimed_tunnel_mid = previous_close <= tunnel_mid <= current_price
+        price_reclaimed_tunnel_mid = tunnel_valid and previous_close <= tunnel_mid <= current_price
         price_above_mid_support = (
             current_price >= bb_middle
-            and current_price >= tunnel_mid
-            and (previous_close <= bb_middle or previous_close <= tunnel_mid)
+            and (not tunnel_valid or current_price >= tunnel_mid)
+            and (previous_close <= bb_middle or (tunnel_valid and previous_close <= tunnel_mid))
         )
 
         early_buy_reclaim_watch = (
@@ -130,25 +310,31 @@ class ScenarioScanner:
             watch_bias = "NONE"
             impulse_direction = "NONE"
 
-        tunnel_slope = tunnel_mid - prior_tunnel_mid
         tunnel_width = max(tunnel_upper - tunnel_lower, 0.0)
         tunnel_tolerance = max(atr_15m * 0.35, tunnel_width * 0.08)
-        slope_threshold = max(atr_15m * 0.10, 0.1)
 
-        if tunnel_slope > slope_threshold:
-            tunnel_state = "UPTREND"
-        elif tunnel_slope < -slope_threshold:
-            tunnel_state = "DOWNTREND"
-        else:
-            tunnel_state = "FLAT"
+        latest_bar = df_15m.iloc[-1]
+        tunnel_sweeps = detect_confirmed_tunnel_sweep(
+            high=float(latest_bar["high"]),
+            low=float(latest_bar["low"]),
+            close=current_price,
+            upper=tunnel_sweep_upper,
+            lower=tunnel_sweep_lower,
+            tolerance=atr_15m * 0.10,
+            tunnel_state=tunnel_state,
+        )
+        buy_tunnel_sweep = tunnel_sweeps["BUY"]
+        sell_tunnel_sweep = tunnel_sweeps["SELL"]
 
-        inside_tunnel = tunnel_lower <= current_price <= tunnel_upper
-        near_tunnel_upper = abs(current_price - tunnel_upper) <= tunnel_tolerance
-        near_tunnel_mid = abs(current_price - tunnel_mid) <= tunnel_tolerance
-        near_tunnel_lower = abs(current_price - tunnel_lower) <= tunnel_tolerance
+        inside_tunnel = tunnel_valid and tunnel_lower <= current_price <= tunnel_upper
+        near_tunnel_upper = tunnel_valid and abs(current_price - tunnel_upper) <= tunnel_tolerance
+        near_tunnel_mid = tunnel_valid and abs(current_price - tunnel_mid) <= tunnel_tolerance
+        near_tunnel_lower = tunnel_valid and abs(current_price - tunnel_lower) <= tunnel_tolerance
         tunnel_retest_valid = (
-            (trend_h4 == "UP" and tunnel_state in ("UPTREND", "FLAT") and (near_tunnel_lower or near_tunnel_mid))
-            or (trend_h4 == "DOWN" and tunnel_state in ("DOWNTREND", "FLAT") and (near_tunnel_upper or near_tunnel_mid))
+            (trend_h4 == "UP" and tunnel_state == "UPTREND" and (near_tunnel_lower or near_tunnel_mid))
+            or (trend_h4 == "DOWN" and tunnel_state == "DOWNTREND" and (near_tunnel_upper or near_tunnel_mid))
+            or buy_tunnel_sweep
+            or sell_tunnel_sweep
         )
 
         smc_confirmed = self._smc_proxy(df_15m, current_price)
@@ -193,8 +379,11 @@ class ScenarioScanner:
                 )
             )
             prior_channel_broken = bool(
-                (reversal_direction == "BUY" and current_price > prior_tunnel_upper + tunnel_tolerance)
-                or (reversal_direction == "SELL" and current_price < prior_tunnel_lower - tunnel_tolerance)
+                tunnel_valid
+                and (
+                    (reversal_direction == "BUY" and current_price > tunnel_upper + tunnel_tolerance)
+                    or (reversal_direction == "SELL" and current_price < tunnel_lower - tunnel_tolerance)
+                )
             )
             if c_leg_broken or prior_channel_broken:
                 selected_harmonic = {
@@ -242,7 +431,11 @@ class ScenarioScanner:
 
         reversal_allowed = prz_state in ("ACTIVE", "RECLAIMED") and not micro_prz_broken
 
-        if micro_prz_broken and tunnel_state in ("UPTREND", "DOWNTREND"):
+        if sell_tunnel_sweep:
+            trade_plan = "SELL_TUNNEL_SWEEP_ARMED"
+        elif buy_tunnel_sweep:
+            trade_plan = "BUY_TUNNEL_SWEEP_ARMED"
+        elif micro_prz_broken and tunnel_state in ("UPTREND", "DOWNTREND"):
             trade_plan = "TUNNEL_WATCH"
         elif micro_prz_broken:
             trade_plan = "NO_TRADE"
@@ -379,7 +572,16 @@ class ScenarioScanner:
             tunnel_lower=tunnel_lower,
             tunnel_mid=tunnel_mid,
             tunnel_slope=round(tunnel_slope, 3),
-            tunnel_valid=True,
+            tunnel_valid=tunnel_valid,
+            tunnel_timeframe=str(channel["timeframe"]),
+            tunnel_source=str(channel["source"]),
+            tunnel_anchor_time_1=int(channel["anchor_time_1"]),
+            tunnel_anchor_price_1=round(float(channel["anchor_price_1"]), 3),
+            tunnel_anchor_time_2=int(channel["anchor_time_2"]),
+            tunnel_anchor_price_2=round(float(channel["anchor_price_2"]), 3),
+            tunnel_parallel_time=int(channel["parallel_time"]),
+            tunnel_parallel_price=round(float(channel["parallel_price"]), 3),
+            tunnel_anchor_version=int(channel["anchor_version"]),
             golden_zone_low=gz_low,
             golden_zone_high=gz_high,
             swing_L=swing_L,
@@ -476,6 +678,10 @@ class ScenarioScanner:
             near_tunnel_mid=bool(near_tunnel_mid),
             near_tunnel_lower=bool(near_tunnel_lower),
             tunnel_retest_valid=bool(tunnel_retest_valid),
+            buy_tunnel_sweep=bool(buy_tunnel_sweep),
+            sell_tunnel_sweep=bool(sell_tunnel_sweep),
+            tunnel_sweep_upper=round(tunnel_sweep_upper, 3),
+            tunnel_sweep_lower=round(tunnel_sweep_lower, 3),
             trade_plan=trade_plan,
             execution_state="WATCH",
             is_valid=len(errors) == 0,
