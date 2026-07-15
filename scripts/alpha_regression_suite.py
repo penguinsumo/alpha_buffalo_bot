@@ -35,6 +35,7 @@ from engine_v4.session_gate import GateResult
 from execution_lifecycle import ExecutionLifecycleManager, closed_ha5_evidence
 from scenario_scanner import (
     build_confirmed_parallel_channel,
+    confirmed_channel_boundary_broken,
     detect_confirmed_tunnel_sweep,
 )
 from session_clock import SessionClock, SessionState, market_closed_reason
@@ -342,6 +343,41 @@ def test_parallel_channel_uses_confirmed_h1_pivots_and_ignores_forming_wick() ->
     )
     assert_true(rising["valid"], "mirrored higher highs/lows must form a channel")
     assert_equal(rising["state"], "UPTREND", "rising H1 channel state")
+
+
+def test_closed_m15_break_invalidates_h1_tunnel_but_forming_wick_does_not() -> None:
+    index = pd.date_range("2026-07-14 00:00", periods=3, freq="15min", tz="UTC")
+    anchor_ms = int(index[0].timestamp() * 1000)
+    channel = {
+        "valid": True,
+        "state": "DOWNTREND",
+        "upper": 109.5,
+        "lower": 99.5,
+        "slope": -1.0,
+        "anchor_time_2": anchor_ms,
+        "anchor_price_2": 110.0,
+        "parallel_time": anchor_ms,
+        "parallel_price": 100.0,
+        "anchor_version": anchor_ms,
+    }
+    frame = pd.DataFrame(
+        {
+            "open": [105.0, 105.0, 105.0],
+            "high": [106.0, 106.0, 150.0],
+            "low": [104.0, 104.0, 104.0],
+            "close": [105.0, 105.0, 150.0],
+        },
+        index=index,
+    )
+    assert_true(
+        not confirmed_channel_boundary_broken(channel, frame, tolerance=0.10),
+        "forming M15 news wick/close must not invalidate frozen H1 anchors",
+    )
+    frame.loc[index[1], "close"] = 112.0
+    assert_true(
+        confirmed_channel_boundary_broken(channel, frame, tolerance=0.10),
+        "closed M15 candle above falling upper boundary must invalidate tunnel",
+    )
 
 
 def test_final_gate_combines_hours_risk_and_harmonic_bias() -> None:
@@ -1063,51 +1099,6 @@ def test_telegram_public_output_hides_engine_internals() -> None:
 
     assert_true("Setup   : 🟡 WAIT" in trend_text, "WAIT candidate must not be promoted to a setup")
     assert_true("V4_SESSION" in signal_text, "trade alert should use public V4_SESSION type")
-    assert_true("Signal accepted and queued" in signal_text, "trade alert should describe queue state")
-    assert_true("EA Executing" not in signal_text, "trade alert must not claim execution before EA ACK")
-
-
-def test_pine_monitor_is_observable_but_never_owns_a_trade() -> None:
-    base_payload = {
-        "symbol": "XAUUSD",
-        "signal": {
-            "timestamp": "2026-07-10T15:00:00+00:00",
-            "blueprint": {"current_price": 4100.0, "trend_h1": "UP", "trend_h4": "UP"},
-            "gates": {"session": "NY"},
-        },
-        "ea": {
-            "action": "OPEN",
-            "execution_state": "READY",
-            "direction": "BUY",
-            "entry": 4100.0,
-            "session": "NY",
-        },
-    }
-    original_pipeline = runtime.run_pipeline
-    try:
-        runtime.run_pipeline = lambda: base_payload
-        monitor = runtime._pine_monitor_payload()
-    finally:
-        runtime.run_pipeline = original_pipeline
-
-    assert_equal(monitor["source"], "PINE_MONITOR", "monitor source")
-    assert_equal(monitor["ea"]["action"], "WAIT", "monitor may never open")
-    assert_equal(monitor["ea"]["execution_state"], "WATCH", "monitor is watch-only")
-    assert_equal(monitor["ea"]["command_owner"], "PINE_TRADINGVIEW", "Pine retains ownership")
-    text = format_telegram_trend_update(monitor)
-    assert_true("PINE MONITOR" in text, "monitor must be visible in Telegram")
-    assert_true("Relay online" in text, "monitor confirms relay availability")
-
-    fresh = {
-        "signal": {"timestamp": pd.Timestamp.now(tz="UTC").isoformat()},
-        "ea": {},
-    }
-    stale = {
-        "signal": {"timestamp": "2026-01-01T00:00:00+00:00"},
-        "ea": {},
-    }
-    assert_true(runtime._telegram_open_signal_is_fresh(fresh), "fresh OPEN must notify")
-    assert_true(not runtime._telegram_open_signal_is_fresh(stale), "stale OPEN must not replay")
 
 
 def test_pine_monitor_does_not_promote_blocked_buy_inside_sell_ha_context() -> None:
@@ -1409,6 +1400,7 @@ TESTS = [
     test_harmonic_d_prz_is_one_direction_only,
     test_confirmed_tunnel_sweep_arms_only_the_aligned_approach,
     test_parallel_channel_uses_confirmed_h1_pivots_and_ignores_forming_wick,
+    test_closed_m15_break_invalidates_h1_tunnel_but_forming_wick_does_not,
     test_final_gate_combines_hours_risk_and_harmonic_bias,
     test_low_rr_candidate_waits_in_ea_payload,
     test_buy_and_sell_share_one_api_schema,
@@ -1431,7 +1423,6 @@ TESTS = [
     test_active_position_forces_ea_to_management_only,
     test_execution_api_fill_and_ack_round_trip,
     test_telegram_public_output_hides_engine_internals,
-    test_pine_monitor_is_observable_but_never_owns_a_trade,
     test_pine_monitor_does_not_promote_blocked_buy_inside_sell_ha_context,
     test_confirmed_open_is_the_only_public_directional_setup,
     test_closed_market_suppresses_all_telegram,

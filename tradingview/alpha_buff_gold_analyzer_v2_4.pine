@@ -1,8 +1,10 @@
 //@version=6
-indicator("AlphaBuff Gold Analyzer v2.4.2 - Decision Stack", overlay=true, max_labels_count=300, max_boxes_count=30)
+indicator("AlphaBuff Gold Analyzer v2.4.2 - Decision Stack", overlay=true, max_labels_count=300, max_boxes_count=30, max_lines_count=30)
 
-// This indicator is designed to run on a 5-minute chart. Every higher-timeframe
-// decision uses the last confirmed source bar (offset [1] + lookahead_on).
+// Execution is designed to run on a 5-minute chart. H4 supplies PRZ/context,
+// H1 supplies the frozen tunnel geometry, and closed M15 supplies the sweep and
+// HA trigger. Every higher-timeframe decision uses the last confirmed source
+// bar (offset [1] + lookahead_on).
 
 // =============================================================================
 // 1. INPUTS
@@ -61,7 +63,7 @@ entryMaxDistanceAtr = input.float(0.75, "Maximum HA confirmation distance from P
 entryArmTtl    = input.int(8, "PRZ state TTL (15m bars)", minval=2, maxval=12, group=groupTrigger,
      tooltip="Keeps GC-RVOL wall evidence and confirmed PA alive while price remains in the PRZ, unless an opposite BOS invalidates the wall.")
 tunnelTf = input.timeframe("60", "Parallel-channel anchor TF", group=groupTrigger,
-     tooltip="Default H1. The channel is frozen between confirmed three-bar pivots and projected to each closed M15 trigger bar.")
+     tooltip="Default H1. H4 remains PRZ/context; the channel is frozen between confirmed three-bar pivots, while only closed M15 bars may sweep or trigger it.")
 tunnelSweepToleranceAtr = input.float(0.10, "Tunnel touch/sweep tolerance (ATR)", minval=0.0, step=0.05, group=groupTrigger)
 tunnelEntryMaxDistanceAtr = input.float(2.0, "Maximum HA confirmation distance from tunnel (ATR)", minval=0.5, step=0.25, group=groupTrigger,
      tooltip="A tunnel touch/reclaim may arm a continuation approach, but the second HA15 candle must confirm before price travels too far from the swept boundary.")
@@ -292,7 +294,6 @@ tunnelProjectionMs = not na(triggerCloseTime) and not na(tunnelProjectionTime) ?
 tunnelUpper = tunnelDirection == 0 or na(tunnelBaseUpper) or na(tunnelSlopePerMs) ? na : tunnelBaseUpper + tunnelSlopePerMs * tunnelProjectionMs
 tunnelLower = tunnelDirection == 0 or na(tunnelBaseLower) or na(tunnelSlopePerMs) ? na : tunnelBaseLower + tunnelSlopePerMs * tunnelProjectionMs
 tunnelMiddle = na(tunnelUpper) or na(tunnelLower) ? na : (tunnelUpper + tunnelLower) / 2.0
-tunnelDirectionText = tunnelDirection == 1 ? "RISING" : tunnelDirection == -1 ? "FALLING" : "NONE"
 
 [gcOpen, gcHigh, gcLow, gcClose, gcVolume, gcVolAvg, gcAtr] = request.security(
      gcSymbol, triggerTf, f_confirmed_gc(gcVolumeLen),
@@ -488,6 +489,11 @@ newEntryConfirmBar = timeframe.change(entryConfirmTf)
 
 var int structureBias = 0
 var string structureEvent = "NONE"
+// A confirmed H1 anchor set stays frozen, but it must never remain executable
+// after a closed M15 candle breaks the opposite boundary or a confirmed H1 BOS
+// breaks against it. The invalidation is tied to the anchor version, so a new
+// fully confirmed pivot set can create the next channel without repainting.
+var int invalidatedTunnelAnchorVersion = na
 if barstate.isconfirmed and newStructureBar
     if bullStructureBreak
         structureEvent := structureBias == -1 ? "BULL CHoCH" : structureBias == 1 ? "BULL BOS" : "BULL BREAK"
@@ -495,6 +501,24 @@ if barstate.isconfirmed and newStructureBar
     else if bearStructureBreak
         structureEvent := structureBias == 1 ? "BEAR CHoCH" : structureBias == -1 ? "BEAR BOS" : "BEAR BREAK"
         structureBias := -1
+
+tunnelBreakBuffer = triggerAtr * tunnelSweepToleranceAtr
+risingTunnelBoundaryBreak = tunnelDirection == 1 and not na(tunnelLower) and triggerClose < tunnelLower - tunnelBreakBuffer
+fallingTunnelBoundaryBreak = tunnelDirection == -1 and not na(tunnelUpper) and triggerClose > tunnelUpper + tunnelBreakBuffer
+risingTunnelBosBreak = tunnelDirection == 1 and newStructureBar and bearStructureBreak
+fallingTunnelBosBreak = tunnelDirection == -1 and newStructureBar and bullStructureBreak
+if barstate.isconfirmed and not na(tunnelAnchorVersion)
+    if (newTriggerBar and risingTunnelBoundaryBreak) or risingTunnelBosBreak
+        invalidatedTunnelAnchorVersion := tunnelAnchorVersion
+    else if (newTriggerBar and fallingTunnelBoundaryBreak) or fallingTunnelBosBreak
+        invalidatedTunnelAnchorVersion := tunnelAnchorVersion
+
+tunnelAnchorActive = tunnelDirection != 0 and not na(tunnelAnchorVersion) and tunnelAnchorVersion != invalidatedTunnelAnchorVersion
+activeTunnelDirection = tunnelAnchorActive ? tunnelDirection : 0
+activeTunnelUpper = tunnelAnchorActive ? tunnelUpper : na
+activeTunnelLower = tunnelAnchorActive ? tunnelLower : na
+activeTunnelMiddle = tunnelAnchorActive ? tunnelMiddle : na
+tunnelDirectionText = activeTunnelDirection == 1 ? "RISING" : activeTunnelDirection == -1 ? "FALLING" : "NONE"
 
 // =============================================================================
 // 6. SWEEP -> RECLAIM STATE
@@ -604,20 +628,20 @@ if barstate.isconfirmed and newTriggerBar
         sellSweepAge := 0
 
     tunnelTouchBuffer = triggerAtr * tunnelSweepToleranceAtr
-    confirmedRisingTunnel = tunnelDirection == 1 and not na(tunnelUpper) and not na(tunnelLower)
-    confirmedFallingTunnel = tunnelDirection == -1 and not na(tunnelUpper) and not na(tunnelLower)
-    buyTunnelSweepNow := confirmedRisingTunnel and triggerLow <= tunnelLower + tunnelTouchBuffer and triggerClose > tunnelLower
-    sellTunnelSweepNow := confirmedFallingTunnel and triggerHigh >= tunnelUpper - tunnelTouchBuffer and triggerClose < tunnelUpper
+    confirmedRisingTunnel = activeTunnelDirection == 1 and not na(activeTunnelUpper) and not na(activeTunnelLower)
+    confirmedFallingTunnel = activeTunnelDirection == -1 and not na(activeTunnelUpper) and not na(activeTunnelLower)
+    buyTunnelSweepNow := confirmedRisingTunnel and triggerLow <= activeTunnelLower + tunnelTouchBuffer and triggerClose > activeTunnelLower
+    sellTunnelSweepNow := confirmedFallingTunnel and triggerHigh >= activeTunnelUpper - tunnelTouchBuffer and triggerClose < activeTunnelUpper
 
     buyTunnelChanged = buyTunnelSweepArmed and not na(buyTunnelAnchorVersion) and tunnelAnchorVersion != buyTunnelAnchorVersion
     sellTunnelChanged = sellTunnelSweepArmed and not na(sellTunnelAnchorVersion) and tunnelAnchorVersion != sellTunnelAnchorVersion
-    if buyTunnelSweepArmed and (buyTunnelSweepAge > entryArmTtl or triggerClose < buyTunnelSweepLevel - triggerAtr * reclaimAtr or tunnelDirection != 1 or buyTunnelChanged)
+    if buyTunnelSweepArmed and (buyTunnelSweepAge > entryArmTtl or triggerClose < buyTunnelSweepLevel - triggerAtr * reclaimAtr or activeTunnelDirection != 1 or buyTunnelChanged)
         buyTunnelSweepArmed := false
         buyTunnelSweepAge := 0
         buyTunnelSweepLevel := na
         buyTunnelSweepLow := na
         buyTunnelAnchorVersion := na
-    if sellTunnelSweepArmed and (sellTunnelSweepAge > entryArmTtl or triggerClose > sellTunnelSweepLevel + triggerAtr * reclaimAtr or tunnelDirection != -1 or sellTunnelChanged)
+    if sellTunnelSweepArmed and (sellTunnelSweepAge > entryArmTtl or triggerClose > sellTunnelSweepLevel + triggerAtr * reclaimAtr or activeTunnelDirection != -1 or sellTunnelChanged)
         sellTunnelSweepArmed := false
         sellTunnelSweepAge := 0
         sellTunnelSweepLevel := na
@@ -627,13 +651,13 @@ if barstate.isconfirmed and newTriggerBar
     if buyTunnelSweepNow
         buyTunnelSweepArmed := true
         buyTunnelSweepAge := 0
-        buyTunnelSweepLevel := tunnelLower
+        buyTunnelSweepLevel := activeTunnelLower
         buyTunnelSweepLow := na(buyTunnelSweepLow) ? triggerLow : math.min(buyTunnelSweepLow, triggerLow)
         buyTunnelAnchorVersion := tunnelAnchorVersion
     if sellTunnelSweepNow
         sellTunnelSweepArmed := true
         sellTunnelSweepAge := 0
-        sellTunnelSweepLevel := tunnelUpper
+        sellTunnelSweepLevel := activeTunnelUpper
         sellTunnelSweepHigh := na(sellTunnelSweepHigh) ? triggerHigh : math.max(sellTunnelSweepHigh, triggerHigh)
         sellTunnelAnchorVersion := tunnelAnchorVersion
 
@@ -1179,11 +1203,67 @@ plot(showBb ? bbBasis : na, "Confirmed 15m BB basis", color=color.new(color.blue
 plot(showBb ? bbUpper : na, "Confirmed 15m BB upper", color=color.new(color.red, 35), style=plot.style_stepline)
 plot(showBb ? bbLower : na, "Confirmed 15m BB lower", color=color.new(color.teal, 35), style=plot.style_stepline)
 
-tunnelColor = tunnelDirection == -1 ? color.orange : tunnelDirection == 1 ? color.aqua : color.gray
-tunnelUpperPlot = plot(showTunnel ? tunnelUpper : na, "Confirmed parallel-channel upper", color=color.new(tunnelColor, 10), linewidth=2, style=plot.style_linebr)
-tunnelLowerPlot = plot(showTunnel ? tunnelLower : na, "Confirmed parallel-channel lower", color=color.new(tunnelColor, 10), linewidth=2, style=plot.style_linebr)
-plot(showTunnel ? tunnelMiddle : na, "Confirmed parallel-channel middle", color=color.new(tunnelColor, 55), style=plot.style_linebr)
-fill(tunnelUpperPlot, tunnelLowerPlot, color=showTunnel ? color.new(tunnelColor, 94) : na, title="Confirmed swing-anchored parallel channel")
+// Draw the current H1 channel from its actual confirmed pivot timestamps. A
+// projected M15 series plot changes shape when viewed on H1/H4 and leaves
+// disconnected historical fragments. Three xloc.bar_time lines keep exactly
+// one frozen geometry on every chart timeframe; M15 remains the only trigger.
+tunnelColor = activeTunnelDirection == -1 ? color.orange : activeTunnelDirection == 1 ? color.aqua : color.gray
+tunnelParallelAtMain1 = not na(tunnelParallelPrice) and not na(tunnelSlopePerMs) and not na(tunnelMainTime1) and not na(tunnelParallelTime) ? tunnelParallelPrice + tunnelSlopePerMs * float(tunnelMainTime1 - tunnelParallelTime) : na
+tunnelParallelAtMain2 = not na(tunnelParallelPrice) and not na(tunnelSlopePerMs) and not na(tunnelMainTime2) and not na(tunnelParallelTime) ? tunnelParallelPrice + tunnelSlopePerMs * float(tunnelMainTime2 - tunnelParallelTime) : na
+float tunnelUpperAnchor1 = na
+float tunnelUpperAnchor2 = na
+float tunnelLowerAnchor1 = na
+float tunnelLowerAnchor2 = na
+if activeTunnelDirection == -1
+    tunnelUpperAnchor1 := tunnelMainPrice1
+    tunnelUpperAnchor2 := tunnelMainPrice2
+    tunnelLowerAnchor1 := tunnelParallelAtMain1
+    tunnelLowerAnchor2 := tunnelParallelAtMain2
+else if activeTunnelDirection == 1
+    tunnelUpperAnchor1 := tunnelParallelAtMain1
+    tunnelUpperAnchor2 := tunnelParallelAtMain2
+    tunnelLowerAnchor1 := tunnelMainPrice1
+    tunnelLowerAnchor2 := tunnelMainPrice2
+
+tunnelMiddleAnchor1 = na(tunnelUpperAnchor1) or na(tunnelLowerAnchor1) ? na : (tunnelUpperAnchor1 + tunnelLowerAnchor1) / 2.0
+tunnelMiddleAnchor2 = na(tunnelUpperAnchor2) or na(tunnelLowerAnchor2) ? na : (tunnelUpperAnchor2 + tunnelLowerAnchor2) / 2.0
+tunnelLineReady = showTunnel and tunnelAnchorActive and not na(tunnelMainTime1) and not na(tunnelMainTime2) and not na(tunnelUpperAnchor1) and not na(tunnelUpperAnchor2) and not na(tunnelLowerAnchor1) and not na(tunnelLowerAnchor2)
+
+var line tunnelUpperLine = na
+var line tunnelLowerLine = na
+var line tunnelMiddleLine = na
+var linefill tunnelChannelFill = na
+if barstate.islast
+    if tunnelLineReady
+        if na(tunnelUpperLine)
+            tunnelUpperLine := line.new(x1=tunnelMainTime1, y1=tunnelUpperAnchor1, x2=tunnelMainTime2, y2=tunnelUpperAnchor2, xloc=xloc.bar_time, extend=extend.right, color=color.new(tunnelColor, 10), width=2)
+            tunnelLowerLine := line.new(x1=tunnelMainTime1, y1=tunnelLowerAnchor1, x2=tunnelMainTime2, y2=tunnelLowerAnchor2, xloc=xloc.bar_time, extend=extend.right, color=color.new(tunnelColor, 10), width=2)
+            tunnelMiddleLine := line.new(x1=tunnelMainTime1, y1=tunnelMiddleAnchor1, x2=tunnelMainTime2, y2=tunnelMiddleAnchor2, xloc=xloc.bar_time, extend=extend.right, color=color.new(tunnelColor, 55), style=line.style_dashed)
+            tunnelChannelFill := linefill.new(tunnelUpperLine, tunnelLowerLine, color.new(tunnelColor, 94))
+        else
+            line.set_xy1(tunnelUpperLine, tunnelMainTime1, tunnelUpperAnchor1)
+            line.set_xy2(tunnelUpperLine, tunnelMainTime2, tunnelUpperAnchor2)
+            line.set_xy1(tunnelLowerLine, tunnelMainTime1, tunnelLowerAnchor1)
+            line.set_xy2(tunnelLowerLine, tunnelMainTime2, tunnelLowerAnchor2)
+            line.set_xy1(tunnelMiddleLine, tunnelMainTime1, tunnelMiddleAnchor1)
+            line.set_xy2(tunnelMiddleLine, tunnelMainTime2, tunnelMiddleAnchor2)
+            line.set_color(tunnelUpperLine, color.new(tunnelColor, 10))
+            line.set_color(tunnelLowerLine, color.new(tunnelColor, 10))
+            line.set_color(tunnelMiddleLine, color.new(tunnelColor, 55))
+            linefill.set_color(tunnelChannelFill, color.new(tunnelColor, 94))
+    else
+        if not na(tunnelChannelFill)
+            linefill.delete(tunnelChannelFill)
+            tunnelChannelFill := na
+        if not na(tunnelUpperLine)
+            line.delete(tunnelUpperLine)
+            tunnelUpperLine := na
+        if not na(tunnelLowerLine)
+            line.delete(tunnelLowerLine)
+            tunnelLowerLine := na
+        if not na(tunnelMiddleLine)
+            line.delete(tunnelMiddleLine)
+            tunnelMiddleLine := na
 
 plot(showTrade and tradeDirection != 0 ? tradeEntry : na, "Entry", color=color.white, linewidth=2, style=plot.style_linebr)
 plot(showTrade and tradeDirection != 0 ? activeStop : na, "Active stop", color=color.orange, linewidth=2, style=plot.style_linebr)

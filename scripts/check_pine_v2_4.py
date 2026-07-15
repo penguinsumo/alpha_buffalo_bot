@@ -139,6 +139,42 @@ def main() -> None:
         and "buySignal := buyTunnelSweepNow" not in source
         and "tunnelLookback" not in source
         and "f_confirmed_tunnel" not in source,
+        "H4 context H1 tunnel M15 trigger roles are separated": all(
+            marker in source
+            for marker in (
+                'rangeTfH4       = input.timeframe("240"',
+                'tunnelTf = input.timeframe("60"',
+                'triggerTf       = input.timeframe("15"',
+                "H4 supplies PRZ/context",
+                "H1 supplies the frozen tunnel geometry",
+                "closed M15 supplies the sweep",
+            )
+        ),
+        "tunnel rendering is anchored by timestamp and stable across chart TF": all(
+            marker in source
+            for marker in (
+                "tunnelUpperLine",
+                "tunnelLowerLine",
+                "tunnelMiddleLine",
+                "xloc=xloc.bar_time",
+                "line.set_xy1(tunnelUpperLine",
+                "line.set_xy2(tunnelLowerLine",
+                "linefill.new(tunnelUpperLine, tunnelLowerLine",
+            )
+        ) and "tunnelUpperPlot = plot" not in source
+        and "tunnelLowerPlot = plot" not in source,
+        "closed boundary or opposite H1 BOS invalidates frozen tunnel version": all(
+            marker in source
+            for marker in (
+                "invalidatedTunnelAnchorVersion",
+                "risingTunnelBoundaryBreak",
+                "fallingTunnelBoundaryBreak",
+                "risingTunnelBosBreak",
+                "fallingTunnelBosBreak",
+                "tunnelAnchorActive",
+                "activeTunnelDirection",
+            )
+        ),
         "BB and PA trigger": all(
             marker in source
             for marker in ("bbBuyReject", "bbSellReject", "buyReversalPin", "sellReversalPin")
