@@ -33,7 +33,14 @@ def _number(value: Any) -> float:
 
 def _symbol(value: Any) -> str:
     symbol = str(value or "XAUUSD").strip().upper().split(":")[-1]
-    return symbol.replace("/", "")
+    symbol = symbol.replace("/", "")
+    # TradingView emits the canonical ticker (XAUUSD), while MT5 brokers often
+    # append an account-specific suffix such as XAUUSD-VIP, XAUUSD.m or
+    # XAUUSDpro. The bridge is a gold-only relay, so all of those broker
+    # symbols must address the same durable Pine command.
+    if symbol.startswith("XAUUSD"):
+        return "XAUUSD"
+    return symbol
 
 
 class PineSignalError(ValueError):
