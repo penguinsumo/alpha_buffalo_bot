@@ -1206,7 +1206,9 @@ if showDashboard and barstate.islast
     triggerText = buyEntryConfirmed ? "BUY HA15 #2" : sellEntryConfirmed ? "SELL HA15 #2" : buyEntryArmed ? "BUY WAIT #2" : sellEntryArmed ? "SELL WAIT #2" : buyTunnelSweepArmed ? "BUY TUNNEL ARMED" : sellTunnelSweepArmed ? "SELL TUNNEL ARMED" : "WAIT LOCATION"
     h1EntryText = buyH1NormalCandle and sellH1HeikinAshi ? "BUY CANDLE + SELL HA" : buyH1NormalCandle ? "BUY CANDLE" : sellH1HeikinAshi ? "SELL HA" : "WAIT"
     gcPermissionText = gcBuyRvolWall ? "BUY SUPPORT" : gcSellRvolWall ? "SELL RESIST" : gcHasData ? "NO LEVEL" : "NO DATA"
-    decisionZoneText = buyTunnelLocationOk ? "BUY TUNNEL" : sellTunnelLocationOk ? "SELL TUNNEL" : buyDirectionalZone ? "BUY PRZ" : sellDirectionalZone ? "SELL PRZ" : ambiguousLocation ? "OVERLAP WAIT" : "MID NO ENTRY"
+    // Location is not direction. Demand/Supply may be a target or a blocked
+    // candidate until the asymmetric H1 source, structure and HA15 #2 agree.
+    decisionZoneText = buyTunnelLocationOk ? "LOWER TUNNEL" : sellTunnelLocationOk ? "UPPER TUNNEL" : buyDirectionalZone ? "DEMAND PRZ" : sellDirectionalZone ? "SUPPLY PRZ" : ambiguousLocation ? "OVERLAP WAIT" : "MID NO ENTRY"
     table.cell(dashboard, 0, 0, "ALPHA BUFF", text_color=color.white, bgcolor=color.rgb(40, 40, 40))
     table.cell(dashboard, 1, 0, "PINE v2.4.2", text_color=color.yellow, bgcolor=color.rgb(40, 40, 40))
     table.cell(dashboard, 0, 1, "Market / TF", text_color=color.white)
@@ -1228,7 +1230,7 @@ if showDashboard and barstate.islast
     table.cell(dashboard, 0, 8, "Fib profile", text_color=color.white)
     table.cell(dashboard, 1, 8, (isAsia ? "ASIA " : "DEEP ") + str.tostring(fibNear, "#.###") + "-" + str.tostring(fibDeep, "#.###"), text_color=color.aqua)
     table.cell(dashboard, 0, 9, "PRZ State", text_color=color.white)
-    table.cell(dashboard, 1, 9, buyPrzBosThrough ? "BUY BOS FAIL" : sellPrzBosThrough ? "SELL BOS FAIL" : buyEntryArmed ? (buyEntryFromTunnel ? "BUY TUNNEL READY" : "BUY PRZ READY") : sellEntryArmed ? (sellEntryFromTunnel ? "SELL TUNNEL READY" : "SELL PRZ READY") : buyGcRvolWallArmed ? "BUY WAIT PA" : sellGcRvolWallArmed ? "SELL WAIT PA" : buyPaZoneArmed ? "BUY WAIT GC RVOL" : sellPaZoneArmed ? "SELL WAIT GC RVOL" : buyTunnelSweepArmed ? "BUY TUNNEL SWEEP" : sellTunnelSweepArmed ? "SELL TUNNEL SWEEP" : buySweepArmed ? "BUY PRZ SWEEP" : sellSweepArmed ? "SELL PRZ SWEEP" : "WAIT", text_color=buyEntryArmed or buyGcRvolWallArmed or buyPaZoneArmed or buyTunnelSweepArmed or buySweepArmed ? color.lime : sellEntryArmed or sellGcRvolWallArmed or sellPaZoneArmed or sellTunnelSweepArmed or sellSweepArmed ? color.red : color.gray)
+    table.cell(dashboard, 1, 9, buyPrzBosThrough ? "BUY BLOCKED: BEAR BOS" : sellPrzBosThrough ? "SELL BLOCKED: BULL BOS" : buyEntryArmed ? (buyEntryFromTunnel ? "BUY TUNNEL READY" : "BUY PRZ READY") : sellEntryArmed ? (sellEntryFromTunnel ? "SELL TUNNEL READY" : "SELL PRZ READY") : buyGcRvolWallArmed ? "BUY WAIT PA" : sellGcRvolWallArmed ? "SELL WAIT PA" : buyPaZoneArmed ? "BUY WAIT GC RVOL" : sellPaZoneArmed ? "SELL WAIT GC RVOL" : buyTunnelSweepArmed ? "BUY TUNNEL SWEEP" : sellTunnelSweepArmed ? "SELL TUNNEL SWEEP" : buySweepArmed ? "BUY PRZ SWEEP" : sellSweepArmed ? "SELL PRZ SWEEP" : "WAIT", text_color=buyEntryArmed or buyGcRvolWallArmed or buyPaZoneArmed or buyTunnelSweepArmed or buySweepArmed ? color.lime : sellEntryArmed or sellGcRvolWallArmed or sellPaZoneArmed or sellTunnelSweepArmed or sellSweepArmed ? color.red : color.gray)
     table.cell(dashboard, 0, 10, "15m Trigger", text_color=color.white)
     table.cell(dashboard, 1, 10, triggerText, text_color=str.contains(triggerText, "BUY") ? color.lime : str.contains(triggerText, "SELL") ? color.red : color.gray)
     table.cell(dashboard, 0, 11, "H1 Entry Source", text_color=color.white)
@@ -1243,7 +1245,7 @@ if showDashboard and barstate.islast
     table.cell(dashboard, 1, 15, tradeTargetSource + " / SIGNAL ONLY", text_color=tradeTargetSource == "SUPPLY_PRZ" or tradeTargetSource == "DEMAND_PRZ" ? color.aqua : color.gray)
     table.cell(dashboard, 0, 16, "GC Contract RVOL", text_color=color.white)
     table.cell(dashboard, 1, 16, (gcHasData ? str.tostring(gcRvol, "#.##") : "N/A") + " / " + gcPermissionText, text_color=gcBuyRvolWall ? color.lime : gcSellRvolWall ? color.red : color.gray)
-    table.cell(dashboard, 0, 17, "Decision Zone", text_color=color.white)
-    table.cell(dashboard, 1, 17, decisionZoneText, text_color=str.contains(decisionZoneText, "BUY") ? color.lime : str.contains(decisionZoneText, "SELL") ? color.red : color.yellow)
+    table.cell(dashboard, 0, 17, "Location", text_color=color.white)
+    table.cell(dashboard, 1, 17, decisionZoneText, text_color=str.contains(decisionZoneText, "DEMAND") or str.contains(decisionZoneText, "LOWER") ? color.lime : str.contains(decisionZoneText, "SUPPLY") or str.contains(decisionZoneText, "UPPER") ? color.red : color.yellow)
 
 // Create one TradingView alert using: Condition -> "Any alert() function call".
