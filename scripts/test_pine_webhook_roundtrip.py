@@ -138,6 +138,65 @@ def main() -> None:
             )
             assert open_ack.status_code == 200, open_ack.text
 
+            # Pine owns entries, but after the OPEN ACK the durable Python
+            # lifecycle must still be allowed to issue TP1/BE/HA-exit commands.
+            # Broker suffixes remain the position key while market-data calls
+            # use the canonical Twelve Data symbol.
+            originals = {
+                "has_active": service.execution_lifecycle.has_active,
+                "pending_command": service.execution_lifecycle.pending_command,
+                "evaluate": service.execution_lifecycle.evaluate,
+                "fetch": service._fetch_cached_tf,
+                "latest": service._latest_market_price,
+                "m5": service.fetch_management_m5,
+            }
+            observed = {}
+            try:
+                service.execution_lifecycle.has_active = lambda symbol: True
+                service.execution_lifecycle.pending_command = lambda symbol: {
+                    "action": "HOLD",
+                    "reason": "NO_PENDING_COMMAND",
+                    "symbol": symbol,
+                }
+                service._fetch_cached_tf = lambda symbol, interval, outputsize=200: (
+                    observed.setdefault("data_15m", (symbol, interval)) or None
+                )
+                service._latest_market_price = lambda frame: 4130.0
+                service.fetch_management_m5 = lambda symbol: observed.setdefault(
+                    "data_m5", symbol
+                )
+                service.execution_lifecycle.evaluate = (
+                    lambda symbol, price, frame: {
+                        "command_id": "XAUUSD-E2E-BUY-001:PARTIAL_CLOSE_MOVE_BE:1",
+                        "action": "PARTIAL_CLOSE_MOVE_BE",
+                        "reason": "TP1_HIT",
+                        "symbol": symbol,
+                        "signal_id": "XAUUSD-E2E-BUY-001",
+                        "ticket": "MT5-TEST-1",
+                        "direction": "BUY",
+                        "close_pct": 50.0,
+                        "new_sl": 4120.0,
+                        "remaining_pct": 100.0,
+                    }
+                )
+                managed = client.get(
+                    "/execution/command",
+                    params={"key": "PINE_TEST_KEY", "symbol": BROKER_SYMBOL},
+                )
+                assert managed.status_code == 200, managed.text
+                assert managed.json()["source"] == "LIFECYCLE"
+                assert managed.json()["command"]["action"] == "PARTIAL_CLOSE_MOVE_BE"
+                assert managed.json()["command"]["symbol"] == BROKER_SYMBOL
+                assert observed["data_15m"] == ("XAU/USD", "15min")
+                assert observed["data_m5"] == "XAU/USD"
+            finally:
+                service.execution_lifecycle.has_active = originals["has_active"]
+                service.execution_lifecycle.pending_command = originals["pending_command"]
+                service.execution_lifecycle.evaluate = originals["evaluate"]
+                service._fetch_cached_tf = originals["fetch"]
+                service._latest_market_price = originals["latest"]
+                service.fetch_management_m5 = originals["m5"]
+
             closed = client.post("/webhook/tv", json=payload("CLOSE"))
             assert closed.status_code == 200, closed.text
             close_command = closed.json()["command"]
@@ -189,6 +248,8 @@ def main() -> None:
     print("PASS Pine OPEN webhook becomes one EA OPEN command")
     print("PASS broker symbol suffix resolves to the TradingView XAUUSD command")
     print("PASS EA fill survives relay restart and command ACK is accepted")
+    print("PASS Pine mode delegates active-position TP/BE/HA exits to lifecycle")
+    print("PASS broker symbol state uses canonical XAU/USD management data")
     print("PASS Pine CLOSE becomes EA CLOSE_ALL")
     print("PASS CLOSE ACK clears durable execution state")
     print("PASS CLOSE ACK promotes the queued reverse SELL OPEN")
@@ -196,7 +257,7 @@ def main() -> None:
     print("PASS Pine CLOSE and confirmed MT5 fill are visible in Telegram")
     print("PASS Telegram health exposes relay and pending-command state safely")
     print("PASS Python mode rejects Pine webhook ownership")
-    print("Summary: 10/10 webhook round-trip checks passed")
+    print("Summary: 12/12 webhook round-trip checks passed")
 
 
 if __name__ == "__main__":
