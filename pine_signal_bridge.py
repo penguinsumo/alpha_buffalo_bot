@@ -36,7 +36,7 @@ def _symbol(value: Any) -> str:
     symbol = symbol.replace("/", "")
     # TradingView emits the canonical ticker (XAUUSD), while MT5 brokers often
     # append an account-specific suffix such as XAUUSD-VIP, XAUUSD.m or
-    # XAUUSDpro. The bridge is a gold-only relay, so all of those broker
+    # XAUUSDpro.  The bridge is a gold-only relay, so all of those broker
     # symbols must address the same durable Pine command.
     if symbol.startswith("XAUUSD"):
         return "XAUUSD"
@@ -48,9 +48,23 @@ class PineSignalError(ValueError):
 
 
 class PineSignalBridge:
-    def __init__(self, state_file: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        state_file: str | Path | None = None,
+        *,
+        accepted_source: str = "PINE",
+        command_prefix: str = "PINE",
+        command_owner: str = "PINE_TRADINGVIEW",
+        open_ttl_env: str = "ALPHA_PINE_OPEN_TTL_SECONDS",
+        close_ttl_env: str = "ALPHA_PINE_CLOSE_TTL_SECONDS",
+    ) -> None:
         self._lock = threading.RLock()
         self._state_file = Path(state_file) if state_file else None
+        self._accepted_source = str(accepted_source or "PINE").upper()
+        self._command_prefix = str(command_prefix or self._accepted_source).upper()
+        self._command_owner = str(command_owner or self._accepted_source).upper()
+        self._open_ttl_env = open_ttl_env
+        self._close_ttl_env = close_ttl_env
         self._pending: dict[str, dict[str, Any]] = {}
         self._acked: dict[str, dict[str, Any]] = {}
         self._load()
@@ -95,8 +109,8 @@ class PineSignalBridge:
         }
         return aliases.get(action, action)
 
-    @staticmethod
     def _reverse_open_command(
+        self,
         payload: Mapping[str, Any],
         *,
         symbol: str,
@@ -131,13 +145,13 @@ class PineSignalBridge:
             score = int(float(payload.get("reverse_score") or 0))
         except (TypeError, ValueError):
             score = 0
-        open_ttl = max(30, int(os.getenv("ALPHA_PINE_OPEN_TTL_SECONDS", "300")))
-        command_id = f"PINE:{reverse_signal_id}:OPEN"
+        open_ttl = max(30, int(os.getenv(self._open_ttl_env, "300")))
+        command_id = f"{self._command_prefix}:{reverse_signal_id}:OPEN"
         return {
             "command_id": command_id,
             "action": "OPEN",
-            "source": "PINE",
-            "command_owner": "PINE_TRADINGVIEW",
+            "source": self._accepted_source,
+            "command_owner": self._command_owner,
             "symbol": symbol,
             "signal_id": reverse_signal_id,
             "direction": reverse_direction,
@@ -164,8 +178,8 @@ class PineSignalBridge:
         """Validate one final Pine command and queue it exactly once."""
         if str(payload.get("status") or "").upper() != SIGNAL:
             raise PineSignalError("ONLY_SIGNAL_STATUS_ACCEPTED")
-        if str(payload.get("source") or "").upper() != "PINE":
-            raise PineSignalError("ONLY_PINE_SOURCE_ACCEPTED")
+        if str(payload.get("source") or "").upper() != self._accepted_source:
+            raise PineSignalError(f"ONLY_{self._accepted_source}_SOURCE_ACCEPTED")
 
         action = self._normalize_action(payload.get("action"))
         if action not in {"OPEN", "CLOSE"}:
@@ -193,21 +207,21 @@ class PineSignalBridge:
             raise PineSignalError("INVALID_CLOSE_ENTRY")
 
         command_action = "OPEN" if action == "OPEN" else "CLOSE_ALL"
-        command_id = f"PINE:{signal_id}:{command_action}"
+        command_id = f"{self._command_prefix}:{signal_id}:{command_action}"
         try:
             score = int(float(payload.get("score") or 0))
         except (TypeError, ValueError):
             score = 0
 
         now = time.time()
-        open_ttl = max(30, int(os.getenv("ALPHA_PINE_OPEN_TTL_SECONDS", "300")))
-        close_ttl = max(300, int(os.getenv("ALPHA_PINE_CLOSE_TTL_SECONDS", "3600")))
+        open_ttl = max(30, int(os.getenv(self._open_ttl_env, "300")))
+        close_ttl = max(300, int(os.getenv(self._close_ttl_env, "3600")))
         received_at = _iso_now()
         command = {
             "command_id": command_id,
             "action": command_action,
-            "source": "PINE",
-            "command_owner": "PINE_TRADINGVIEW",
+            "source": self._accepted_source,
+            "command_owner": self._command_owner,
             "symbol": symbol,
             "signal_id": signal_id,
             "direction": direction,
@@ -236,6 +250,11 @@ class PineSignalBridge:
                 command["after_ack"] = after_ack
 
         with self._lock:
+            existing = self._pending.get(symbol)
+            if existing and time.time() > float(existing.get("expires_at_epoch") or 0):
+                del self._pending[symbol]
+                existing = None
+                self._save()
             if command_id in self._acked:
                 acknowledged = dict(self._acked[command_id])
                 return {
@@ -247,7 +266,6 @@ class PineSignalBridge:
                     "acknowledged": acknowledged,
                 }
 
-            existing = self._pending.get(symbol)
             if existing and existing.get("command_id") == command_id:
                 return dict(existing)
             if existing and action == "OPEN":
@@ -280,7 +298,7 @@ class PineSignalBridge:
             return dict(command)
 
     def owns(self, command_id: str) -> bool:
-        return str(command_id or "").startswith("PINE:")
+        return str(command_id or "").startswith(f"{self._command_prefix}:")
 
     def acknowledge(
         self,
@@ -326,6 +344,8 @@ class PineSignalBridge:
 def build_pine_api_payload(command: Mapping[str, Any]) -> dict[str, Any]:
     """Expose the existing canonical schema while keeping EA execution-only."""
     action = str(command.get("action") or "HOLD").upper()
+    source = str(command.get("source") or "PINE").upper()
+    command_owner = str(command.get("command_owner") or "PINE_TRADINGVIEW")
     direction = str(command.get("direction") or "NONE").upper()
     entry = _number(command.get("entry"))
     sl = _number(command.get("sl"))
@@ -392,18 +412,18 @@ def build_pine_api_payload(command: Mapping[str, Any]) -> dict[str, Any]:
         "setup_ok": action == "OPEN",
         "zone_ok": action == "OPEN",
         "vsa_gate_ok": action == "OPEN",
-        "command_owner": "PINE_TRADINGVIEW",
+        "command_owner": command_owner,
         "ea_role": "EXECUTION_ONLY",
         "ea_execute_only": True,
     }
     return {
         **contract,
         "symbol": command.get("symbol"),
-        "source": "PINE",
+        "source": source,
         "signal": {
             **contract,
             "symbol": command.get("symbol"),
-            "source": "PINE",
+            "source": source,
             "target_source": command.get("target_source"),
             "timestamp": command.get("received_at"),
         },
