@@ -20,6 +20,7 @@ from telegram_guard import guarded_telegram_post, telegram_market_is_open
 from engine_v4.session_gate import SessionGate
 from execution_lifecycle import execution_lifecycle
 from pine_signal_bridge import (
+    PineSignalBridge,
     PineSignalError,
     build_pine_api_payload,
     pine_signal_bridge,
@@ -73,6 +74,17 @@ API_LICENSE_KEY = os.getenv("ALPHA_API_KEY", os.getenv("LICENSE_KEY", "DEMO123")
 SIGNAL_SOURCE = os.getenv("ALPHA_SIGNAL_SOURCE", "PYTHON").strip().upper()
 if SIGNAL_SOURCE not in {"PYTHON", "PINE", "HYBRID"}:
     SIGNAL_SOURCE = "PYTHON"
+python_signal_bridge = PineSignalBridge(
+    os.getenv(
+        "ALPHA_PYTHON_BRIDGE_STATE_FILE",
+        "/tmp/alpha_buffalo_python_bridge.json",
+    ),
+    accepted_source="PYTHON",
+    command_prefix="PYTHON",
+    command_owner="PYTHON_CLOUD",
+    open_ttl_env="ALPHA_PYTHON_OPEN_TTL_SECONDS",
+    close_ttl_env="ALPHA_PYTHON_CLOSE_TTL_SECONDS",
+)
 REQUIRE_HARMONIC_BIAS = os.getenv(
     "ALPHA_REQUIRE_HARMONIC_BIAS", "true"
 ).lower() in {"1", "true", "yes", "on"}
@@ -2067,12 +2079,51 @@ def _get_latest_signal() -> dict:
         return dict(LATEST_SIGNAL_CACHE)
 
 
+def _publish_python_entry_command(payload: Dict) -> Dict:
+    """Queue one confirmed Python OPEN for the execution-only EA."""
+    if SIGNAL_SOURCE not in {"PYTHON", "HYBRID"}:
+        return {"action": "HOLD", "reason": "PYTHON_SIGNAL_MODE_DISABLED"}
+
+    ea = dict(payload.get("ea") or {})
+    if ea.get("action") != "OPEN" or ea.get("execution_state") != "READY":
+        return {"action": "HOLD", "reason": "NO_READY_PYTHON_SIGNAL"}
+
+    command_payload = {
+        "status": "SIGNAL",
+        "source": "PYTHON",
+        "strategy": "ALPHABUFF_V12_BASELINE",
+        "action": "OPEN",
+        "direction": ea.get("direction"),
+        "symbol": ea.get("symbol") or payload.get("symbol") or PUBLIC_SYMBOL_DEFAULT,
+        "signal_id": ea.get("signal_id"),
+        "entry_price": ea.get("entry"),
+        "exit_price": None,
+        "sl_price": ea.get("sl"),
+        "tp1_price": ea.get("tp1"),
+        "tp2_price": ea.get("tp_final"),
+        "score": ea.get("score", 0),
+        "target_source": ea.get("target_source", "PYTHON_BASELINE"),
+        "reason": ea.get("reason", "PYTHON_FINAL_SIGNAL"),
+        "timeframe": "15",
+    }
+    try:
+        return python_signal_bridge.ingest(command_payload)
+    except PineSignalError as exc:
+        print(
+            "AlphaBuffalo Python command queue blocked | "
+            f"signal_id={ea.get('signal_id')} reason={exc}",
+            flush=True,
+        )
+        return {"action": "HOLD", "reason": str(exc)}
+
+
 def _cloud_signal_loop() -> None:
     print(f"AlphaBuffalo cloud signal loop started | interval={SIGNAL_LOOP_INTERVAL_SECONDS}s", flush=True)
     while True:
         try:
             payload = run_pipeline()
             _set_latest_signal(payload)
+            queued = _publish_python_entry_command(payload)
             maybe_broadcast_signal(payload)
             maybe_broadcast_trend_update(payload)
             decision = payload.get("signal", {}).get("decision", {})
@@ -2080,7 +2131,8 @@ def _cloud_signal_loop() -> None:
             print(
                 f"AlphaBuffalo cloud scan | action={decision.get('action')} "
                 f"grade={decision.get('grade')} score={decision.get('score')} "
-                f"ea={ea.get('action')} state={ea.get('execution_state')}",
+                f"ea={ea.get('action')} state={ea.get('execution_state')} "
+                f"queue={queued.get('action')} queue_reason={queued.get('reason', '')}",
                 flush=True,
             )
         except Exception as exc:
@@ -2201,7 +2253,11 @@ def telegram_status(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
     public_symbol = str(symbol or PUBLIC_SYMBOL_DEFAULT).replace("/", "").upper()
     with LAST_TELEGRAM_LOCK:
         delivery = dict(TELEGRAM_DELIVERY_STATUS)
-    pending = pine_signal_bridge.pending_command(public_symbol)
+    pending = (
+        pine_signal_bridge.pending_command(public_symbol)
+        if SIGNAL_SOURCE == "PINE"
+        else python_signal_bridge.pending_command(public_symbol)
+    )
     return {
         "status": "ok",
         "signal_source": SIGNAL_SOURCE,
@@ -2251,6 +2307,7 @@ def signal_latest(key: str = "", symbol: str = SYMBOL_DEFAULT):
 
     payload = run_pipeline(symbol=symbol, public_symbol=public_symbol)
     _set_latest_signal(payload)
+    _publish_python_entry_command(payload)
     return payload
 
 
@@ -2263,6 +2320,11 @@ def execution_state(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
         "status": "ok",
         "symbol": public_symbol,
         "position": execution_lifecycle.position(public_symbol),
+        "entry_command": (
+            python_signal_bridge.pending_command(public_symbol)
+            if SIGNAL_SOURCE in {"PYTHON", "HYBRID"}
+            else pine_signal_bridge.pending_command(public_symbol)
+        ),
         "pending_command": execution_lifecycle.pending_command(public_symbol),
         "risk_permissions": execution_lifecycle.risk_permissions(public_symbol),
     }
@@ -2297,6 +2359,24 @@ async def execution_fill(request: Request):
                 "sl": durable_pine_plan.get("sl"),
                 "tp1": durable_pine_plan.get("tp1"),
                 "tp_final": durable_pine_plan.get("tp_final"),
+            }
+    if SIGNAL_SOURCE in {"PYTHON", "HYBRID"} and (
+        plan.get("action") != "OPEN"
+        or str(plan.get("signal_id") or "") != signal_id
+    ):
+        durable_python_plan = python_signal_bridge.pending_command(public_symbol)
+        if (
+            durable_python_plan.get("action") == "OPEN"
+            and str(durable_python_plan.get("signal_id") or "") == signal_id
+        ):
+            plan = {
+                "signal_id": durable_python_plan.get("signal_id"),
+                "action": "OPEN",
+                "execution_state": "READY",
+                "direction": durable_python_plan.get("direction"),
+                "sl": durable_python_plan.get("sl"),
+                "tp1": durable_python_plan.get("tp1"),
+                "tp_final": durable_python_plan.get("tp_final"),
             }
     if (
         not signal_id
@@ -2338,21 +2418,24 @@ def execution_command(key: str = "", symbol: str = SYMBOL_DEFAULT):
     if not verify_license(key):
         raise HTTPException(status_code=403, detail="INVALID_LICENSE")
     public_symbol = symbol.replace("/", "")
-    pine_command = pine_signal_bridge.pending_command(public_symbol)
-    if pine_command.get("action") != "HOLD":
-        return {"status": "ok", "source": "PINE", "command": pine_command}
+    pine_command = {"action": "HOLD", "reason": "PINE_SIGNAL_MODE_DISABLED"}
+    if SIGNAL_SOURCE in {"PINE", "HYBRID"}:
+        pine_command = pine_signal_bridge.pending_command(public_symbol)
+        if pine_command.get("action") != "HOLD":
+            return {"status": "ok", "source": "PINE", "command": pine_command}
 
     if not execution_lifecycle.has_active(public_symbol):
         if SIGNAL_SOURCE == "PINE":
             return {"status": "ok", "source": "PINE", "command": pine_command}
-        return {"status": "ok", "command": execution_lifecycle.pending_command(public_symbol)}
+        python_command = python_signal_bridge.pending_command(public_symbol)
+        return {"status": "ok", "source": "PYTHON", "command": python_command}
 
     pending = execution_lifecycle.pending_command(public_symbol)
     if pending.get("action") != "HOLD":
         return {"status": "ok", "command": pending}
 
     # MT5 passes the broker's tradable symbol (for example XAUUSD-STDc), but
-    # Twelve Data expects the canonical market symbol. Position state remains
+    # Twelve Data expects the canonical market symbol.  Position state remains
     # keyed by the broker symbol while management candles use XAU/USD.
     data_symbol = SYMBOL_DEFAULT if public_symbol.upper().startswith("XAUUSD") else symbol
     df_15m = _fetch_cached_tf(data_symbol, "15min")
@@ -2400,6 +2483,23 @@ async def execution_ack(request: Request):
             "position": close_state,
             "next_command": promoted_command,
             "telegram_notified": telegram_notified,
+        }
+
+    if python_signal_bridge.owns(command_id):
+        try:
+            result = python_signal_bridge.acknowledge(
+                symbol=public_symbol,
+                command_id=command_id,
+                success=body.get("success") is True,
+            )
+        except PineSignalError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "status": "accepted",
+            "source": "PYTHON",
+            "result": result,
+            "position": execution_lifecycle.position(public_symbol),
+            "telegram_notified": False,
         }
 
     try:
