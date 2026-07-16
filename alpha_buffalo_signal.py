@@ -2341,23 +2341,27 @@ def execution_command(key: str = "", symbol: str = SYMBOL_DEFAULT):
     pine_command = pine_signal_bridge.pending_command(public_symbol)
     if pine_command.get("action") != "HOLD":
         return {"status": "ok", "source": "PINE", "command": pine_command}
-    if SIGNAL_SOURCE == "PINE":
-        return {"status": "ok", "source": "PINE", "command": pine_command}
 
     if not execution_lifecycle.has_active(public_symbol):
+        if SIGNAL_SOURCE == "PINE":
+            return {"status": "ok", "source": "PINE", "command": pine_command}
         return {"status": "ok", "command": execution_lifecycle.pending_command(public_symbol)}
 
     pending = execution_lifecycle.pending_command(public_symbol)
     if pending.get("action") != "HOLD":
         return {"status": "ok", "command": pending}
 
-    df_15m = _fetch_cached_tf(symbol, "15min")
+    # MT5 passes the broker's tradable symbol (for example XAUUSD-STDc), but
+    # Twelve Data expects the canonical market symbol. Position state remains
+    # keyed by the broker symbol while management candles use XAU/USD.
+    data_symbol = SYMBOL_DEFAULT if public_symbol.upper().startswith("XAUUSD") else symbol
+    df_15m = _fetch_cached_tf(data_symbol, "15min")
     command = execution_lifecycle.evaluate(
         public_symbol,
         _latest_market_price(df_15m),
-        fetch_management_m5(symbol),
+        fetch_management_m5(data_symbol),
     )
-    return {"status": "ok", "command": command}
+    return {"status": "ok", "source": "LIFECYCLE", "command": command}
 
 
 @app.post("/execution/ack")
