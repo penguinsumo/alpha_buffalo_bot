@@ -107,7 +107,9 @@ def main() -> None:
         assert acknowledged.status_code == 200, acknowledged.text
         assert acknowledged.json()["source"] == "PYTHON"
         assert acknowledged.json()["result"]["acknowledged"] is True
-        assert service.python_signal_bridge.pending_command(BROKER_SYMBOL)["action"] == "HOLD"
+        idle = service.python_signal_bridge.pending_command(BROKER_SYMBOL)
+        assert idle["action"] == "HOLD"
+        assert idle["reason"] == "NO_PENDING_PYTHON_COMMAND"
 
         duplicate = service._publish_python_entry_command(payload)
         assert duplicate["action"] == "HOLD"
@@ -118,7 +120,8 @@ def main() -> None:
     print("PASS pending Python OPEN survives a relay restart")
     print("PASS EA fill registers the broker position lifecycle")
     print("PASS Python OPEN ACK clears the entry command exactly once")
-    print("Summary: 5/5 Python execution round-trip checks passed")
+    print("PASS idle Python mode never reports a Pine-owned wait reason")
+    print("Summary: 6/6 Python execution round-trip checks passed")
 
 
 if __name__ == "__main__":

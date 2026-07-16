@@ -271,7 +271,7 @@ class PineSignalBridge:
             if existing and action == "OPEN":
                 raise PineSignalError("PENDING_COMMAND_EXISTS")
 
-            # A Pine CLOSE supersedes an unfilled OPEN for the same symbol.  The
+            # A source-owned CLOSE supersedes an unfilled OPEN for the same symbol.  The
             # EA treats CLOSE_ALL as close-if-present and no-ops when flat.
             self._pending[symbol] = command
             self._save()
@@ -284,7 +284,7 @@ class PineSignalBridge:
             if not command:
                 return {
                     "action": "HOLD",
-                    "reason": "NO_PENDING_PINE_COMMAND",
+                    "reason": f"NO_PENDING_{self._accepted_source}_COMMAND",
                     "symbol": public_symbol,
                 }
             if time.time() > float(command.get("expires_at_epoch") or 0):
@@ -292,7 +292,7 @@ class PineSignalBridge:
                 self._save()
                 return {
                     "action": "HOLD",
-                    "reason": "PINE_COMMAND_EXPIRED",
+                    "reason": f"{self._accepted_source}_COMMAND_EXPIRED",
                     "symbol": public_symbol,
                 }
             return dict(command)
@@ -313,9 +313,9 @@ class PineSignalBridge:
                 return dict(self._acked[command_id])
             command = self._pending.get(public_symbol)
             if not command:
-                raise PineSignalError("NO_PENDING_PINE_COMMAND")
+                raise PineSignalError(f"NO_PENDING_{self._accepted_source}_COMMAND")
             if command_id != command.get("command_id"):
-                raise PineSignalError("PINE_COMMAND_ID_MISMATCH")
+                raise PineSignalError(f"{self._accepted_source}_COMMAND_ID_MISMATCH")
             if not success:
                 result = dict(command)
                 result["retry"] = True
