@@ -1,160 +1,52 @@
-# Alpha Buffalo Final Runtime Map
+# Alpha Buffalo Frozen Runtime Map
 
-This map defines which files are currently active in production and which files are research-only.
+This document is the production source map for the frozen `v12-core` runtime.
+Files not listed here are not deployment entry points.
 
-## Production Entry Point
+## Deployment
 
-`alpha_buffalo_signal.py`
+- FastAPI entry point: `alpha_buffalo_signal.py`
+- Railway command: `uvicorn alpha_buffalo_signal:app`
+- Signal contract: `signal_schema.py`
+- Market/session guard: `session_clock.py`, `telegram_guard.py`
+- Execution lifecycle: `execution_lifecycle.py`, `pine_signal_bridge.py`
+- Active MT5 executor: `mt5/AlphaBuffalo_CloudEA_ExecutionOnly_v304.mq5`
+- Pine compatibility source: `tradingview/alpha_buff_gold_analyzer_v2_4.pine`
 
-Responsibilities:
+## Trading Runtime
 
-- FastAPI app
-- market data fetch/cache
-- v12 scanner/composer adapter
-- engine_v4 runtime bridge
-- EA payload mapping
-- public Telegram formatting
-- background cloud scan loop
+- `engine_v4/router.py`
+- `engine_v4/buy_engine.py`
+- `engine_v4/sell_engine.py`
+- `engine_v4/final_gate.py`
+- `engine_v4/session_gate.py`
+- `engine_v4/harmonic_bias_gate.py`
+- `engine_v4/indicators.py`
 
-## Active V4 Runtime
+The V4 engines share one signal schema. `SIGNAL` is a status; `BUY` and `SELL`
+are directions. RR and directional price validation still decide EA readiness.
 
-`engine_v4/indicators.py`
+## Context and Newday
 
-- Bollinger Bands
-- ATR
-- HA / pinbar proxies
-- Pine PRZ support/resistance
-- VSA pressure proxy
-- V4 buy/sell setup flags
-- lower-zone sell block
-- upper-zone buy block
+- `scenario_blueprint.py`
+- `scenario_scanner.py`
+- `decision_engine.py`
+- `signal_composer.py`
+- `harmonic_detector.py`
+- `kivanc_vsaob.py`
+- `scripts/daily_market_scan.py`
+- `core/models/newday_market_map.py`
 
-`engine_v4/router.py`
+## Supported Checks
 
-- scans recent bars
-- calls buy/sell engines
-- ranks location-first candidates
-- enriches V4 vs V5 journey metadata
+- `scripts/alpha_regression_suite.py`
+- `scripts/test_python_execution_roundtrip.py`
+- `scripts/test_pine_webhook_roundtrip.py`
+- `scripts/test_pine_ea_bridge.py`
+- `scripts/test_harmonic_webhook_gate.py`
+- `scripts/test_harmonic_projection_bias.py`
+- `scripts/test_harmonic_newday_route.py`
+- `scripts/check_pine_v2_4.py`
 
-`engine_v4/buy_engine.py`
-
-- BUY candidate creation
-- lower-zone V4 setup
-- local SL
-- BB mid / BB upper target path
-- RR computation
-
-`engine_v4/sell_engine.py`
-
-- SELL candidate creation
-- lower-zone SELL veto
-- upper-zone V4 setup
-- continuation-only trend filter
-- local SL
-- BB lower / signal TP target path
-- RR computation
-
-`engine_v4/final_gate.py`
-
-- session / timing gate
-- BUY session constraints
-- SELL permissive gate unless risk state blocks it
-
-`engine_v4/session_gate.py`
-
-- legacy gate result model
-- kept because active engines import `GateResult`
-
-## Active Higher-Level Context
-
-`scenario_scanner.py`
-
-- market phase/context
-- harmonic/newday market map context
-- log line explaining scanner state
-
-`signal_composer.py`
-
-- compatibility composer for v12 payload
-- should remain adapter-level, not primary V4 entry logic
-
-`decision_engine.py`
-
-- v12 decision context
-- can produce fallback WAIT context
-- must not replace engine_v4 as V4 entry source
-
-## Customer Output
-
-`alpha_buffalo_signal.py`
-
-- `format_telegram_signal`
-- `format_telegram_trend_update`
-
-These functions are public-facing. Keep internals hidden.
-
-## Research / Mine Later
-
-`trade_manager.py`
-
-- valuable V4 scalp / V5 runner lifecycle
-- port after regression tests
-
-`v10_modules/layer4_risk_gate.py`
-
-- ATR/chop/daily loss/consecutive loss concepts
-- port concepts, not file
-
-`v10_modules/layer5_position_sizer.py`
-
-- risk-based sizing
-- drawdown-based leverage reduction
-- port concepts, not file
-
-`v10_modules/layer8_performance.py`
-
-- equity curve / max DD / walk-forward score
-- good candidate for telemetry
-
-`research_engine_v112_v4_pro.py`
-
-- useful idea: vectorized backtest + Monte Carlo
-- not production
-- needs secrets removed before reuse
-
-## Older Branch / Zip Sources
-
-Remote branches available through local git:
-
-- `main`
-- `feature/cleanup-signal-v5`
-- `feature/engine-v4`
-- `sell-micro-v4-2`
-- `v12-core`
-
-Local beta source:
-
-- `/Users/mac/AlphaBuffalo_v5.3_Beta`
-
-Zip sources:
-
-- `alpha_buffalo_bot-feature-engine-v4.zip`
-- `alpha_buffalo_bot-sell-micro-v4-2.zip`
-- `alpha_buffalo_bot-main.zip`
-- `alpha_buffalo_bot-12-core*.zip`
-
-Use them as references only.
-
-## Baseline Evidence
-
-`BASELINE_TESTS.md`
-
-- records the old Risk Gate `811 -> 770 -> 41` baseline
-- separates it from `trade_evidence.json`
-- documents why the old live-data scripts must be frozen into fixtures before CI
-
-`ALPHA_FUSION_CONTRACT.md`
-
-- records what to mine from older branches
-- locks the final PRZ/location-first strategy spine
-- lists red lines that must not return to production
+Historical research, superseded EAs, experimental engines, and ad-hoc backtests
+were removed from the production tree. They remain recoverable from Git history.

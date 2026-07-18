@@ -1377,7 +1377,6 @@ def test_every_repository_telegram_sender_uses_central_closed_gate() -> None:
             "alpha_buffalo_signal.py",
             "early_warning.py",
             "telegram_bot.py",
-            "scripts/friday_sim.py",
         ):
             source = (ROOT / relative).read_text(encoding="utf-8")
             assert_true("guarded_telegram_post" in source, f"{relative} central sender")

@@ -1,11 +1,8 @@
-requests
-pandas
-numpy
-supabase
-python-dotenv
 fastapi
-uvicorn[standard]
+httpx
+numpy
+pandas
 pydantic
-yfinance>=0.2.0
+python-dotenv
 requests
-aiohttp>=3.9.0
+uvicorn[standard]
