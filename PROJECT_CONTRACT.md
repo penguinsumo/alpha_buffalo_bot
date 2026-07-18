@@ -5,7 +5,7 @@ Do not override it with older branch behavior unless a regression test proves th
 
 ## Production Base
 
-- Runtime repo: `/Users/mac/alpha_buffalo_bot`
+- Runtime repo: `penguinsumo/alpha_buffalo_bot`
 - Branch: `v12-core`
 - Procfile: `web: uvicorn alpha_buffalo_signal:app --host 0.0.0.0 --port ${PORT}`
 - Production service: `alphabuffalobot-production.up.railway.app`
