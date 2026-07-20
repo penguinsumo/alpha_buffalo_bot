@@ -9,6 +9,22 @@ import requests
 from session_clock import SessionClock
 
 
+TELEGRAM_DISCLAIMER = (
+    'Disclaimer: For educational and system operations only. Content is provided '
+    '"as-is" with no guarantee of accuracy or completeness. It does not constitute '
+    'financial advice or a solicitation to buy/sell securities, digital assets, or '
+    'financial products. Use at your own risk.'
+)
+
+
+def ensure_telegram_disclaimer(text: str) -> str:
+    """Return one canonical footer for every outbound Telegram message."""
+    body = str(text or "").rstrip()
+    if TELEGRAM_DISCLAIMER in body:
+        return body
+    return f"{body}\n\n{TELEGRAM_DISCLAIMER}" if body else TELEGRAM_DISCLAIMER
+
+
 def telegram_market_is_open(
     *,
     payload_session: str = "",
@@ -30,9 +46,16 @@ def guarded_telegram_post(
     payload_session: str = "",
     now: datetime | None = None,
     post: Callable[..., Any] | None = None,
+    allow_closed_test: bool = False,
 ):
-    """Make a Telegram POST only after the centralized market-hours gate."""
-    if not telegram_market_is_open(payload_session=payload_session, now=now):
+    """Post after the market gate, except an explicit authenticated TEST send."""
+    if (
+        not allow_closed_test
+        and not telegram_market_is_open(payload_session=payload_session, now=now)
+    ):
         return None
     sender = post or requests.post
-    return sender(url, json=json, timeout=timeout)
+    payload = dict(json)
+    if "text" in payload:
+        payload["text"] = ensure_telegram_disclaimer(payload["text"])
+    return sender(url, json=payload, timeout=timeout)
