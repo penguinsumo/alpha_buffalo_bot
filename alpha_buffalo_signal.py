@@ -1,3 +1,4 @@
+# Railway deployment revision: 20260721T063218Z
 from __future__ import annotations
 
 import html
