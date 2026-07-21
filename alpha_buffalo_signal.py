@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 import time
 import threading
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Dict, Tuple
 
 import pandas as pd
@@ -16,8 +18,13 @@ from scenario_scanner import ScenarioScanner
 from signal_composer import SignalComposer
 from signal_schema import BLOCKED, ERROR, NO_SIGNAL, SIGNAL, create_signal
 from session_clock import SessionClock
-from telegram_guard import guarded_telegram_post, telegram_market_is_open
-from engine_v4.session_gate import SessionGate
+from telegram_guard import (
+    TELEGRAM_DISCLAIMER,
+    ensure_telegram_disclaimer,
+    guarded_telegram_post,
+    telegram_market_is_open,
+)
+from engine_v4.session_gate import GateResult, SessionGate
 from execution_lifecycle import execution_lifecycle
 from pine_signal_bridge import (
     PineSignalBridge,
@@ -85,8 +92,13 @@ python_signal_bridge = PineSignalBridge(
     open_ttl_env="ALPHA_PYTHON_OPEN_TTL_SECONDS",
     close_ttl_env="ALPHA_PYTHON_CLOSE_TTL_SECONDS",
 )
+# Harmonic is production guidance, never a mandatory entry prerequisite.
+# A separate, intentionally named switch keeps the historical hard gate
+# available only for controlled research/backtests.  The deprecated
+# ALPHA_REQUIRE_HARMONIC_BIAS value is deliberately ignored so a stale Railway
+# variable cannot silently block every live order again.
 REQUIRE_HARMONIC_BIAS = os.getenv(
-    "ALPHA_REQUIRE_HARMONIC_BIAS", "true"
+    "ALPHA_STRICT_HARMONIC_RESEARCH_MODE", "false"
 ).lower() in {"1", "true", "yes", "on"}
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_IDS = [
@@ -99,13 +111,18 @@ TELEGRAM_CHAT_IDS = [
     ).split(",")
     if chat_id.strip()
 ]
-TELEGRAM_NOTIFY_WAIT = os.getenv("TELEGRAM_NOTIFY_WAIT", "false").lower() in {"1", "true", "yes", "on"}
+# Only the confirmed-BOS/WAIT-CF state may emit a waiting message.  The old
+# TELEGRAM_NOTIFY_WAIT flag is intentionally ignored because it represented
+# noisy generic WAIT updates in previous deployments.
+TELEGRAM_NOTIFY_WAIT = os.getenv("TELEGRAM_NOTIFY_CONFIRMATION", "true").lower() in {"1", "true", "yes", "on"}
 TELEGRAM_TIMEOUT_SECONDS = float(os.getenv("TELEGRAM_TIMEOUT_SECONDS", "5"))
 TRADE_MIN_RR = float(os.getenv("TRADE_MIN_RR", "1.5"))
 TELEGRAM_MIN_RR = float(os.getenv("TELEGRAM_MIN_RR", str(TRADE_MIN_RR)))
 TELEGRAM_NOTIFY_TREND_UPDATE = os.getenv("TELEGRAM_NOTIFY_TREND_UPDATE", "true").lower() in {"1", "true", "yes", "on"}
-TELEGRAM_NOTIFY_STARTUP = os.getenv("TELEGRAM_NOTIFY_STARTUP", "true").lower() in {"1", "true", "yes", "on"}
-TELEGRAM_NOTIFY_BLOCKED_PINE = os.getenv("TELEGRAM_NOTIFY_BLOCKED_PINE", "true").lower() in {"1", "true", "yes", "on"}
+TELEGRAM_TREND_STATE_FILE = os.getenv(
+    "TELEGRAM_TREND_STATE_FILE",
+    "/tmp/alpha_buffalo_trend_update_state.json",
+).strip()
 TELEGRAM_PINE_MONITOR_ENABLED = os.getenv("TELEGRAM_PINE_MONITOR_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 TELEGRAM_PINE_MONITOR_INTERVAL_SECONDS = max(
     60,
@@ -116,8 +133,9 @@ TELEGRAM_MAX_OPEN_SIGNAL_AGE_SECONDS = max(
     int(os.getenv("TELEGRAM_MAX_OPEN_SIGNAL_AGE_SECONDS", "1800")),
 )
 LAST_TELEGRAM_SIGNAL_KEY = ""
-LAST_TELEGRAM_H1_UPDATE_KEY = ""
-LAST_TELEGRAM_BLOCKED_KEY = ""
+LAST_TELEGRAM_TREND_UPDATE_KEY = ""
+LAST_TELEGRAM_TREND_STATE_LOADED = False
+LAST_TELEGRAM_CONFIRM_KEY = ""
 LAST_TELEGRAM_LOCK = threading.Lock()
 TELEGRAM_DELIVERY_STATUS = {
     "last_attempt_at": "",
@@ -376,6 +394,13 @@ def _harmonic_gate_context(blueprint) -> Dict:
         "current_price": _safe_float(getattr(blueprint, "current_price", 0.0)),
         "tunnel_state": str(getattr(blueprint, "tunnel_state", "NONE") or "NONE").upper(),
         "tunnel_valid": bool(getattr(blueprint, "tunnel_valid", False)),
+        "bos_eligible": bool(getattr(blueprint, "harmonic_bos_eligible", False)),
+        "bos_state": str(getattr(blueprint, "harmonic_bos_state", "WAIT_BOS") or "WAIT_BOS"),
+        "bos_sources": list(getattr(blueprint, "harmonic_bos_sources", []) or []),
+        "bos_direction": str(getattr(blueprint, "harmonic_bos_direction", "NONE") or "NONE"),
+        "bos_primary_timeframe": str(
+            getattr(blueprint, "harmonic_bos_primary_timeframe", "NONE") or "NONE"
+        ),
     }
 
 
@@ -395,23 +420,25 @@ def _live_harmonic_gate_context(public_symbol: str) -> Dict:
 
 
 def _pine_entry_permission(direction: str, public_symbol: str) -> GateResult:
-    """Single production gate for a fresh Pine OPEN (including ACK reverse)."""
+    """Check time/risk for Pine OPEN; harmonic is optional context by default."""
     direction = str(direction or "").upper()
     if direction not in {"BUY", "SELL"}:
         return GateResult(False, "INVALID_ENTRY_DIRECTION")
     if FinalGate is None:
         return GateResult(False, "FINAL_GATE_UNAVAILABLE")
 
-    try:
-        harmonic_context = _live_harmonic_gate_context(public_symbol)
-    except Exception as exc:
-        print(
-            "AlphaBuffalo harmonic entry gate failed | "
-            f"symbol={public_symbol} direction={direction} "
-            f"error={type(exc).__name__}:{exc}",
-            flush=True,
-        )
-        return GateResult(False, "HARMONIC_CONTEXT_UNAVAILABLE")
+    harmonic_context = None
+    if REQUIRE_HARMONIC_BIAS:
+        try:
+            harmonic_context = _live_harmonic_gate_context(public_symbol)
+        except Exception as exc:
+            print(
+                "AlphaBuffalo strict harmonic entry gate failed | "
+                f"symbol={public_symbol} direction={direction} "
+                f"error={type(exc).__name__}:{exc}",
+                flush=True,
+            )
+            return GateResult(False, "HARMONIC_CONTEXT_UNAVAILABLE")
 
     clock = SessionClock()
     risk_permissions = execution_lifecycle.risk_permissions(
@@ -508,7 +535,7 @@ def _engine_v4_gate_state(signal: Dict, direction: str) -> Dict:
     Gate Telegram/EA OPEN using the zone-first engine_v4 setup contract.
     If no engine_v4 overlay exists, keep gates permissive for non-engine WAIT paths.
     """
-    engine = signal.get("engine_v4", {}) or {}
+    engine = dict(signal.get("engine_v4", {}) or {})
     direction = str(direction or signal.get("decision", {}).get("action", "NONE")).upper()
 
     if not engine:
@@ -670,11 +697,11 @@ def _public_side(direction: str) -> tuple[str, str]:
 def _price_zone(center: float, direction: str) -> str:
     if center <= 0:
         return "-"
-    width = max(0.8, center * 0.00025)
+    width = max(2.0, center * 0.00025)
     if str(direction).upper() == "SELL":
-        low, high = center - width * 0.35, center + width * 0.65
+        low, high = center - width, center
     else:
-        low, high = center - width * 0.65, center + width * 0.35
+        low, high = center, center + width
     return f"{low:.1f} - {high:.1f}"
 
 
@@ -692,109 +719,114 @@ def _public_targets(direction: str, entry: float, tp_final: float, engine: Dict)
     return tp1, tp_final
 
 
+def _has_tp2_opportunity(payload: Dict, direction: str, tp1: float, tp2: float) -> bool:
+    """Show TP2 only when the plan has structural/PRZ continuation evidence.
+
+    The targets may still exist internally for risk management.  Telegram uses
+    one TP for a short reaction trade and TP1/TP2 only for a runner that can
+    plausibly continue through a PRZ after aligned BOS/CHoCH evidence.
+    """
+    signal = payload.get("signal", {}) or {}
+    ea = payload.get("ea", {}) or {}
+    engine = dict(signal.get("engine_v4", {}) or {})
+    blueprint = signal.get("blueprint", {}) or {}
+    mode = str(
+        ea.get("telegram_tp_mode")
+        or signal.get("telegram_tp_mode")
+        or ea.get("tp_mode")
+        or signal.get("tp_mode")
+        or ""
+    ).upper()
+    if mode in {"SINGLE", "SINGLE_TP", "SHORT", "SCALP"}:
+        return False
+    if mode in {"DUAL", "TP1_TP2", "RUNNER", "CONTINUATION"}:
+        return True
+
+    direction = str(direction or "").upper()
+    if direction not in {"BUY", "SELL"} or tp1 <= 0 or tp2 <= 0 or abs(tp2 - tp1) < 1e-9:
+        return False
+
+    bos_direction = str(
+        blueprint.get("harmonic_bos_direction")
+        or _deep_get(blueprint, ["harmonic", "bos_direction"], "")
+        or engine.get("bos_direction")
+        or ""
+    ).upper()
+    aligned_bos = bool(
+        ea.get("bos_confirmed")
+        or signal.get("bos_confirmed")
+        or engine.get("bos_confirmed")
+        or blueprint.get("bos_confirmed")
+        or blueprint.get("choch_confirmed")
+        or blueprint.get("harmonic_bos_eligible")
+        or _deep_get(blueprint, ["harmonic", "bos_eligible"], False)
+    ) and bos_direction in {"", "NONE", "MIXED", direction}
+
+    journey = str(
+        ea.get("journey_state")
+        or signal.get("journey_state")
+        or engine.get("journey_state")
+        or ""
+    ).upper()
+    continuation_state = direction in journey and any(
+        token in journey for token in ("V5", "BOS", "CHOCH", "CONTINU")
+    )
+    target_source = str(
+        ea.get("target_source")
+        or signal.get("target_source")
+        or engine.get("target_source")
+        or ""
+    ).upper()
+    prz_route = "PRZ" in target_source and target_source not in {"PRZ_REACTION", "NEAREST_PRZ"}
+    return bool(aligned_bos or continuation_state or prz_route)
+
+
 def format_telegram_signal(payload: Dict) -> str:
-    """Public Telegram trade alert. Keep engine internals out of customer messages."""
+    """Format either the short one-TP alert or the structural TP1/TP2 alert."""
     symbol = payload.get("symbol", SYMBOL_DEFAULT.replace("/", ""))
     signal = payload.get("signal", {}) or {}
     ea = payload.get("ea", {}) or {}
-    engine = signal.get("engine_v4", {}) or {}
+    engine = dict(signal.get("engine_v4", {}) or {})
 
     direction = str(ea.get("direction", "NONE")).upper()
     side_icon, side_label = _public_side(direction)
     entry = _safe_float(ea.get("entry"))
     sl = _safe_float(ea.get("sl"))
     tp = _safe_float(ea.get("tp_final"))
+    engine.setdefault("tp1", ea.get("tp1"))
     tp1, tp2 = _public_targets(direction, entry, tp, engine)
     timestamp = signal.get("timestamp") or ea.get("received_at") or ea.get("signal_id") or ""
-    source = str(payload.get("source") or signal.get("source") or "PYTHON").upper()
-    signal_type = "PINE_V2_4" if source == "PINE" else "V4_SESSION"
+    score = int(_safe_float(ea.get("score") or signal.get("score") or _deep_get(signal, ["decision", "score"], 0)))
+    session = ea.get("session") or _deep_get(signal, ["gates", "session"], "-")
+
+    if not _has_tp2_opportunity(payload, direction, tp1, tp2):
+        return "\n".join([
+            f"{side_icon} <b>SESSION SIGNAL FIRING</b>",
+            "━━━━━━━━━━━━━━━━━",
+            f"📌 {_clean_text(symbol)} {_clean_text(side_label)}",
+            f"🎯 Entry  : {entry:,.2f}",
+            f"🛡️ SL     : {sl:,.2f}",
+            f"🏆 TP     : {tp1:,.2f}",
+            f"{'📈' if direction == 'BUY' else '📉'} Score  : {score}/10",
+            f"🕐 Session: {_clean_text(session)}",
+            "━━━━━━━━━━━━━━━━━",
+            "🤖 EA executing...",
+            TELEGRAM_DISCLAIMER,
+        ])
 
     return "\n".join([
-        f"{side_icon} <b>Alpha Buffalo.</b> {_clean_text(side_label)}",
+        f"{side_icon} <b>ALPHA BUFFALO</b>",
         "━━━━━━━━━━━━━━━━━━━━━",
         f"📌 Asset    : <b>{_clean_text(symbol)}</b>",
-        f"📊 Type     : {signal_type}",
+        f"📊 Type     : {side_icon} {_clean_text(side_label)}",
         f"🎯 Entry    : ~{entry:,.2f}",
         f"🛡️ SL Zone  : {_price_zone(sl, direction)}",
         f"🎯 TP1      : {tp1:,.1f}  (M15 ~30min)",
         f"🎯 TP2      : {tp2:,.1f}  (H1  ~2hr)",
         f"⏰ {_clean_text(_format_public_trade_time(timestamp))}",
         "━━━━━━━━━━━━━━━━━━━━━",
-        "📨 Signal accepted and queued",
-        "⏳ Waiting for MT5 fill / ACK",
-        "⚠️ Not financial advice. Trade at your own risk.",
-    ])
-
-
-def _public_exit_reason(value: str) -> str:
-    reason = str(value or "").upper()
-    if "TP2" in reason or "TARGET" in reason:
-        return "FINAL TARGET"
-    if "TP1" in reason or "BREAK_EVEN" in reason or reason == "BE":
-        return "PROFIT PROTECTION"
-    if "SL" in reason or "STOP" in reason:
-        return "PROTECTIVE STOP"
-    if "HA15" in reason or "REVERS" in reason or "STRUCTURE" in reason:
-        return "M15 REVERSAL CONFIRMED"
-    if "TIME" in reason or "MAX_BARS" in reason:
-        return "TIME EXIT"
-    return "LIFECYCLE EXIT"
-
-
-def format_telegram_close_signal(payload: Dict) -> str:
-    """Public lifecycle close request. This is queued, not yet broker-confirmed."""
-    symbol = payload.get("symbol", SYMBOL_DEFAULT.replace("/", ""))
-    signal = payload.get("signal", {}) or {}
-    ea = payload.get("ea", {}) or {}
-    direction = str(ea.get("direction", "NONE")).upper()
-    side_icon, side_label = _public_side(direction)
-    exit_price = _safe_float(ea.get("exit_price") or ea.get("entry"))
-    timestamp = signal.get("timestamp") or ea.get("received_at") or ""
-    reason = _public_exit_reason(ea.get("reason") or signal.get("reason") or "PINE_EXIT")
-    return "\n".join([
-        f"🟠 <b>Alpha Buffalo CLOSE</b> {side_icon} {_clean_text(side_label)}",
-        "━━━━━━━━━━━━━━━━━━━━━",
-        f"📌 Asset    : <b>{_clean_text(symbol)}</b>",
-        "📊 Type     : PINE_V2_4 LIFECYCLE",
-        f"💰 Exit     : ~{exit_price:,.2f}",
-        f"🧭 Reason   : {_clean_text(reason)}",
-        f"⏰ {_clean_text(_format_public_trade_time(timestamp))}",
-        "━━━━━━━━━━━━━━━━━━━━━",
-        "📨 Close command queued",
-        "⏳ Waiting for MT5 close ACK",
-    ])
-
-
-def format_telegram_fill_event(position: Dict) -> str:
-    """Broker-side fill confirmation supplied by the execution-only EA."""
-    direction = str(position.get("direction") or "NONE").upper()
-    side_icon, side_label = _public_side(direction)
-    return "\n".join([
-        f"✅ <b>MT5 FILLED</b> {side_icon} {_clean_text(side_label)}",
-        "━━━━━━━━━━━━━━━━━━━━━",
-        f"📌 Asset    : <b>{_clean_text(position.get('symbol') or PUBLIC_SYMBOL_DEFAULT)}</b>",
-        f"💰 Fill     : {_safe_float(position.get('entry')):,.2f}",
-        f"🛡️ SL       : {_safe_float(position.get('sl')):,.2f}",
-        f"🎯 TP1/TP2  : {_safe_float(position.get('tp1')):,.2f} / {_safe_float(position.get('tp2')):,.2f}",
-        f"🎫 Ticket   : {_clean_text(position.get('ticket') or '-')}",
-        "━━━━━━━━━━━━━━━━━━━━━",
-        "✅ EA fill confirmed",
-    ])
-
-
-def format_telegram_blocked_pine(payload: Dict, reason: str) -> str:
-    """Confirm that TradingView reached Railway even when the entry gate blocks it."""
-    direction = str(payload.get("direction") or "NONE").upper()
-    side_icon, side_label = _public_side(direction)
-    return "\n".join([
-        f"⚠️ <b>PINE SIGNAL BLOCKED</b> {side_icon} {_clean_text(side_label)}",
-        "━━━━━━━━━━━━━━━━━━━━━",
-        f"📌 Asset    : <b>{_clean_text(payload.get('symbol') or PUBLIC_SYMBOL_DEFAULT)}</b>",
-        f"🧭 Gate     : {_clean_text(reason)}",
-        f"🆔 Signal   : {_clean_text(payload.get('signal_id') or '-')}",
-        "━━━━━━━━━━━━━━━━━━━━━",
-        "✅ TradingView webhook received",
-        "⛔ No order was queued",
+        "✅ EA Executing",
+        TELEGRAM_DISCLAIMER,
     ])
 
 
@@ -813,12 +845,14 @@ def _telegram_market_is_open(
     return telegram_market_is_open(payload_session=payload_session, now=now)
 
 
-def send_telegram_message(text: str) -> bool:
+def send_telegram_message(text: str, *, test_mode: bool = False) -> bool:
+    if test_mode and not str(text).startswith("🧪 <b>TEST"):
+        return False
     attempted_at = datetime.now(timezone.utc).isoformat()
     with LAST_TELEGRAM_LOCK:
         TELEGRAM_DELIVERY_STATUS["last_attempt_at"] = attempted_at
         TELEGRAM_DELIVERY_STATUS["last_error"] = ""
-    if not _telegram_market_is_open():
+    if not test_mode and not _telegram_market_is_open():
         with LAST_TELEGRAM_LOCK:
             TELEGRAM_DELIVERY_STATUS["last_error"] = "MARKET_CLOSED"
         return False
@@ -836,6 +870,7 @@ def send_telegram_message(text: str) -> bool:
         )
         return False
 
+    text = ensure_telegram_disclaimer(text)
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     ok = False
     for chat_id in TELEGRAM_CHAT_IDS:
@@ -849,6 +884,7 @@ def send_telegram_message(text: str) -> bool:
                     "disable_web_page_preview": True,
                 },
                 timeout=TELEGRAM_TIMEOUT_SECONDS,
+                allow_closed_test=test_mode,
             )
             if response is None:
                 with LAST_TELEGRAM_LOCK:
@@ -882,22 +918,71 @@ def _deep_get(data: Dict, path: list[str], default=None):
     return default if cur in (None, "") else cur
 
 
-def _h1_update_key(payload: Dict) -> str:
+def _trend_update_key(payload: Dict) -> str:
+    """Match Clean-V5: notify only when session or a confirmed TF trend changes."""
     signal = payload.get("signal", {}) or {}
-    raw = str(signal.get("timestamp") or payload.get("generated_at") or "")
-    dt = None
-    try:
-        if raw:
-            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except Exception:
-        dt = None
-    if dt is None:
-        dt = datetime.now(timezone.utc)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    h1 = dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    ea = payload.get("ea", {}) or {}
+    blueprint = signal.get("blueprint", {}) or {}
+    price_action = blueprint.get("price_action", {}) or {}
+    session = str(
+        ea.get("session")
+        or _deep_get(signal, ["gates", "session"], "")
+        or SessionClock().get().session
+    ).strip().upper()
     symbol = payload.get("symbol", SYMBOL_DEFAULT.replace("/", ""))
-    return f"{symbol}-{h1.isoformat()}"
+    bias = _trend_bias_label(signal)
+    states = []
+    for key, fallback in (
+        ("m15_phase", ""),
+        ("h1_phase", blueprint.get("trend_h1", "")),
+        ("h4_phase", blueprint.get("trend_h4", "")),
+    ):
+        raw = price_action.get(key) or fallback
+        states.append(_public_trend_state(raw, bias))
+    return "|".join([str(symbol).upper(), session or "UNKNOWN", *states])
+
+
+def _load_last_trend_update_key() -> str:
+    """Restore the last delivered session so a process restart does not resend it."""
+    global LAST_TELEGRAM_TREND_UPDATE_KEY, LAST_TELEGRAM_TREND_STATE_LOADED
+    if LAST_TELEGRAM_TREND_STATE_LOADED:
+        return LAST_TELEGRAM_TREND_UPDATE_KEY
+
+    LAST_TELEGRAM_TREND_STATE_LOADED = True
+    if not TELEGRAM_TREND_STATE_FILE:
+        return LAST_TELEGRAM_TREND_UPDATE_KEY
+    try:
+        data = json.loads(Path(TELEGRAM_TREND_STATE_FILE).read_text(encoding="utf-8"))
+        LAST_TELEGRAM_TREND_UPDATE_KEY = str(data.get("last_trend_update_key") or "")
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        pass
+    return LAST_TELEGRAM_TREND_UPDATE_KEY
+
+
+def _persist_last_trend_update_key(key: str) -> None:
+    if not TELEGRAM_TREND_STATE_FILE:
+        return
+    try:
+        path = Path(TELEGRAM_TREND_STATE_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "last_trend_update_key": key,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    except OSError as exc:
+        print(
+            "AlphaBuffalo trend state persistence warning | "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
 
 
 def _trend_zone_label(signal: Dict, ea: Dict) -> str:
@@ -1112,6 +1197,21 @@ def _trend_line(signal: Dict, key: str, fallback: str = "-") -> str:
     return str(value).replace("_", " ")
 
 
+def _public_trend_state(value, fallback_direction: str = "NONE") -> str:
+    raw = str(value or "").upper().replace("_", " ")
+    direction = _direction_from_text(raw)
+    if direction == "NONE":
+        direction = str(fallback_direction or "NONE").upper()
+    phase = "Pullback" if "PULLBACK" in raw or "RETRACE" in raw else "Impulse"
+    if any(token in raw for token in ("RANGE", "SIDEWAY", "NEUTRAL", "WAIT")):
+        return "Range ⚪"
+    if direction == "BUY":
+        return f"{phase} 🟢"
+    if direction == "SELL":
+        return f"{phase} 🔴"
+    return "Range ⚪"
+
+
 def format_telegram_trend_update(payload: Dict) -> str:
     signal = payload.get("signal", {}) or {}
     ea = payload.get("ea", {}) or {}
@@ -1124,43 +1224,191 @@ def format_telegram_trend_update(payload: Dict) -> str:
         or ea.get("entry")
     )
     session = ea.get("session") or _deep_get(signal, ["gates", "session"], "-")
-    zone = _public_zone_line(signal)
-    setup = _trend_setup_label(signal, ea)
     bias = _trend_bias_label(signal)
-    location = _trend_location_label(signal)
-    setup_public = _public_setup_label(setup)
-    watch = _public_watch_label(setup, bias, location)
-
-    timestamp = signal.get("timestamp") or payload.get("generated_at") or ""
-    source = str(payload.get("source") or "PYTHON").upper()
-    title = "XAUUSD PINE MONITOR" if source == "PINE_MONITOR" else "XAUUSD TREND UPDATE"
+    watch_icon = "🟢" if bias == "BUY" else "🔴" if bias == "SELL" else "⚪"
+    watch_side = "B" if bias == "BUY" else "S" if bias == "SELL" else "WAIT"
+    m15 = _public_trend_state(_trend_line(signal, "m15_phase", ""), bias)
+    h1 = _public_trend_state(
+        _trend_line(signal, "h1_phase", blueprint.get("trend_h1", "")), bias
+    )
+    h4 = _public_trend_state(
+        _trend_line(signal, "h4_phase", blueprint.get("trend_h4", "")), bias
+    )
 
     return "\n".join([
-        f"📊 <b>{title}</b>",
+        f"📊 <b>{_clean_text(symbol)} TREND UPDATE</b>",
         "━━━━━━━━━━━━━━━━━━━━━",
         f"🕐 Session : {_clean_text(session)}",
         f"💰 Price   : {price:,.2f}",
         "",
-        f"🧭 Zone    : {_clean_text(zone)}",
-        f"⚡ Setup   : {_clean_text(setup_public)}",
-        f"🧭 Bias    : {_clean_text(_public_bias_label(bias))}",
-        f"📍 Location: {_clean_text(location)}",
+        f"{'📈' if '🟢' in m15 else '📉' if '🔴' in m15 else '➡️'} M15  : {_clean_text(m15)}",
+        f"{'📈' if '🟢' in h1 else '📉' if '🔴' in h1 else '➡️'} H1   : {_clean_text(h1)}",
+        f"{'📈' if '🟢' in h4 else '📉' if '🔴' in h4 else '➡️'} H4   : {_clean_text(h4)}",
         "",
-        f"➡️ M15     : {_clean_text(_trend_line(signal, 'm15_phase', 'Reaction/Watch'))}",
-        f"📈 H1      : {_clean_text(_trend_line(signal, 'h1_phase', blueprint.get('trend_h1', '-')))}",
-        f"📉 H4      : {_clean_text(_trend_line(signal, 'h4_phase', blueprint.get('trend_h4', '-')))}",
-        "",
-        f"👀 Watch   : {_clean_text(watch)}",
-        f"⏰ Time    : {_clean_text(_format_time_pair(timestamp))}",
+        f"👀 Watch for {watch_icon} {watch_side} Setup...",
         "━━━━━━━━━━━━━━━━━━━━━",
-        "🛰️ Relay online — waiting for confirmed signal" if source == "PINE_MONITOR" else "🛰️ Market monitor online",
-        "⚠️ Not financial advice. Trade at your own risk.",
+        TELEGRAM_DISCLAIMER,
     ])
 
 
+def _bos_confirmation_context(payload: Dict) -> tuple[bool, str, float, int]:
+    signal = payload.get("signal", {}) or {}
+    ea = payload.get("ea", {}) or {}
+    blueprint = signal.get("blueprint", {}) or {}
+    harmonic = blueprint.get("harmonic", {}) or {}
+    eligible = bool(
+        ea.get("bos_confirmed")
+        or signal.get("bos_confirmed")
+        or blueprint.get("bos_confirmed")
+        or blueprint.get("harmonic_bos_eligible")
+        or harmonic.get("bos_eligible")
+    )
+    direction = str(
+        blueprint.get("harmonic_bos_direction")
+        or harmonic.get("bos_direction")
+        or ea.get("direction")
+        or "NONE"
+    ).upper()
+    if direction not in {"BUY", "SELL"}:
+        direction = _trend_bias_label(signal)
+    price = _safe_float(
+        blueprint.get("current_price")
+        or _deep_get(blueprint, ["price_action", "current_price"], 0)
+        or ea.get("entry")
+    )
+    score = int(_safe_float(ea.get("score") or signal.get("score") or _deep_get(signal, ["decision", "score"], 0)))
+    return eligible and direction in {"BUY", "SELL"}, direction, price, score
+
+
+def format_telegram_confirmation(payload: Dict) -> str:
+    _, direction, price, score = _bos_confirmation_context(payload)
+    symbol = payload.get("symbol", SYMBOL_DEFAULT.replace("/", ""))
+    icon, label = _public_side(direction)
+    score_icon = "📈" if direction == "BUY" else "📉"
+    return "\n".join([
+        "🎯 <b>BOS CONFIRMED — ENTRY READY</b>",
+        "━━━━━━━━━━━━━━━━━",
+        f"{icon} {label[0]}  {_clean_text(symbol)}",
+        f"💰 BOS @ {price:,.2f}",
+        f"{score_icon} Score: {score}/10",
+        "⚡ Signal กำลังประมวลผล...",
+        TELEGRAM_DISCLAIMER,
+    ])
+
+
+def build_telegram_test_messages(direction: str = "SELL") -> list[str]:
+    """Build the four public templates without creating an EA command."""
+    direction = str(direction or "SELL").upper()
+    if direction not in {"BUY", "SELL"}:
+        raise ValueError("TEST_DIRECTION_MUST_BE_BUY_OR_SELL")
+    is_buy = direction == "BUY"
+    entry = 3992.32
+    sl = 3979.70 if is_buy else 4004.99
+    tp1 = 3998.60 if is_buy else 3986.00
+    tp2 = 4005.00 if is_buy else 3979.70
+    phase = "IMPULSE UP" if is_buy else "IMPULSE DOWN"
+    timestamp = datetime.now(timezone.utc).isoformat()
+    base = {
+        "symbol": PUBLIC_SYMBOL_DEFAULT,
+        "signal": {
+            "timestamp": timestamp,
+            "score": 5,
+            "gates": {"session": "NY"},
+            "blueprint": {
+                "current_price": 3983.98,
+                "trend_h1": "UP" if is_buy else "DOWN",
+                "trend_h4": "UP" if is_buy else "DOWN",
+                "harmonic_bos_eligible": True,
+                "harmonic_bos_direction": direction,
+                "harmonic_bos_sources": ["M15"],
+                "price_action": {
+                    "m15_phase": phase,
+                    "h1_phase": phase,
+                    "h4_phase": phase,
+                },
+            },
+        },
+        "ea": {
+            "action": "OPEN",
+            "execution_state": "READY",
+            "direction": direction,
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp_final": tp2,
+            "score": 5,
+            "session": "NY",
+        },
+    }
+
+    trend = format_telegram_trend_update(base)
+    short_payload = json.loads(json.dumps(base))
+    short_payload["ea"]["telegram_tp_mode"] = "SINGLE_TP"
+    short = format_telegram_signal(short_payload)
+    runner_payload = json.loads(json.dumps(base))
+    runner_payload["ea"]["telegram_tp_mode"] = "TP1_TP2"
+    runner = format_telegram_signal(runner_payload)
+    confirm_payload = json.loads(json.dumps(base))
+    confirm_payload["ea"]["action"] = "WAIT"
+    confirm_payload["ea"]["direction"] = "NONE"
+    confirm = format_telegram_confirmation(confirm_payload)
+
+    labels = (
+        "TREND UPDATE",
+        "SHORT TRADE — TP เดียว",
+        "PRZ/BOS RUNNER — TP1/TP2",
+        "WAIT CONFIRMATION",
+    )
+    bodies = (trend, short, runner, confirm)
+    return [
+        "\n".join([
+            f"🧪 <b>TEST {index}/4 — {label}</b>",
+            "⚠️ ทดสอบระบบเท่านั้น ไม่ใช่สัญญาณจริง",
+            "",
+            body,
+        ])
+        for index, (label, body) in enumerate(zip(labels, bodies), start=1)
+    ]
+
+
+def maybe_broadcast_confirmation(payload: Dict) -> bool:
+    """Send one WAIT-CF message per active confirmed BOS, never on every poll."""
+    global LAST_TELEGRAM_CONFIRM_KEY
+    if not TELEGRAM_NOTIFY_WAIT or not _telegram_market_is_open(payload) or not _telegram_enabled():
+        return False
+    ea = payload.get("ea", {}) or {}
+    eligible, direction, price, _ = _bos_confirmation_context(payload)
+    if not eligible or str(ea.get("action") or "WAIT").upper() == "OPEN":
+        if not eligible:
+            with LAST_TELEGRAM_LOCK:
+                LAST_TELEGRAM_CONFIRM_KEY = ""
+        return False
+    signal = payload.get("signal", {}) or {}
+    blueprint = signal.get("blueprint", {}) or {}
+    sources = blueprint.get("harmonic_bos_sources") or _deep_get(
+        blueprint, ["harmonic", "bos_sources"], []
+    )
+    key = "|".join([
+        str(payload.get("symbol") or PUBLIC_SYMBOL_DEFAULT).upper(),
+        direction,
+        ",".join(sources) if isinstance(sources, list) else str(sources),
+    ])
+    with LAST_TELEGRAM_LOCK:
+        if key == LAST_TELEGRAM_CONFIRM_KEY:
+            return False
+        previous = LAST_TELEGRAM_CONFIRM_KEY
+        LAST_TELEGRAM_CONFIRM_KEY = key
+    sent = send_telegram_message(format_telegram_confirmation(payload))
+    if not sent:
+        with LAST_TELEGRAM_LOCK:
+            if LAST_TELEGRAM_CONFIRM_KEY == key:
+                LAST_TELEGRAM_CONFIRM_KEY = previous
+    return sent
+
+
 def maybe_broadcast_trend_update(payload: Dict) -> bool:
-    """Send one compact market-state update per H1 hour. Never opens or bypasses trade gates."""
-    global LAST_TELEGRAM_H1_UPDATE_KEY
+    """Send once when the session changes, matching Clean-V5 behavior."""
+    global LAST_TELEGRAM_TREND_UPDATE_KEY
     if not _telegram_market_is_open(payload):
         return False
 
@@ -1169,21 +1417,28 @@ def maybe_broadcast_trend_update(payload: Dict) -> bool:
     if not _telegram_enabled():
         return False
 
-    key = _h1_update_key(payload)
+    key = _trend_update_key(payload)
     with LAST_TELEGRAM_LOCK:
-        if key == LAST_TELEGRAM_H1_UPDATE_KEY:
+        _load_last_trend_update_key()
+        if key == LAST_TELEGRAM_TREND_UPDATE_KEY:
             return False
-        LAST_TELEGRAM_H1_UPDATE_KEY = key
+        previous_key = LAST_TELEGRAM_TREND_UPDATE_KEY
+        # Reserve this transition before the network call so parallel loops
+        # cannot publish the same session snapshot twice.
+        LAST_TELEGRAM_TREND_UPDATE_KEY = key
 
     sent = send_telegram_message(format_telegram_trend_update(payload))
-    if not sent:
+    if sent:
         with LAST_TELEGRAM_LOCK:
-            if LAST_TELEGRAM_H1_UPDATE_KEY == key:
-                LAST_TELEGRAM_H1_UPDATE_KEY = ""
+            _persist_last_trend_update_key(key)
+    else:
+        with LAST_TELEGRAM_LOCK:
+            if LAST_TELEGRAM_TREND_UPDATE_KEY == key:
+                LAST_TELEGRAM_TREND_UPDATE_KEY = previous_key
     return sent
 
 def maybe_broadcast_signal(payload: Dict) -> bool:
-    """Broadcast accepted OPEN and CLOSE commands exactly once per process."""
+    """Broadcast an accepted OPEN once; lifecycle/fill/debug events stay silent."""
     global LAST_TELEGRAM_SIGNAL_KEY
 
     if not _telegram_market_is_open(payload):
@@ -1193,33 +1448,32 @@ def maybe_broadcast_signal(payload: Dict) -> bool:
     signal = payload.get("signal", {}) or {}
     action = str(ea.get("action", "WAIT")).upper()
 
-    if action not in {"OPEN", "CLOSE_ALL"}:
+    if action != "OPEN":
         return False
 
-    if action == "OPEN":
-        if not _telegram_open_signal_is_fresh(payload):
-            print(
-                "AlphaBuffalo Telegram stale OPEN suppressed | "
-                f"signal_id={ea.get('signal_id')}",
-                flush=True,
-            )
-            return False
-        rr = _safe_float(ea.get("rr"))
-        if rr < TELEGRAM_MIN_RR:
-            return False
+    if not _telegram_open_signal_is_fresh(payload):
+        print(
+            "AlphaBuffalo Telegram stale OPEN suppressed | "
+            f"signal_id={ea.get('signal_id')}",
+            flush=True,
+        )
+        return False
+    rr = _safe_float(ea.get("rr"))
+    if rr < TELEGRAM_MIN_RR:
+        return False
 
-        if not bool(ea.get("directional_levels_ok")):
-            return False
-        if not bool(ea.get("levels_ready")):
-            return False
-        if not bool(ea.get("rr_ok")):
-            return False
-        if not bool(ea.get("setup_ok", True)):
-            return False
-        if not bool(ea.get("zone_ok", True)):
-            return False
-        if not bool(ea.get("vsa_gate_ok", True)):
-            return False
+    if not bool(ea.get("directional_levels_ok")):
+        return False
+    if not bool(ea.get("levels_ready")):
+        return False
+    if not bool(ea.get("rr_ok")):
+        return False
+    if not bool(ea.get("setup_ok", True)):
+        return False
+    if not bool(ea.get("zone_ok", True)):
+        return False
+    if not bool(ea.get("vsa_gate_ok", True)):
+        return False
 
     signal_key = _telegram_signal_key(payload)
     with LAST_TELEGRAM_LOCK:
@@ -1228,12 +1482,7 @@ def maybe_broadcast_signal(payload: Dict) -> bool:
         previous_key = LAST_TELEGRAM_SIGNAL_KEY
         LAST_TELEGRAM_SIGNAL_KEY = signal_key
 
-    message = (
-        format_telegram_signal(payload)
-        if action == "OPEN"
-        else format_telegram_close_signal(payload)
-    )
-    sent = send_telegram_message(message)
+    sent = send_telegram_message(format_telegram_signal(payload))
     if not sent:
         # Do not permanently deduplicate a delivery that never reached Telegram.
         with LAST_TELEGRAM_LOCK:
@@ -1241,30 +1490,6 @@ def maybe_broadcast_signal(payload: Dict) -> bool:
                 LAST_TELEGRAM_SIGNAL_KEY = previous_key
     return sent
 
-
-def maybe_broadcast_blocked_pine(payload: Dict, reason: str) -> bool:
-    """Show webhook reachability without creating or implying an EA command."""
-    global LAST_TELEGRAM_BLOCKED_KEY
-    if not TELEGRAM_NOTIFY_BLOCKED_PINE or not _telegram_market_is_open():
-        return False
-    if not _telegram_enabled():
-        return False
-    key = "|".join([
-        str(payload.get("signal_id") or ""),
-        str(payload.get("direction") or ""),
-        str(reason or ""),
-    ])
-    with LAST_TELEGRAM_LOCK:
-        if key and key == LAST_TELEGRAM_BLOCKED_KEY:
-            return False
-        previous_key = LAST_TELEGRAM_BLOCKED_KEY
-        LAST_TELEGRAM_BLOCKED_KEY = key
-    sent = send_telegram_message(format_telegram_blocked_pine(payload, reason))
-    if not sent:
-        with LAST_TELEGRAM_LOCK:
-            if LAST_TELEGRAM_BLOCKED_KEY == key:
-                LAST_TELEGRAM_BLOCKED_KEY = previous_key
-    return sent
 
 def _df_with_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize TwelveData dataframe for engine_v4 without changing fetch contract."""
@@ -2126,6 +2351,7 @@ def _cloud_signal_loop() -> None:
             queued = _publish_python_entry_command(payload)
             maybe_broadcast_signal(payload)
             maybe_broadcast_trend_update(payload)
+            maybe_broadcast_confirmation(payload)
             decision = payload.get("signal", {}).get("decision", {})
             ea = payload.get("ea", {})
             print(
@@ -2169,19 +2395,12 @@ def _pine_monitor_loop() -> None:
         f"interval={TELEGRAM_PINE_MONITOR_INTERVAL_SECONDS}s",
         flush=True,
     )
-    if TELEGRAM_NOTIFY_STARTUP:
-        send_telegram_message("\n".join([
-            "🛰️ <b>Alpha Buffalo Pine relay ONLINE</b>",
-            "━━━━━━━━━━━━━━━━━━━━━",
-            f"📌 Asset    : <b>{_clean_text(PUBLIC_SYMBOL_DEFAULT)}</b>",
-            "📊 Source   : PINE_V2_4",
-            "📨 Webhook  : READY",
-            "⏳ Waiting for confirmed TradingView signal",
-        ]))
     while True:
         try:
             if TELEGRAM_NOTIFY_TREND_UPDATE and _telegram_market_is_open():
-                maybe_broadcast_trend_update(_pine_monitor_payload())
+                monitor = _pine_monitor_payload()
+                maybe_broadcast_trend_update(monitor)
+                maybe_broadcast_confirmation(monitor)
         except Exception as exc:
             print(
                 "AlphaBuffalo Pine Telegram monitor error | "
@@ -2272,6 +2491,36 @@ def telegram_status(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
     }
 
 
+@app.post("/telegram/test")
+async def telegram_test(request: Request):
+    """Send four unmistakable TEST templates; never touches EA command state."""
+    body = await request.json()
+    if not verify_license(str(body.get("key") or "")):
+        raise HTTPException(status_code=403, detail="INVALID_LICENSE")
+    direction = str(body.get("direction") or "SELL").upper()
+    try:
+        messages = build_telegram_test_messages(direction)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    results = [send_telegram_message(message, test_mode=True) for message in messages]
+    if not all(results):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "TELEGRAM_TEST_DELIVERY_INCOMPLETE",
+                "sent_count": sum(results),
+                "expected_count": len(results),
+            },
+        )
+    return {
+        "status": "sent",
+        "test_only": True,
+        "direction": direction,
+        "sent_count": len(results),
+        "ea_command_created": False,
+    }
+
+
 @app.get("/signal/latest")
 def signal_latest(key: str = "", symbol: str = SYMBOL_DEFAULT):
     if not verify_license(key):
@@ -2343,8 +2592,10 @@ async def execution_fill(request: Request):
     fill_price = _safe_float(body.get("fill_price"))
     if not ticket or fill_price <= 0:
         raise HTTPException(status_code=400, detail="TICKET_AND_FILL_PRICE_REQUIRED")
+
     cached = _get_latest_signal()
     plan = cached.get("ea", {}) if cached.get("symbol") == public_symbol else {}
+
     if SIGNAL_SOURCE in {"PINE", "HYBRID"}:
         durable_pine_plan = pine_signal_bridge.pending_command(public_symbol)
         if (
@@ -2360,6 +2611,7 @@ async def execution_fill(request: Request):
                 "tp1": durable_pine_plan.get("tp1"),
                 "tp_final": durable_pine_plan.get("tp_final"),
             }
+
     if SIGNAL_SOURCE in {"PYTHON", "HYBRID"} and (
         plan.get("action") != "OPEN"
         or str(plan.get("signal_id") or "") != signal_id
@@ -2378,6 +2630,7 @@ async def execution_fill(request: Request):
                 "tp1": durable_python_plan.get("tp1"),
                 "tp_final": durable_python_plan.get("tp_final"),
             }
+
     if (
         not signal_id
         or signal_id != str(plan.get("signal_id") or "")
@@ -2386,7 +2639,6 @@ async def execution_fill(request: Request):
     ):
         raise HTTPException(status_code=409, detail="NO_MATCHING_READY_PLAN")
 
-    existing_position = execution_lifecycle.position(public_symbol)
     try:
         position = execution_lifecycle.register_fill(
             symbol=public_symbol,
@@ -2402,13 +2654,12 @@ async def execution_fill(request: Request):
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    telegram_notified = False
-    if not existing_position:
-        telegram_notified = send_telegram_message(format_telegram_fill_event(position))
+
     return {
         "status": "accepted",
         "position": position,
-        "telegram_notified": telegram_notified,
+        # Fill/lifecycle noise is intentionally excluded from public Telegram.
+        "telegram_notified": False,
     }
 
 
@@ -2417,8 +2668,10 @@ def execution_command(key: str = "", symbol: str = SYMBOL_DEFAULT):
     """EA polls this endpoint and executes only the returned command."""
     if not verify_license(key):
         raise HTTPException(status_code=403, detail="INVALID_LICENSE")
+
     public_symbol = symbol.replace("/", "")
     pine_command = {"action": "HOLD", "reason": "PINE_SIGNAL_MODE_DISABLED"}
+
     if SIGNAL_SOURCE in {"PINE", "HYBRID"}:
         pine_command = pine_signal_bridge.pending_command(public_symbol)
         if pine_command.get("action") != "HOLD":
@@ -2432,11 +2685,8 @@ def execution_command(key: str = "", symbol: str = SYMBOL_DEFAULT):
 
     pending = execution_lifecycle.pending_command(public_symbol)
     if pending.get("action") != "HOLD":
-        return {"status": "ok", "command": pending}
+        return {"status": "ok", "source": "LIFECYCLE", "command": pending}
 
-    # MT5 passes the broker's tradable symbol (for example XAUUSD-STDc), but
-    # Twelve Data expects the canonical market symbol.  Position state remains
-    # keyed by the broker symbol while management candles use XAU/USD.
     data_symbol = SYMBOL_DEFAULT if public_symbol.upper().startswith("XAUUSD") else symbol
     df_15m = _fetch_cached_tf(data_symbol, "15min")
     command = execution_lifecycle.evaluate(
@@ -2453,8 +2703,10 @@ async def execution_ack(request: Request):
     body = await request.json()
     if not verify_license(str(body.get("key", ""))):
         raise HTTPException(status_code=403, detail="INVALID_LICENSE")
+
     public_symbol = str(body.get("symbol") or PUBLIC_SYMBOL_DEFAULT).replace("/", "")
     command_id = str(body.get("command_id") or "")
+
     if pine_signal_bridge.owns(command_id):
         try:
             result = pine_signal_bridge.acknowledge(
@@ -2464,18 +2716,21 @@ async def execution_ack(request: Request):
             )
         except PineSignalError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
         close_state = None
         if body.get("success") is True and result.get("action") == "CLOSE_ALL":
             close_state = execution_lifecycle.close_external(
                 public_symbol,
                 r_multiple=_safe_float(body.get("r_multiple")),
             )
+
         promoted_command = result.get("promoted_command")
         telegram_notified = False
         if isinstance(promoted_command, dict):
             promoted_payload = build_pine_api_payload(promoted_command)
             _set_latest_signal(promoted_payload)
             telegram_notified = maybe_broadcast_signal(promoted_payload)
+
         return {
             "status": "accepted",
             "source": "PINE",
@@ -2494,6 +2749,7 @@ async def execution_ack(request: Request):
             )
         except PineSignalError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
         return {
             "status": "accepted",
             "source": "PYTHON",
@@ -2513,6 +2769,7 @@ async def execution_ack(request: Request):
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     return {"status": "accepted", "result": result}
 
 
@@ -2563,11 +2820,10 @@ async def webhook_tv(request: Request):
     if action in {"OPEN", "ENTRY"}:
         entry_gate = _pine_entry_permission(payload.get("direction"), public_symbol)
         if not entry_gate.allowed:
-            telegram_notified = maybe_broadcast_blocked_pine(payload, entry_gate.reason)
             print(
                 "AlphaBuffalo Pine webhook blocked | "
                 f"direction={direction} signal_id={signal_id} "
-                f"reason={entry_gate.reason} telegram_notified={telegram_notified}",
+                f"reason={entry_gate.reason} telegram_notified=False",
                 flush=True,
             )
             raise HTTPException(status_code=409, detail=entry_gate.reason)
