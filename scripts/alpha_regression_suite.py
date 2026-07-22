@@ -1098,8 +1098,8 @@ def test_telegram_public_output_hides_engine_internals() -> None:
         assert_true(token not in combined, f"public Telegram output leaked {token}")
 
     assert_true(
-        "Watch for 🔴 S Setup..." in trend_text,
-        "trend update may advertise the confirmed SELL bias without promoting a WAIT candidate",
+        "Watch for ⚪ WAIT Setup..." in trend_text,
+        "mixed trend evidence must remain WAIT and must not promote an engine candidate",
     )
     assert_true(
         "SESSION SIGNAL FIRING" in signal_text,
