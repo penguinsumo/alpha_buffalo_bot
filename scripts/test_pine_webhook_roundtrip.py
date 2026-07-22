@@ -75,21 +75,30 @@ def main() -> None:
         telegram_messages = []
         service._telegram_market_is_open = lambda payload=None, now=None: True
         service.TELEGRAM_TOKEN = "test-token"
-        service.TELEGRAM_CHAT_IDS = ["test-chat"]
-        service.send_telegram_message = lambda message: telegram_messages.append(message) or True
+        service.TELEGRAM_CHAT_IDS = ["group-chat"]
+        service.TELEGRAM_PINE_CHAT_IDS = []
+        service.TELEGRAM_OWNER_CHAT_IDS = ["owner-chat"]
+        assert service._telegram_targets("GROUP") == ["group-chat"]
+        assert service._telegram_targets("PINE") == ["owner-chat"]
+        service.send_telegram_message = (
+            lambda message, **kwargs: telegram_messages.append(
+                (kwargs.get("audience"), message)
+            ) or True
+        )
 
         with TestClient(service.app) as client:
             opened = client.post("/webhook/tv", json=payload("OPEN"))
             assert opened.status_code == 200, opened.text
             assert opened.json()["telegram_notified"] is True
             assert len(telegram_messages) == 1
-            assert "BUY" in telegram_messages[-1]
-            assert "ALPHA BUFFALO" in telegram_messages[-1]
-            assert "TP1" in telegram_messages[-1]
-            assert "TP2" in telegram_messages[-1]
-            assert "EA Executing" in telegram_messages[-1]
-            assert "PINE_V2_4" not in telegram_messages[-1]
-            assert "Signal accepted and queued" not in telegram_messages[-1]
+            assert telegram_messages[-1][0] == "PINE"
+            assert "BUY" in telegram_messages[-1][1]
+            assert "ALPHA BUFFALO" in telegram_messages[-1][1]
+            assert "TP1" in telegram_messages[-1][1]
+            assert "TP2" in telegram_messages[-1][1]
+            assert "EA Executing" in telegram_messages[-1][1]
+            assert "PINE_V2_4" not in telegram_messages[-1][1]
+            assert "Signal accepted and queued" not in telegram_messages[-1][1]
             open_command = opened.json()["command"]
             assert open_command["action"] == "OPEN"
 
@@ -222,7 +231,8 @@ def main() -> None:
             assert close_ack.json()["next_command"]["direction"] == "SELL"
             assert close_ack.json()["telegram_notified"] is True
             assert len(telegram_messages) == 2
-            assert "SELL" in telegram_messages[-1]
+            assert telegram_messages[-1][0] == "PINE"
+            assert "SELL" in telegram_messages[-1][1]
 
             reverse_poll = client.get(
                 "/execution/command",
@@ -239,12 +249,29 @@ def main() -> None:
             assert state.status_code == 200, state.text
             assert state.json()["position"] is None
 
-            # A server intentionally running the Python engine must not accept
-            # a TradingView command and accidentally mix signal ownership.
+            # Python production may forward Pine to its isolated Telegram
+            # owner, but it must never queue that Pine command for an EA.
             service.SIGNAL_SOURCE = "PYTHON"
-            disabled = client.post("/webhook/tv", json=payload("OPEN"))
-            assert disabled.status_code == 409, disabled.text
-            assert disabled.json()["detail"] == "PINE_SIGNAL_MODE_DISABLED"
+            service.PINE_NOTIFICATION_ONLY = True
+            owner_notice = payload("OPEN")
+            owner_notice["signal_id"] = "XAUUSD-E2E-OWNER-BUY-003"
+            notified = client.post("/webhook/tv", json=owner_notice)
+            assert notified.status_code == 200, notified.text
+            assert notified.json()["notification_only"] is True
+            assert notified.json()["execution_queued"] is False
+            assert notified.json()["command"]["action"] == "HOLD"
+            assert notified.json()["command"]["reason"] == "PINE_NOTIFICATION_ONLY"
+            assert notified.json()["telegram_notified"] is True
+            assert len(telegram_messages) == 3
+            assert telegram_messages[-1][0] == "PINE"
+
+            python_poll = client.get(
+                "/execution/python/command",
+                params={"key": "PINE_TEST_KEY", "symbol": BROKER_SYMBOL},
+            )
+            assert python_poll.status_code == 200, python_poll.text
+            assert python_poll.json()["command"]["action"] == "HOLD"
+            assert "PINE" not in python_poll.json()["command"].get("command_id", "")
 
     print("PASS Pine OPEN webhook becomes one EA OPEN command")
     print("PASS broker symbol suffix resolves to the TradingView XAUUSD command")
@@ -257,7 +284,7 @@ def main() -> None:
     print("PASS Pine OPEN and promoted reverse OPEN notify Telegram exactly once")
     print("PASS Pine CLOSE and confirmed MT5 fill stay out of public Telegram")
     print("PASS Telegram health exposes relay and pending-command state safely")
-    print("PASS Python mode rejects Pine webhook ownership")
+    print("PASS Python mode routes Pine to owner without creating an EA command")
     print("Summary: 12/12 webhook round-trip checks passed")
 
 

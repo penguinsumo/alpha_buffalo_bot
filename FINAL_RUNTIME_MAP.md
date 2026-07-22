@@ -10,8 +10,23 @@ Files not listed here are not deployment entry points.
 - Signal contract: `signal_schema.py`
 - Market/session guard: `session_clock.py`, `telegram_guard.py`
 - Execution lifecycle: `execution_lifecycle.py`, `pine_signal_bridge.py`
-- Active MT5 executor: `mt5/AlphaBuffalo_CloudEA_ExecutionOnly_v304.mq5`
+- Legacy/Pine MT5 executor: `mt5/AlphaBuffalo_CloudEA_ExecutionOnly_v304.mq5`
+- Isolated Python MT5 executor: `mt5/AlphaBuffalo_RailwayPythonEA_v100.mq5`
 - Pine compatibility source: `tradingview/alpha_buff_gold_analyzer_v2_4.pine`
+
+## Telegram Ownership
+
+- Python production messages use `TELEGRAM_GROUP_CHAT_IDS` (legacy fallback:
+  `NOTIFY_IDS`, `TELEGRAM_CHAT_IDS`, or `TELEGRAM_CHAT_ID`).
+- Pine messages prefer the isolated `TELEGRAM_PINE_CHAT_IDS` destination.
+- When no Pine room is configured, Pine falls back to
+  `TELEGRAM_OWNER_CHAT_ID` (then `OWNER_CHAT_ID` or `ADMIN_ID`).
+- Pine never falls back to the Python grouping room.
+- With `ALPHA_SIGNAL_SOURCE=PYTHON`, `ALPHA_PINE_NOTIFICATION_ONLY=true`
+  accepts Pine for its isolated Telegram destination without persisting an EA
+  command or replacing the latest Python signal.
+- `GET /telegram/status` reports the effective destination class without
+  exposing tokens or chat IDs.
 
 ## Trading Runtime
 

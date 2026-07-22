@@ -82,6 +82,9 @@ API_LICENSE_KEY = os.getenv("ALPHA_API_KEY", os.getenv("LICENSE_KEY", "DEMO123")
 SIGNAL_SOURCE = os.getenv("ALPHA_SIGNAL_SOURCE", "PYTHON").strip().upper()
 if SIGNAL_SOURCE not in {"PYTHON", "PINE", "HYBRID"}:
     SIGNAL_SOURCE = "PYTHON"
+PINE_NOTIFICATION_ONLY = os.getenv(
+    "ALPHA_PINE_NOTIFICATION_ONLY", "true"
+).lower() in {"1", "true", "yes", "on"}
 python_signal_bridge = PineSignalBridge(
     os.getenv(
         "ALPHA_PYTHON_BRIDGE_STATE_FILE",
@@ -102,16 +105,34 @@ REQUIRE_HARMONIC_BIAS = os.getenv(
     "ALPHA_STRICT_HARMONIC_RESEARCH_MODE", "false"
 ).lower() in {"1", "true", "yes", "on"}
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-TELEGRAM_CHAT_IDS = [
-    chat_id.strip()
-    for chat_id in (
-        os.getenv("NOTIFY_IDS")
-        or os.getenv("TELEGRAM_CHAT_IDS")
-        or os.getenv("TELEGRAM_CHAT_ID")
-        or ""
-    ).split(",")
-    if chat_id.strip()
-]
+
+
+def _parse_telegram_chat_ids(value: str) -> list[str]:
+    """Parse a comma-separated destination list without exposing its values."""
+    return [chat_id.strip() for chat_id in str(value or "").split(",") if chat_id.strip()]
+
+
+# Production grouping is owned by the Python engine. Pine must never inherit
+# this list because that would mix independent decision sources in one room.
+TELEGRAM_CHAT_IDS = _parse_telegram_chat_ids(
+    os.getenv("TELEGRAM_GROUP_CHAT_IDS")
+    or os.getenv("NOTIFY_IDS")
+    or os.getenv("TELEGRAM_CHAT_IDS")
+    or os.getenv("TELEGRAM_CHAT_ID")
+    or ""
+)
+TELEGRAM_PINE_CHAT_IDS = _parse_telegram_chat_ids(
+    os.getenv("TELEGRAM_PINE_CHAT_IDS")
+    or os.getenv("TELEGRAM_PINE_CHAT_ID")
+    or ""
+)
+TELEGRAM_OWNER_CHAT_IDS = _parse_telegram_chat_ids(
+    os.getenv("TELEGRAM_OWNER_CHAT_IDS")
+    or os.getenv("TELEGRAM_OWNER_CHAT_ID")
+    or os.getenv("OWNER_CHAT_ID")
+    or os.getenv("ADMIN_ID")
+    or ""
+)
 # Only the confirmed-BOS/WAIT-CF state may emit a waiting message.  The old
 # TELEGRAM_NOTIFY_WAIT flag is intentionally ignored because it represented
 # noisy generic WAIT updates in previous deployments.
@@ -142,6 +163,7 @@ TELEGRAM_DELIVERY_STATUS = {
     "last_attempt_at": "",
     "last_success_at": "",
     "last_error": "",
+    "last_audience": "",
 }
 
 
@@ -610,14 +632,46 @@ def _format_time_pair(value) -> str:
     return f"{utc:%a %d %b %Y | %H:%M UTC} / {bkk:%H:%M BKK}"
 
 
-def _telegram_enabled() -> bool:
-    return bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_IDS)
+def _telegram_targets(audience: str = "GROUP") -> list[str]:
+    """Resolve isolated destinations; Pine never falls back to group IDs."""
+    if str(audience or "GROUP").upper() == "PINE":
+        candidates = TELEGRAM_PINE_CHAT_IDS or TELEGRAM_OWNER_CHAT_IDS
+        group_ids = set(TELEGRAM_CHAT_IDS)
+        return [chat_id for chat_id in candidates if chat_id not in group_ids]
+    return list(TELEGRAM_CHAT_IDS)
+
+
+def _telegram_enabled(audience: str = "GROUP") -> bool:
+    return bool(TELEGRAM_TOKEN and _telegram_targets(audience))
+
+
+def _telegram_payload_source(payload: Dict | None = None) -> str:
+    payload = payload or {}
+    signal = payload.get("signal", {}) or {}
+    ea = payload.get("ea", {}) or {}
+    source = str(
+        payload.get("source")
+        or signal.get("source")
+        or ea.get("command_owner")
+        or "UNKNOWN"
+    ).strip().upper()
+    if source.startswith("PINE"):
+        return "PINE"
+    if source.startswith("PYTHON"):
+        return "PYTHON"
+    return source or "UNKNOWN"
+
+
+def _telegram_payload_audience(payload: Dict | None = None) -> str:
+    """Route Pine to a Pine room or owner; Python keeps grouping ownership."""
+    return "PINE" if _telegram_payload_source(payload) == "PINE" else "GROUP"
 
 
 def _telegram_signal_key(payload: Dict) -> str:
     ea = payload.get("ea", {}) or {}
     signal = payload.get("signal", {}) or {}
     return "|".join([
+        _telegram_payload_source(payload),
         str(ea.get("signal_id", "")),
         str(ea.get("action", "")),
         str(ea.get("execution_state", "")),
@@ -846,27 +900,36 @@ def _telegram_market_is_open(
     return telegram_market_is_open(payload_session=payload_session, now=now)
 
 
-def send_telegram_message(text: str, *, test_mode: bool = False) -> bool:
+def send_telegram_message(
+    text: str,
+    *,
+    test_mode: bool = False,
+    audience: str = "GROUP",
+) -> bool:
     if test_mode and not str(text).startswith("🧪 <b>TEST"):
         return False
     attempted_at = datetime.now(timezone.utc).isoformat()
     with LAST_TELEGRAM_LOCK:
         TELEGRAM_DELIVERY_STATUS["last_attempt_at"] = attempted_at
         TELEGRAM_DELIVERY_STATUS["last_error"] = ""
+        TELEGRAM_DELIVERY_STATUS["last_audience"] = str(audience or "GROUP").upper()
     if not test_mode and not _telegram_market_is_open():
         with LAST_TELEGRAM_LOCK:
             TELEGRAM_DELIVERY_STATUS["last_error"] = "MARKET_CLOSED"
         return False
-    if not _telegram_enabled():
+    audience = str(audience or "GROUP").upper()
+    targets = _telegram_targets(audience)
+    if not _telegram_enabled(audience):
         disabled_reason = (
             "TELEGRAM_DISABLED:"
-            f"token_set={bool(TELEGRAM_TOKEN)}:chat_ids={len(TELEGRAM_CHAT_IDS)}"
+            f"audience={audience}:token_set={bool(TELEGRAM_TOKEN)}:chat_ids={len(targets)}"
         )
         with LAST_TELEGRAM_LOCK:
             TELEGRAM_DELIVERY_STATUS["last_error"] = disabled_reason
         print(
             "AlphaBuffalo Telegram disabled | "
-            f"token_set={bool(TELEGRAM_TOKEN)} chat_ids={len(TELEGRAM_CHAT_IDS)}",
+            f"audience={audience} token_set={bool(TELEGRAM_TOKEN)} "
+            f"chat_ids={len(targets)}",
             flush=True,
         )
         return False
@@ -874,7 +937,7 @@ def send_telegram_message(text: str, *, test_mode: bool = False) -> bool:
     text = ensure_telegram_disclaimer(text)
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     ok = False
-    for chat_id in TELEGRAM_CHAT_IDS:
+    for chat_id in targets:
         try:
             response = guarded_telegram_post(
                 url,
@@ -940,7 +1003,12 @@ def _trend_update_key(payload: Dict) -> str:
     ):
         raw = price_action.get(key) or fallback
         states.append(_public_trend_state(raw, bias))
-    return "|".join([str(symbol).upper(), session or "UNKNOWN", *states])
+    return "|".join([
+        _telegram_payload_source(payload),
+        str(symbol).upper(),
+        session or "UNKNOWN",
+        *states,
+    ])
 
 
 def _load_last_trend_update_key() -> str:
@@ -1375,7 +1443,12 @@ def build_telegram_test_messages(direction: str = "SELL") -> list[str]:
 def maybe_broadcast_confirmation(payload: Dict) -> bool:
     """Send one WAIT-CF message per active confirmed BOS, never on every poll."""
     global LAST_TELEGRAM_CONFIRM_KEY
-    if not TELEGRAM_NOTIFY_WAIT or not _telegram_market_is_open(payload) or not _telegram_enabled():
+    audience = _telegram_payload_audience(payload)
+    if (
+        not TELEGRAM_NOTIFY_WAIT
+        or not _telegram_market_is_open(payload)
+        or not _telegram_enabled(audience)
+    ):
         return False
     ea = payload.get("ea", {}) or {}
     eligible, direction, price, _ = _bos_confirmation_context(payload)
@@ -1390,6 +1463,7 @@ def maybe_broadcast_confirmation(payload: Dict) -> bool:
         blueprint, ["harmonic", "bos_sources"], []
     )
     key = "|".join([
+        _telegram_payload_source(payload),
         str(payload.get("symbol") or PUBLIC_SYMBOL_DEFAULT).upper(),
         direction,
         ",".join(sources) if isinstance(sources, list) else str(sources),
@@ -1399,7 +1473,10 @@ def maybe_broadcast_confirmation(payload: Dict) -> bool:
             return False
         previous = LAST_TELEGRAM_CONFIRM_KEY
         LAST_TELEGRAM_CONFIRM_KEY = key
-    sent = send_telegram_message(format_telegram_confirmation(payload))
+    sent = send_telegram_message(
+        format_telegram_confirmation(payload),
+        audience=audience,
+    )
     if not sent:
         with LAST_TELEGRAM_LOCK:
             if LAST_TELEGRAM_CONFIRM_KEY == key:
@@ -1413,9 +1490,10 @@ def maybe_broadcast_trend_update(payload: Dict) -> bool:
     if not _telegram_market_is_open(payload):
         return False
 
+    audience = _telegram_payload_audience(payload)
     if not TELEGRAM_NOTIFY_TREND_UPDATE:
         return False
-    if not _telegram_enabled():
+    if not _telegram_enabled(audience):
         return False
 
     key = _trend_update_key(payload)
@@ -1428,7 +1506,10 @@ def maybe_broadcast_trend_update(payload: Dict) -> bool:
         # cannot publish the same session snapshot twice.
         LAST_TELEGRAM_TREND_UPDATE_KEY = key
 
-    sent = send_telegram_message(format_telegram_trend_update(payload))
+    sent = send_telegram_message(
+        format_telegram_trend_update(payload),
+        audience=audience,
+    )
     if sent:
         with LAST_TELEGRAM_LOCK:
             _persist_last_trend_update_key(key)
@@ -1442,7 +1523,8 @@ def maybe_broadcast_signal(payload: Dict) -> bool:
     """Broadcast an accepted OPEN once; lifecycle/fill/debug events stay silent."""
     global LAST_TELEGRAM_SIGNAL_KEY
 
-    if not _telegram_market_is_open(payload):
+    audience = _telegram_payload_audience(payload)
+    if not _telegram_market_is_open(payload) or not _telegram_enabled(audience):
         return False
 
     ea = payload.get("ea", {}) or {}
@@ -1483,7 +1565,10 @@ def maybe_broadcast_signal(payload: Dict) -> bool:
         previous_key = LAST_TELEGRAM_SIGNAL_KEY
         LAST_TELEGRAM_SIGNAL_KEY = signal_key
 
-    sent = send_telegram_message(format_telegram_signal(payload))
+    sent = send_telegram_message(
+        format_telegram_signal(payload),
+        audience=audience,
+    )
     if not sent:
         # Do not permanently deduplicate a delivery that never reached Telegram.
         with LAST_TELEGRAM_LOCK:
@@ -2182,6 +2267,7 @@ def build_api_signal_response(symbol: str, signal: Dict, ea: Dict) -> Dict:
     return {
         **contract,
         "symbol": symbol,
+        "source": "PYTHON",
         "signal": signal,
         "ea": ea,
     }
@@ -2473,6 +2559,7 @@ def telegram_status(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
     public_symbol = str(symbol or PUBLIC_SYMBOL_DEFAULT).replace("/", "").upper()
     with LAST_TELEGRAM_LOCK:
         delivery = dict(TELEGRAM_DELIVERY_STATUS)
+    pine_targets = _telegram_targets("PINE")
     pending = (
         pine_signal_bridge.pending_command(public_symbol)
         if SIGNAL_SOURCE == "PINE"
@@ -2482,7 +2569,24 @@ def telegram_status(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
         "status": "ok",
         "signal_source": SIGNAL_SOURCE,
         "telegram_enabled": _telegram_enabled(),
+        "pine_telegram_enabled": _telegram_enabled("PINE"),
         "chat_ids_count": len(TELEGRAM_CHAT_IDS),
+        "group_owner": "PYTHON",
+        "group_chat_ids_count": len(TELEGRAM_CHAT_IDS),
+        "pine_chat_ids_count": len(TELEGRAM_PINE_CHAT_IDS),
+        "pine_effective_chat_ids_count": len(pine_targets),
+        "owner_fallback_configured": bool(TELEGRAM_OWNER_CHAT_IDS),
+        "pine_destination": (
+            "PINE_ROOM"
+            if TELEGRAM_PINE_CHAT_IDS and pine_targets
+            else "OWNER"
+            if TELEGRAM_OWNER_CHAT_IDS and pine_targets
+            else "DISABLED"
+        ),
+        "pine_group_fallback": False,
+        "pine_notification_only": bool(
+            SIGNAL_SOURCE == "PYTHON" and PINE_NOTIFICATION_ONLY
+        ),
         "pine_monitor_enabled": TELEGRAM_PINE_MONITOR_ENABLED,
         "trend_update_enabled": TELEGRAM_NOTIFY_TREND_UPDATE,
         "market_open": _telegram_market_is_open(),
@@ -2873,7 +2977,8 @@ def signal_scenarios(key: str = "", symbol: str = SYMBOL_DEFAULT):
 
 @app.post("/webhook/tv")
 async def webhook_tv(request: Request):
-    if SIGNAL_SOURCE not in {"PINE", "HYBRID"}:
+    notification_only = SIGNAL_SOURCE == "PYTHON" and PINE_NOTIFICATION_ONLY
+    if SIGNAL_SOURCE not in {"PINE", "HYBRID"} and not notification_only:
         raise HTTPException(status_code=409, detail="PINE_SIGNAL_MODE_DISABLED")
 
     payload = await request.json()
@@ -2922,7 +3027,11 @@ async def webhook_tv(request: Request):
                     effective_payload.pop(field, None)
 
     try:
-        command = pine_signal_bridge.ingest(effective_payload)
+        # In Python production mode a transient bridge validates Pine without
+        # persisting any command. Pine can notify its isolated destination but
+        # can never race the dedicated Python EA command queue.
+        relay = PineSignalBridge(None) if notification_only else pine_signal_bridge
+        command = relay.ingest(effective_payload)
     except PineSignalError as exc:
         print(
             "AlphaBuffalo Pine webhook invalid | "
@@ -2934,6 +3043,29 @@ async def webhook_tv(request: Request):
 
     if reverse_blocked_reason:
         command["reverse_blocked_reason"] = reverse_blocked_reason
+
+    if notification_only:
+        public_payload = build_pine_api_payload(command)
+        telegram_notified = maybe_broadcast_signal(public_payload)
+        print(
+            "AlphaBuffalo Pine notification accepted | "
+            f"direction={command.get('direction')} signal_id={command.get('signal_id')} "
+            f"execution_queued=False telegram_notified={telegram_notified}",
+            flush=True,
+        )
+        return {
+            "status": "accepted",
+            "source": "PINE",
+            "notification_only": True,
+            "execution_queued": False,
+            "command": {
+                "action": "HOLD",
+                "reason": "PINE_NOTIFICATION_ONLY",
+                "signal_id": command.get("signal_id"),
+                "direction": command.get("direction"),
+            },
+            "telegram_notified": telegram_notified,
+        }
 
     if command.get("action") == "HOLD":
         return {

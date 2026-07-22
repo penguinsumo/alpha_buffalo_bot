@@ -5,9 +5,17 @@ and HA5 exits. The EA is execution-only.
 
 ## Entry Flow
 
-1. Poll `GET /signal/latest?key=...&symbol=XAU/USD`.
-2. Open only when `ea.action=OPEN` and `ea.execution_state=READY`.
-3. Use `ea.direction`, `ea.entry`, `ea.sl`, `ea.tp1`, and `ea.tp_final`.
+The isolated Python EA polls
+`GET /execution/python/command?key=...&symbol=XAUUSD-STDc&client_id=RAILWAY_PYTHON_V1`.
+The service canonicalizes broker suffixes for market data while preserving the
+broker symbol for order execution. The legacy `/execution/command` route
+returns `HOLD/USE_DEDICATED_PYTHON_ENDPOINT` in Python mode, preventing two EAs
+from racing for the same command.
+
+1. Poll the dedicated Python command route.
+2. Open only when `command.action=OPEN`.
+3. Use `command.direction`, `command.entry`, `command.sl`, `command.tp1`, and
+   `command.tp_final`.
 4. After the broker confirms the fill, call `POST /execution/fill`:
 
 ```json
@@ -26,7 +34,7 @@ rejects a second active position for the same symbol.
 
 ## Management Flow
 
-Poll `GET /execution/command?key=...&symbol=XAU/USD`. Supported actions are:
+Continue polling the same dedicated Python route. Supported actions are:
 
 - `HOLD`: do nothing.
 - `PARTIAL_CLOSE_MOVE_BE`: close `close_pct`, then set SL to `new_sl`.
@@ -73,6 +81,6 @@ production. The default `/tmp/alpha_buffalo_execution_state.json` survives a
 process restart only when that filesystem survives; it is not a substitute for
 a configured persistent volume.
 
-This repository contains no `.mq4` or `.mq5` source, so the MetaTrader project
-must implement these HTTP calls and allow the service URL in MetaTrader's
-WebRequest settings before live execution is enabled.
+The dedicated implementation is
+`mt5/AlphaBuffalo_RailwayPythonEA_v100.mq5`. MetaTrader must allow the Railway
+service URL in WebRequest settings before live execution is enabled.
