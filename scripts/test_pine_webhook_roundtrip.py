@@ -84,9 +84,12 @@ def main() -> None:
             assert opened.json()["telegram_notified"] is True
             assert len(telegram_messages) == 1
             assert "BUY" in telegram_messages[-1]
-            assert "PINE_V2_4" in telegram_messages[-1]
-            assert "Signal accepted and queued" in telegram_messages[-1]
-            assert "EA Executing" not in telegram_messages[-1]
+            assert "ALPHA BUFFALO" in telegram_messages[-1]
+            assert "TP1" in telegram_messages[-1]
+            assert "TP2" in telegram_messages[-1]
+            assert "EA Executing" in telegram_messages[-1]
+            assert "PINE_V2_4" not in telegram_messages[-1]
+            assert "Signal accepted and queued" not in telegram_messages[-1]
             open_command = opened.json()["command"]
             assert open_command["action"] == "OPEN"
 
@@ -123,9 +126,8 @@ def main() -> None:
                 },
             )
             assert filled.status_code == 200, filled.text
-            assert filled.json()["telegram_notified"] is True
-            assert len(telegram_messages) == 2
-            assert "MT5 FILLED" in telegram_messages[-1]
+            assert filled.json()["telegram_notified"] is False
+            assert len(telegram_messages) == 1
 
             open_ack = client.post(
                 "/execution/ack",
@@ -201,9 +203,8 @@ def main() -> None:
             assert closed.status_code == 200, closed.text
             close_command = closed.json()["command"]
             assert close_command["action"] == "CLOSE_ALL"
-            assert closed.json()["telegram_notified"] is True
-            assert len(telegram_messages) == 3
-            assert "Alpha Buffalo CLOSE" in telegram_messages[-1]
+            assert closed.json()["telegram_notified"] is False
+            assert len(telegram_messages) == 1
 
             close_ack = client.post(
                 "/execution/ack",
@@ -220,7 +221,7 @@ def main() -> None:
             assert close_ack.json()["next_command"]["action"] == "OPEN"
             assert close_ack.json()["next_command"]["direction"] == "SELL"
             assert close_ack.json()["telegram_notified"] is True
-            assert len(telegram_messages) == 4
+            assert len(telegram_messages) == 2
             assert "SELL" in telegram_messages[-1]
 
             reverse_poll = client.get(
@@ -254,7 +255,7 @@ def main() -> None:
     print("PASS CLOSE ACK clears durable execution state")
     print("PASS CLOSE ACK promotes the queued reverse SELL OPEN")
     print("PASS Pine OPEN and promoted reverse OPEN notify Telegram exactly once")
-    print("PASS Pine CLOSE and confirmed MT5 fill are visible in Telegram")
+    print("PASS Pine CLOSE and confirmed MT5 fill stay out of public Telegram")
     print("PASS Telegram health exposes relay and pending-command state safely")
     print("PASS Python mode rejects Pine webhook ownership")
     print("Summary: 12/12 webhook round-trip checks passed")
