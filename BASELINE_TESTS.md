@@ -81,6 +81,37 @@ This snapshot is useful for checking that performance evidence still exists,
 but it should not be confused with Baseline A. It is not the 41-trade Risk Gate
 proof.
 
+## Baseline C: Frozen Policy Comparison (2026-07-15)
+
+Frozen research fixture:
+
+- SHA256: `9aec87acd11e522d1c70a9b81585eb1995d85c3e8145b3d4cde6ba29bbd179d3`
+- Source rows: `5000`
+- Open-market rows after the current session clock: `3244`
+- Actual coverage: `2026-05-20 15:00 UTC` through `2026-07-10 18:45 UTC`
+- Volume available: no; this replay cannot validate real GC RVOL walls
+
+Shared assumptions:
+
+- Initial equity: `$10,000`
+- Risk: `1%` per trade
+- Minimum RR: `1.5`
+- Round-trip cost: `0.5` point
+- One position at a time
+- Opposite strong M15 HA exit is active only after BE
+
+Fair result with the current session clock:
+
+- Baseline BUY alone: `13` trades, `-2.51%`, PF `0.70`, DD `4.11%`
+- Baseline SELL alone: `21` trades, `+5.44%`, PF `1.70`, DD `3.23%`
+- Baseline BUY+SELL unchanged: `34` trades, `+2.80%`, PF `1.17`, DD `5.73%`
+- Final fused policy: `22` trades, `+5.39%`, PF `1.69`, DD `3.27%`
+
+The final fused policy therefore restores baseline SELL, but does not activate
+the historically weak BUY baseline by itself. BUY must also confirm the current
+V4 PRZ setup; in this fixture it produced one near-BE trade. Confirmed harmonic
+D/PRZ remains the only counter-trend exception.
+
 ## Current CI Guardrail
 
 The active offline guardrail is:
@@ -89,7 +120,9 @@ The active offline guardrail is:
 
 It protects the final v12 behavior without network access:
 
-- Upper-zone V4 SELL is not blocked by bullish trend context.
+- Baseline SELL requires downtrend/EMA/sweep evidence.
+- Baseline BUY also requires the current V4 PRZ setup.
+- Confirmed harmonic D/PRZ is the only counter-trend override.
 - Lower-zone support blocks fresh SELL.
 - Upper-zone resistance blocks fresh BUY.
 - Low RR candidate remains visible but EA waits.

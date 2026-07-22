@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
@@ -32,6 +33,7 @@ from engine_v4.indicators import (
 from engine_v4.router import SignalRouter
 from engine_v4.sell_engine import SellSignalEngine
 from engine_v4.session_gate import GateResult
+from engine_v4.strategy_policy import BASELINE_DEFAULT, LOCATION_FIRST, strategy_profile
 from execution_lifecycle import ExecutionLifecycleManager, closed_ha5_evidence
 from scenario_scanner import (
     build_confirmed_parallel_channel,
@@ -59,6 +61,26 @@ NY_SESSION = SessionState(
     timestamp="2026-07-10T15:00:00+00:00",
 )
 ALLOWED = GateResult(True, "test")
+
+# Preserve the previous location-first contract for its dedicated regression
+# cases. New baseline-default cases below explicitly remove this override.
+os.environ["ENGINE_STRATEGY_PROFILE"] = LOCATION_FIRST
+
+
+@contextmanager
+def engine_profile(value: str | None):
+    previous = os.environ.get("ENGINE_STRATEGY_PROFILE")
+    if value is None:
+        os.environ.pop("ENGINE_STRATEGY_PROFILE", None)
+    else:
+        os.environ["ENGINE_STRATEGY_PROFILE"] = value
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("ENGINE_STRATEGY_PROFILE", None)
+        else:
+            os.environ["ENGINE_STRATEGY_PROFILE"] = previous
 
 
 def assert_true(value, message: str) -> None:
@@ -1391,6 +1413,91 @@ def test_every_repository_telegram_sender_uses_central_closed_gate() -> None:
         telegram_guard_runtime.requests.post = original_post
 
 
+def test_baseline_profile_is_the_production_default() -> None:
+    with engine_profile(None):
+        assert_equal(
+            strategy_profile(),
+            BASELINE_DEFAULT,
+            "missing strategy-profile env must restore the proven baseline",
+        )
+
+
+def test_baseline_default_routes_buy_and_sell_by_trend_sweep() -> None:
+    buy_row = base_row()
+    buy_row.update(
+        {
+            "V4_Buy_Setup": True,
+            "V4_Sell_Setup": False,
+            "Bull_Sweep": True,
+            "Bear_Sweep": False,
+            "Swing_H": 110.0,
+            "Diff": 20.0,
+            "BB_Lower": 90.0,
+            "low": 91.0,
+        }
+    )
+    sell_row = base_row()
+    sell_row.update(
+        {
+            "Trend_1H_Up": False,
+            "EMA20": 80.0,
+            "EMA50": 100.0,
+            "V4_Buy_Setup": False,
+            "V4_Sell_Setup": False,
+            "Bull_Sweep": False,
+            "Bear_Sweep": True,
+            "high": 109.0,
+            "Fib_072": 95.0,
+            "PRZ_Next": 94.0,
+        }
+    )
+
+    with engine_profile(None):
+        buy = BuySignalEngine().evaluate(frame([buy_row]), 0, NY_SESSION, ALLOWED)
+        sell = SellSignalEngine().evaluate(frame([sell_row]), 0, NY_SESSION, ALLOWED)
+
+    assert_true(buy is not None, "baseline trend/sweep BUY must be executable")
+    assert_equal(buy["entry_mode"], "BASELINE_BUY_TREND_SWEEP", "baseline BUY mode")
+    assert_true(buy["baseline_default"], "baseline BUY evidence")
+    assert_equal(buy["sl"], 98.5, "baseline BUY keeps 1.5 ATR stop")
+
+    assert_true(sell is not None, "baseline trend/sweep SELL must be executable")
+    assert_equal(sell["entry_mode"], "BASELINE_SELL_TREND_SWEEP", "baseline SELL mode")
+    assert_true(sell["baseline_default"], "baseline SELL evidence")
+    assert_equal(sell["sl"], 101.5, "baseline SELL keeps 1.5 ATR stop")
+    assert_equal(sell["tp"], 95.0, "baseline SELL keeps Fib target priority")
+
+    no_prz_buy = dict(buy_row)
+    no_prz_buy["V4_Buy_Setup"] = False
+    with engine_profile(None):
+        blocked_buy = BuySignalEngine().evaluate(
+            frame([no_prz_buy]), 0, NY_SESSION, ALLOWED
+        )
+    assert_equal(
+        blocked_buy,
+        None,
+        "historically weak baseline BUY must also confirm the current PRZ setup",
+    )
+
+
+def test_confirmed_harmonic_d_is_the_only_countertrend_override() -> None:
+    row = base_row()
+    harmonic_sell = GateResult(True, "test|HARMONIC_SELL_D_PRZ_ALLOWED")
+
+    with engine_profile(None):
+        blocked = SellSignalEngine().evaluate(frame([row]), 0, NY_SESSION, ALLOWED)
+        allowed = SellSignalEngine().evaluate(frame([row]), 0, NY_SESSION, harmonic_sell)
+
+    assert_equal(blocked, None, "plain upper PRZ cannot override bullish baseline direction")
+    assert_true(allowed is not None, "confirmed harmonic D may override baseline direction")
+    assert_equal(
+        allowed["entry_mode"],
+        "HARMONIC_D_PRZ_SELL_OVERRIDE",
+        "harmonic override mode",
+    )
+    assert_true(allowed["harmonic_reversal_override"], "harmonic override evidence")
+
+
 TESTS = [
     test_upper_sell_not_blocked_by_bullish_context,
     test_lower_buy_not_blocked_by_bearish_context,
@@ -1431,6 +1538,9 @@ TESTS = [
     test_configured_holiday_blocks_session_and_telegram,
     test_weekend_direct_sender_never_calls_telegram_network,
     test_every_repository_telegram_sender_uses_central_closed_gate,
+    test_baseline_profile_is_the_production_default,
+    test_baseline_default_routes_buy_and_sell_by_trend_sweep,
+    test_confirmed_harmonic_d_is_the_only_countertrend_override,
 ]
 
 

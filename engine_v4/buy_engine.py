@@ -12,6 +12,12 @@ from typing import Optional
 import pandas as pd
 from core.contracts.base_engine import BaseEngine
 from engine_v4.session_gate import GateResult
+from engine_v4.strategy_policy import (
+    BASELINE_DEFAULT,
+    baseline_buy_setup,
+    confirmed_harmonic_d_override,
+    strategy_profile,
+)
 from session_clock import SessionState
 
 
@@ -31,9 +37,26 @@ class BuySignalEngine(BaseEngine):
 
         row = df.iloc[idx]
         min_rr = float(os.getenv("TRADE_MIN_RR", "1.5"))
+        profile = strategy_profile()
+        location_setup = bool(row.get("V4_Buy_Setup", False))
+        # The historical BUY baseline was weak in the frozen replay. Require
+        # its trend/sweep permission and the current Pine PRZ setup together.
+        baseline_route = (
+            profile == BASELINE_DEFAULT
+            and baseline_buy_setup(row)
+            and location_setup
+        )
+        harmonic_reversal = bool(
+            profile == BASELINE_DEFAULT
+            and location_setup
+            and confirmed_harmonic_d_override("BUY", gate_result.reason)
+        )
 
-        # Location-first: lower BB / Pine PRZ support / killzone + PA + VSA.
-        if not bool(row.get("V4_Buy_Setup", False)):
+        if profile == BASELINE_DEFAULT:
+            if not (baseline_route or harmonic_reversal):
+                return None
+        # Explicit compatibility profile for controlled A/B comparison.
+        elif not location_setup:
             return None
 
         # Do not buy into active upper rejection.
@@ -53,9 +76,13 @@ class BuySignalEngine(BaseEngine):
         pinbar_break = bool(row.get("Zone_Buy_Pinbar_Trigger", False))
         pinbar_wall_low = float(row.get("Zone_Buy_Wall_Low", 0.0) or 0.0)
 
-        # V4 BB+PRZ confluence uses local sweep/reaction low for SL.
-        # Do not use the far side of the whole PRZ for scalp SL; it destroys RR.
-        if deep_reclaim and deep_wall_low > 0:
+        # The default route keeps the historical 1.5 ATR stop that produced the
+        # stable SELL baseline. Confirmed harmonic-D reversals retain the local
+        # PRZ wall stop because the pattern invalidation level is explicit.
+        if baseline_route and not harmonic_reversal:
+            sl_anchor = entry - atr * 1.5
+            sl = sl_anchor
+        elif deep_reclaim and deep_wall_low > 0:
             sl_anchor = deep_wall_low
             sl = sl_anchor - max(atr * 0.12, entry * 0.00015)
         elif pinbar_break and pinbar_wall_low > 0:
@@ -101,6 +128,10 @@ class BuySignalEngine(BaseEngine):
             quality_score += 1
         if bool(row.get("Trend_1H_Up", False)):
             quality_score += 1
+        if baseline_route:
+            quality_score += 1
+        if harmonic_reversal:
+            quality_score += 2
 
         if quality_score >= 5:
             quality_grade = "PREMIUM"
@@ -122,9 +153,17 @@ class BuySignalEngine(BaseEngine):
             basis_parts.append("DEEP_100_RECLAIM")
         if pinbar_break:
             basis_parts.append("PINBAR_HIGH_BREAK")
+        if baseline_route:
+            basis_parts.append("BASELINE_TREND_SWEEP")
+        if harmonic_reversal:
+            basis_parts.append("HARMONIC_D_REVERSAL")
         v5_basis = "|".join(basis_parts) if basis_parts else "LOWER_REACTION"
 
-        if deep_reclaim:
+        if harmonic_reversal:
+            entry_mode = "HARMONIC_D_PRZ_BUY_OVERRIDE"
+        elif baseline_route:
+            entry_mode = "BASELINE_BUY_TREND_SWEEP"
+        elif deep_reclaim:
             entry_mode = "V4_BUY_DEEP_100_WALL_RECLAIM"
         elif pinbar_break:
             entry_mode = "V4_BUY_KIVANC_PINBAR_BREAK"
@@ -141,7 +180,7 @@ class BuySignalEngine(BaseEngine):
             "tp1_price": tp1,
             "tp2_price": tp,
             "score": quality_score,
-            "reason": f"V4 Engine: {session_state.session} BUY",
+            "reason": f"{profile}: {session_state.session} BUY",
             "zone_confluence": bool(bb_prz_confluence or deep_reclaim or pinbar_break),
             "bb_prz_confluence": bb_prz_confluence,
             "v4_entry_zone": bool(row.get("V4_Buy_Entry_Zone", False)),
@@ -152,17 +191,20 @@ class BuySignalEngine(BaseEngine):
             "session": session_state.session,
             "timestamp": row.name,
             "entry_mode": entry_mode,
+            "strategy_profile": profile,
+            "baseline_default": baseline_route,
+            "harmonic_reversal_override": harmonic_reversal,
             "exit_mode": "V4_BB_UPPER",
             "setup_state": "BUY_SETUP" if not choch else "BUY_CF_READY",
-            "be_trigger": tp1 if tp1 > entry else entry * 1.0015,
+            "be_trigger": entry * 1.0015 if baseline_route and not harmonic_reversal else tp1 if tp1 > entry else entry * 1.0015,
             "trail_factor": 0.9995,
-            "be_policy": "BB_MID_OR_PROFIT_0_15",
+            "be_policy": "BASELINE_PROFIT_0_15" if baseline_route and not harmonic_reversal else "BB_MID_OR_PROFIT_0_15",
             "trail_policy": "WIDE_TRAIL_AFTER_BE",
             "max_bars": 40,
             "v5_quality_score": quality_score,
             "v5_quality_grade": quality_grade,
             "v5_basis": v5_basis,
-            "session_quality_gate": "DEEP_100_WALL_RECLAIM" if deep_reclaim else "KIVANC_PINBAR_BREAK" if pinbar_break else "PINE_PRZ_SUPPORT_PA_VSA",
+            "session_quality_gate": "HARMONIC_D_PRZ_OVERRIDE" if harmonic_reversal else "BASELINE_H1_EMA_SWEEP" if baseline_route else "DEEP_100_WALL_RECLAIM" if deep_reclaim else "KIVANC_PINBAR_BREAK" if pinbar_break else "PINE_PRZ_SUPPORT_PA_VSA",
             "pine_valid": pine_valid,
             "pa_bull_confirmed": bool(row.get("Pine_PA_Bull_Confirmed", False)),
             "vsa_buy_pressure": float(row.get("VSA_Buy_Pressure", 0.0) or 0.0),

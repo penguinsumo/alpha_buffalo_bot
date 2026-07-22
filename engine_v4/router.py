@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""
-SignalRouter — V4 location-first router.
+"""Signal router for the baseline-default policy and PRZ/Harmonic override.
 
-Core rule:
-- PRZ Support + BB Lower + HA/Pinbar Bullish + VSA_BUY wins + RR >= min = BUY V4 entry
-- PRZ Resistance + BB Upper + HA/Pinbar Bearish + VSA_SELL wins + RR >= min = SELL V4 entry
-- CHoCH/BOS promotes V4 scalp to V5 journey; it is not required for V4 entry.
+The engines establish authority: historical H1/EMA+sweep baseline by default,
+or a confirmed harmonic-D reversal at PRZ. The router keeps one canonical
+BUY/SELL schema and ranks confirmed harmonic reversal authority first.
 """
 from __future__ import annotations
 
@@ -152,12 +150,27 @@ class SignalRouter:
         sig["harmonic_bias"] = harmonic_gate.to_dict()
 
     def _rank(self, sig: dict) -> tuple:
-        # Location first. Do not add SELL/BUY bias here.
+        # Direction authority is decided by the engines/FinalGate. The router
+        # only prefers a confirmed harmonic-D reversal over the baseline route.
         contract_valid = 1 if sig.get("status") == SIGNAL else 0
+        policy_authority = (
+            2
+            if sig.get("harmonic_reversal_override")
+            else 1 if sig.get("baseline_default") else 0
+        )
         confluence = 1 if sig.get("bb_prz_confluence") or sig.get("zone_confluence") else 0
         pine_valid = 1 if sig.get("pine_valid") else 0
         cf_ready = 1 if str(sig.get("setup_state", "")).upper().endswith("CF_READY") else 0
         quality = int(sig.get("v5_quality_score", 0) or 0)
         rr = float(sig.get("entry_rr", 0.0) or 0.0)
         age_score = -int(sig.get("selected_age_bars", 99) or 99)
-        return (contract_valid, confluence, pine_valid, cf_ready, quality, rr, age_score)
+        return (
+            contract_valid,
+            policy_authority,
+            confluence,
+            pine_valid,
+            cf_ready,
+            quality,
+            rr,
+            age_score,
+        )

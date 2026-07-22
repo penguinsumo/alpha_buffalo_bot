@@ -11,6 +11,12 @@ from typing import Optional
 import pandas as pd
 from core.contracts.base_engine import BaseEngine
 from engine_v4.session_gate import GateResult
+from engine_v4.strategy_policy import (
+    BASELINE_DEFAULT,
+    baseline_sell_setup,
+    confirmed_harmonic_d_override,
+    strategy_profile,
+)
 from session_clock import SessionState
 
 
@@ -45,17 +51,26 @@ class SellSignalEngine(BaseEngine):
         upper_setup = bool(row.get("V4_Sell_Setup", False))
         pine_valid = bool(row.get("Pine_Valid_Sell", False))
         sell_continuation = bool(recent_micro_bos_down and row.get("VSA_Sell_Wins", False))
+        profile = strategy_profile()
+        baseline_route = profile == BASELINE_DEFAULT and baseline_sell_setup(row)
+        harmonic_reversal = bool(
+            profile == BASELINE_DEFAULT
+            and (upper_setup or pine_valid)
+            and confirmed_harmonic_d_override("SELL", gate_result.reason)
+        )
 
-        # Keep bearish trend context for continuation only. V4 upper-zone
-        # location setups must not be blocked by H1/EMA trend bias.
-        if not (upper_setup or pine_valid):
-            if bool(row.get("Trend_1H_Up", False)):
+        if profile == BASELINE_DEFAULT:
+            if not (baseline_route or harmonic_reversal):
                 return None
-            if not (row.get("EMA20", 0) < row.get("EMA50", 0)):
+        else:
+            # Previous location-first behavior remains available for A/B tests.
+            if not (upper_setup or pine_valid):
+                if bool(row.get("Trend_1H_Up", False)):
+                    return None
+                if not (row.get("EMA20", 0) < row.get("EMA50", 0)):
+                    return None
+            if not (upper_setup or pine_valid or sell_continuation):
                 return None
-
-        if not (upper_setup or pine_valid or sell_continuation):
-            return None
 
         entry = float(row["close"])
         atr = float(row.get("ATR14", 0.0) or 0.0)
@@ -70,9 +85,10 @@ class SellSignalEngine(BaseEngine):
         pinbar_break = bool(row.get("Zone_Sell_Pinbar_Trigger", False))
         pinbar_wall_high = float(row.get("Zone_Sell_Wall_High", 0.0) or 0.0)
 
-        # V4 BB+PRZ confluence uses local sweep/reaction high for SL.
-        # Do not use the far side of the whole PRZ for scalp SL; it destroys RR.
-        if deep_reclaim and deep_wall_high > 0:
+        if baseline_route and not harmonic_reversal:
+            sl_anchor = entry + atr * 1.5
+            sl = sl_anchor
+        elif deep_reclaim and deep_wall_high > 0:
             sl_anchor = deep_wall_high
             sl = sl_anchor + max(atr * 0.12, entry * 0.00015)
         elif pinbar_break and pinbar_wall_high > 0:
@@ -87,7 +103,18 @@ class SellSignalEngine(BaseEngine):
 
         signal_tp = float(row.get("Fib_072", 0.0) or 0.0)
         bb_lower_tp = float(row.get("BB_Lower", 0.0) or 0.0)
-        if signal_tp > 0 and signal_tp < entry and (recent_micro_bos_down or recent_sweep_above_100 or recent_sell_reclaim):
+        baseline_prz_tp = float(row.get("PRZ_Next", 0.0) or 0.0)
+        if baseline_route and not harmonic_reversal:
+            if 0 < signal_tp < entry:
+                tp = signal_tp
+                exit_mode = "BASELINE_FIB_072"
+            elif 0 < baseline_prz_tp < entry:
+                tp = baseline_prz_tp
+                exit_mode = "BASELINE_PRZ_NEXT"
+            else:
+                tp = bb_lower_tp
+                exit_mode = "BASELINE_BB_LOWER_FALLBACK"
+        elif signal_tp > 0 and signal_tp < entry and (recent_micro_bos_down or recent_sweep_above_100 or recent_sell_reclaim):
             tp = signal_tp
             exit_mode = "V5_SIGNAL_TP"
         else:
@@ -123,6 +150,10 @@ class SellSignalEngine(BaseEngine):
             quality_score += 2
         if pinbar_break:
             quality_score += 1
+        if baseline_route:
+            quality_score += 1
+        if harmonic_reversal:
+            quality_score += 2
 
         if quality_score >= 5:
             quality_grade = "PREMIUM"
@@ -144,9 +175,17 @@ class SellSignalEngine(BaseEngine):
             basis_parts.append("DEEP_100_RECLAIM")
         if pinbar_break:
             basis_parts.append("PINBAR_LOW_BREAK")
+        if baseline_route:
+            basis_parts.append("BASELINE_TREND_SWEEP")
+        if harmonic_reversal:
+            basis_parts.append("HARMONIC_D_REVERSAL")
         v5_basis = "|".join(basis_parts) if basis_parts else "UPPER_REJECTION"
 
-        if deep_reclaim:
+        if harmonic_reversal:
+            entry_mode = "HARMONIC_D_PRZ_SELL_OVERRIDE"
+        elif baseline_route:
+            entry_mode = "BASELINE_SELL_TREND_SWEEP"
+        elif deep_reclaim:
             entry_mode = "V4_SELL_DEEP_100_WALL_RECLAIM"
         elif pinbar_break:
             entry_mode = "V4_SELL_KIVANC_PINBAR_BREAK"
@@ -179,7 +218,7 @@ class SellSignalEngine(BaseEngine):
             "tp1_price": tp1,
             "tp2_price": tp,
             "score": quality_score,
-            "reason": f"V4 Engine: {session_state.session} SELL",
+            "reason": f"{profile}: {session_state.session} SELL",
             "zone_confluence": bool(bb_prz_confluence or deep_reclaim or pinbar_break),
             "bb_prz_confluence": bb_prz_confluence,
             "v4_entry_zone": bool(row.get("V4_Sell_Entry_Zone", False)),
@@ -190,6 +229,9 @@ class SellSignalEngine(BaseEngine):
             "timestamp": row.name,
             "visual_sl_mid": row["BB_Mid"],
             "entry_mode": entry_mode,
+            "strategy_profile": profile,
+            "baseline_default": baseline_route,
+            "harmonic_reversal_override": harmonic_reversal,
             "exit_mode": exit_mode,
             "setup_state": "SELL_SETUP" if not recent_micro_bos_down else "SELL_CF_READY",
             "signal_tp": signal_tp,
@@ -201,7 +243,7 @@ class SellSignalEngine(BaseEngine):
             "v4_session_confirmed": True,
             "ha_bearish": ha_bearish,
             "sell_dot_proxy": bool(ha_bearish and close_below_ema20),
-            "be_policy": "CURRENT_BBMID_LOW",
+            "be_policy": "BASELINE_1R" if baseline_route and not harmonic_reversal else "CURRENT_BBMID_LOW",
             "trail_policy": "NONE",
             "v5_quality_score": quality_score,
             "v5_quality_grade": quality_grade,
@@ -222,7 +264,7 @@ class SellSignalEngine(BaseEngine):
             "entry_rr": rr,
             "rr_ok": rr_ok,
             "min_rr": min_rr,
-            "session_quality_gate": "DEEP_100_WALL_RECLAIM" if deep_reclaim else "KIVANC_PINBAR_BREAK" if pinbar_break else "PINE_PRZ_RESISTANCE_PA_VSA" if upper_setup or pine_valid else "BOS_CONTINUATION",
+            "session_quality_gate": "HARMONIC_D_PRZ_OVERRIDE" if harmonic_reversal else "BASELINE_H1_EMA_SWEEP" if baseline_route else "DEEP_100_WALL_RECLAIM" if deep_reclaim else "KIVANC_PINBAR_BREAK" if pinbar_break else "PINE_PRZ_RESISTANCE_PA_VSA" if upper_setup or pine_valid else "BOS_CONTINUATION",
             "sell_dot_reason": "PINE_PRZ_PA_VSA" if pine_valid else "MICRO_BOS_CONTINUATION",
             "pine_valid": pine_valid,
             "pa_bear_confirmed": bool(row.get("Pine_PA_Bear_Confirmed", False)),

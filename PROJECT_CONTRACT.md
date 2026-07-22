@@ -12,36 +12,46 @@ Do not override it with older branch behavior unless a regression test proves th
 
 ## Core Trading Contract
 
-Alpha Buffalo is location-first, not trend-first.
+Alpha Buffalo uses a baseline-default directional policy, then PRZ/Harmonic
+confirmation. The active default is `ENGINE_STRATEGY_PROFILE=BASELINE_DEFAULT`;
+`LOCATION_FIRST` is retained only for controlled A/B replay.
 
 ### V4 BUY Entry
 
-BUY V4 can exist when:
+The normal BUY route requires both the historical baseline and the current
+Pine PRZ setup:
 
-- PRZ Support / lower location is active
-- BB lower edge or equivalent lower reaction is active
-- HA or pinbar bullish confirmation is present
-- VSA buy pressure wins over sell pressure
+- confirmed H1 trend is up and EMA20 is above EMA50
+- price is inside the historical swing retracement window
+- bullish sweep reaches the lower BB tolerance
+- the current V4 BUY PRZ/PA/VSA setup is active
 - levels are directionally valid
+
+A confirmed harmonic BUY at D/PRZ may override the trend direction, but it
+still requires the current V4 BUY location setup. A forming XABC does not grant
+reversal authority.
 
 RR decides execution readiness. A low-RR candidate may be visible for diagnostics, but EA must stay `WAIT` when `rr_ok=false`.
 
 ### V4 SELL Entry
 
-SELL V4 can exist when:
+The normal SELL route restores the proven `feature/engine-v4` baseline:
 
-- PRZ Resistance / upper location is active
-- BB upper edge or equivalent upper rejection is active
-- HA or pinbar bearish confirmation is present
-- VSA sell pressure wins over buy pressure
+- confirmed H1 trend is down and EMA20 is below EMA50
+- bearish sweep/rejection reaches the upper BB tolerance
+- stop is 1.5 ATR above entry
+- Fib 0.72 is the first target choice, then the next PRZ
 - levels are directionally valid
 
-Trend context must not block a valid upper-zone V4 SELL. Trend can score, label, or manage the trade, but it must not become the first gate for V4 location entry.
+A confirmed harmonic SELL at D/PRZ may override the trend direction only when
+the upper PRZ/Pine SELL setup is active. Plain PRZ contact cannot override the
+baseline direction.
 
 ### Hard Directional Blocks
 
 - Lower BB / PRZ Support + bullish PA/VSA must not open fresh SELL.
 - Upper BB / PRZ Resistance + bearish PA/VSA must not open fresh BUY.
+- Counter-trend entry requires `HARMONIC_{BUY|SELL}_D_PRZ_ALLOWED` from FinalGate.
 
 ### BOS / CHoCH
 
@@ -151,5 +161,6 @@ Known baseline evidence is recorded in `BASELINE_TESTS.md`.
 v12-core.
 
 - Port proof harness, risk accounting, and evidence fields from older baselines.
-- Do not port trend-first PRZ entry gates.
-- Any future merge must preserve PRZ/location-first V4 entry behavior.
+- Keep the proven SELL baseline as the default direction gate.
+- Keep BUY dual-confirmed by baseline trend/sweep plus the current PRZ setup.
+- Keep confirmed harmonic D/PRZ as the only counter-trend override.
