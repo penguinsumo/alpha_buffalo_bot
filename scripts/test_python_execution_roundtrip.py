@@ -70,12 +70,32 @@ def main() -> None:
         )
 
         client = TestClient(service.app)
-        polled = client.get(
+        legacy_poll = client.get(
             "/execution/command",
             params={"key": "PYTHON_TEST_KEY", "symbol": BROKER_SYMBOL},
         )
+        assert legacy_poll.status_code == 200, legacy_poll.text
+        assert legacy_poll.json()["command"]["action"] == "HOLD"
+        assert (
+            legacy_poll.json()["command"]["reason"]
+            == "USE_DEDICATED_PYTHON_ENDPOINT"
+        )
+
+        polled = client.get(
+            "/execution/python/command",
+            params={
+                "key": "PYTHON_TEST_KEY",
+                "symbol": BROKER_SYMBOL,
+                "client_id": "RAILWAY_PYTHON_V1",
+                "account_id": "33740165",
+                "balance": 10000.0,
+                "equity": 10000.0,
+                "day_start_equity": 10000.0,
+            },
+        )
         assert polled.status_code == 200, polled.text
         assert polled.json()["source"] == "PYTHON"
+        assert polled.json()["consumer"] == "RAILWAY_PYTHON_V1"
         command = polled.json()["command"]
         assert command["action"] == "OPEN"
         assert command["direction"] == "SELL"
@@ -116,12 +136,13 @@ def main() -> None:
         assert duplicate["reason"] == "DUPLICATE_ACKED_SIGNAL"
 
     print("PASS confirmed Python signal becomes a durable EA OPEN")
+    print("PASS legacy command lane cannot race the dedicated Python EA")
     print("PASS XAUUSD broker suffix receives the canonical Python command")
     print("PASS pending Python OPEN survives a relay restart")
     print("PASS EA fill registers the broker position lifecycle")
     print("PASS Python OPEN ACK clears the entry command exactly once")
     print("PASS idle Python mode never reports a Pine-owned wait reason")
-    print("Summary: 6/6 Python execution round-trip checks passed")
+    print("Summary: 7/7 Python execution round-trip checks passed")
 
 
 if __name__ == "__main__":
