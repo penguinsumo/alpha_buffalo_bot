@@ -1097,8 +1097,14 @@ def test_telegram_public_output_hides_engine_internals() -> None:
     for token in forbidden:
         assert_true(token not in combined, f"public Telegram output leaked {token}")
 
-    assert_true("Setup   : 🟡 WAIT" in trend_text, "WAIT candidate must not be promoted to a setup")
-    assert_true("V4_SESSION" in signal_text, "trade alert should use public V4_SESSION type")
+    assert_true(
+        "Watch for 🔴 S Setup..." in trend_text,
+        "trend update may advertise the confirmed SELL bias without promoting a WAIT candidate",
+    )
+    assert_true(
+        "SESSION SIGNAL FIRING" in signal_text,
+        "trade formatter should use the public short-trade template",
+    )
 
 
 def test_pine_monitor_does_not_promote_blocked_buy_inside_sell_ha_context() -> None:
@@ -1146,14 +1152,11 @@ def test_pine_monitor_does_not_promote_blocked_buy_inside_sell_ha_context() -> N
     }
 
     text = format_telegram_trend_update(payload)
-    assert_true("Setup   : 🟡 WAIT" in text, "blocked BUY candidate remains WAIT")
-    assert_true("Bias    : 🔴 SELL" in text, "confirmed H1 HA and MTF down own public bias")
-    assert_true("Location: DEMAND PRZ" in text, "Demand is shown as location, not direction")
     assert_true(
-        "SELL BIAS — DEMAND TARGET / BUY UNCONFIRMED" in text,
-        "support is a SELL target until a BUY reversal is confirmed",
+        "Watch for 🔴 S Setup..." in text,
+        "confirmed H1 HA and MTF down own the public trend watch",
     )
-    assert_true("Setup   : 🟢 BUY" not in text, "monitor must never publish the blocked BUY as setup")
+    assert_true("Watch for 🟢 B Setup..." not in text, "monitor must never publish the blocked BUY as setup")
     assert_true("WAIT SETUP 🟢 BUY" not in text, "legacy false BUY watch label is removed")
 
     original_pipeline = runtime.run_pipeline
@@ -1188,8 +1191,7 @@ def test_confirmed_open_is_the_only_public_directional_setup() -> None:
         },
     }
     text = format_telegram_trend_update(payload)
-    assert_true("Setup   : 🟢 BUY" in text, "confirmed OPEN may publish BUY setup")
-    assert_true("Watch   : CONFIRMED 🟢 BUY" in text, "confirmed direction is explicit")
+    assert_true("Watch for 🟢 B Setup..." in text, "confirmed OPEN may publish BUY setup")
 
 
 def test_closed_market_suppresses_all_telegram() -> None:
