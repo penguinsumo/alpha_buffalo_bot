@@ -2664,6 +2664,72 @@ async def execution_fill(request: Request):
     }
 
 
+@app.get("/execution/python/command")
+def execution_python_command(
+    key: str = "",
+    symbol: str = SYMBOL_DEFAULT,
+    client_id: str = "RAILWAY_PYTHON_V1",
+    account_id: str = "",
+    balance: float = 0.0,
+    equity: float = 0.0,
+    day_start_equity: float = 0.0,
+):
+    """Dedicated command lane for the isolated Railway Python EA.
+
+    The account telemetry is intentionally read-only. It is accepted so the
+    EA can report its execution context without letting account data influence
+    signal direction or price levels.
+    """
+    if not verify_license(key):
+        raise HTTPException(status_code=403, detail="INVALID_LICENSE")
+
+    public_symbol = symbol.replace("/", "")
+    consumer = (client_id or "RAILWAY_PYTHON_V1").strip()
+
+    if SIGNAL_SOURCE != "PYTHON":
+        return {
+            "status": "ok",
+            "source": "PYTHON",
+            "consumer": consumer,
+            "command": {
+                "action": "HOLD",
+                "reason": "PYTHON_SIGNAL_MODE_DISABLED",
+            },
+        }
+
+    if not execution_lifecycle.has_active(public_symbol):
+        command = python_signal_bridge.pending_command(public_symbol)
+        return {
+            "status": "ok",
+            "source": "PYTHON",
+            "consumer": consumer,
+            "command": command,
+        }
+
+    pending = execution_lifecycle.pending_command(public_symbol)
+    if pending.get("action") != "HOLD":
+        return {
+            "status": "ok",
+            "source": "LIFECYCLE",
+            "consumer": consumer,
+            "command": pending,
+        }
+
+    data_symbol = SYMBOL_DEFAULT if public_symbol.upper().startswith("XAUUSD") else symbol
+    df_15m = _fetch_cached_tf(data_symbol, "15min")
+    command = execution_lifecycle.evaluate(
+        public_symbol,
+        _latest_market_price(df_15m),
+        fetch_management_m5(data_symbol),
+    )
+    return {
+        "status": "ok",
+        "source": "LIFECYCLE",
+        "consumer": consumer,
+        "command": command,
+    }
+
+
 @app.get("/execution/command")
 def execution_command(key: str = "", symbol: str = SYMBOL_DEFAULT):
     """EA polls this endpoint and executes only the returned command."""
@@ -2671,6 +2737,20 @@ def execution_command(key: str = "", symbol: str = SYMBOL_DEFAULT):
         raise HTTPException(status_code=403, detail="INVALID_LICENSE")
 
     public_symbol = symbol.replace("/", "")
+
+    # Python production commands have a dedicated consumer lane. Returning a
+    # HOLD here prevents an older Pine/Cloud EA on the same symbol from racing
+    # the isolated RailwayPythonEA for the same durable OPEN or lifecycle ACK.
+    if SIGNAL_SOURCE == "PYTHON":
+        return {
+            "status": "ok",
+            "source": "PYTHON",
+            "command": {
+                "action": "HOLD",
+                "reason": "USE_DEDICATED_PYTHON_ENDPOINT",
+            },
+        }
+
     pine_command = {"action": "HOLD", "reason": "PINE_SIGNAL_MODE_DISABLED"}
 
     if SIGNAL_SOURCE in {"PINE", "HYBRID"}:
