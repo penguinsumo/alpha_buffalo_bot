@@ -84,9 +84,12 @@ def main() -> None:
             assert opened.json()["telegram_notified"] is True
             assert len(telegram_messages) == 1
             assert "BUY" in telegram_messages[-1]
-            assert "PINE_V2_4" in telegram_messages[-1]
-            assert "Signal accepted and queued" in telegram_messages[-1]
-            assert "EA Executing" not in telegram_messages[-1]
+            assert "ALPHA BUFFALO" in telegram_messages[-1]
+            assert "TP1" in telegram_messages[-1]
+            assert "TP2" in telegram_messages[-1]
+            assert "EA Executing" in telegram_messages[-1]
+            assert "PINE_V2_4" not in telegram_messages[-1]
+            assert "Signal accepted and queued" not in telegram_messages[-1]
             open_command = opened.json()["command"]
             assert open_command["action"] == "OPEN"
 
