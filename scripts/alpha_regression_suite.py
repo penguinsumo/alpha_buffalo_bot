@@ -1102,8 +1102,8 @@ def test_telegram_public_output_hides_engine_internals() -> None:
         "mixed trend evidence must remain WAIT and must not promote an engine candidate",
     )
     assert_true(
-        "SESSION SIGNAL FIRING" in signal_text,
-        "trade formatter should use the public short-trade template",
+        "ALPHA BUFFALO" in signal_text,
+        "V5 journey should use the public TP1/TP2 runner template",
     )
 
 
