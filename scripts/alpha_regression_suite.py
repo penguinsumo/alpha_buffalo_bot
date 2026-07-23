@@ -1519,6 +1519,112 @@ def test_every_repository_telegram_sender_uses_central_closed_gate() -> None:
         telegram_guard_runtime.requests.post = original_post
 
 
+def test_recent_m15_prz_touch_is_observable_without_forcing_v4_open() -> None:
+    row = base_row()
+    row.update(
+        {
+            "Deep_Buy_PRZ_Context": True,
+            "Deep_Sell_PRZ_Context": False,
+            "In_Pine_PRZ_Support": False,
+            "In_Pine_PRZ_Resistance": False,
+            "Near_BB_Lower": True,
+            "Near_BB_Upper": False,
+            "Bull_Sweep": False,
+            "Bear_Sweep": False,
+            "HA_Bull_Reversal": False,
+            "HA_Bear_Reversal": False,
+            "Bullish_Pinbar": False,
+            "Bearish_Pinbar": False,
+            "Deep_Buy_Reclaim_Trigger": False,
+            "Deep_Sell_Reclaim_Trigger": False,
+            "Zone_Buy_Pinbar_Trigger": False,
+            "Zone_Sell_Pinbar_Trigger": False,
+            "Kivanc_Scenario_State": "BUY_ZONE_ARMED",
+            "V4_Buy_Setup": False,
+            "V4_Sell_Setup": False,
+            "VSA_Buy_Wins": False,
+            "VSA_Sell_Wins": True,
+        }
+    )
+    diagnostic = runtime._engine_v4_wait_diagnostics(frame([row]))
+
+    assert_true(diagnostic["recent_prz_touch"], "recent wick overlap must remain observable")
+    assert_equal(diagnostic["context_direction"], "BUY", "demand PRZ context direction")
+    assert_equal(diagnostic["status"], "WAIT_CONFIRM", "touch alone must not create OPEN")
+    assert_true("HA_PA_RECLAIM" in diagnostic["missing_buy"], "owner sees missing HA/PA")
+    assert_true("VSA_BUY_PRESSURE" in diagnostic["missing_buy"], "owner sees missing VSA")
+    assert_true(not diagnostic["v4_selected"], "diagnostics cannot manufacture a trade")
+
+
+def test_v4_pattern_comparison_routes_only_to_owner() -> None:
+    original_owner = runtime.TELEGRAM_OWNER_CHAT_IDS
+    original_group = runtime.TELEGRAM_CHAT_IDS
+    try:
+        runtime.TELEGRAM_OWNER_CHAT_IDS = ["owner-only"]
+        runtime.TELEGRAM_CHAT_IDS = ["group-only"]
+        assert_equal(runtime._telegram_targets("OWNER"), ["owner-only"], "owner destination")
+        assert_equal(runtime._telegram_targets("GROUP"), ["group-only"], "group destination")
+
+        payload = {
+            "symbol": "XAUUSD",
+            "signal": {
+                "engine_v4_diagnostics": {
+                    "status": "WAIT_CONFIRM",
+                    "v4_selected": False,
+                    "current_price": 4060.51,
+                    "context_direction": "BUY",
+                    "recent_prz_touch": True,
+                    "recent_buy_prz_touch": True,
+                    "recent_sell_prz_touch": False,
+                    "buy_touch_time": "2026-07-23T14:30:00+00:00",
+                    "recent_kivanc_state": "BUY_ZONE_ARMED",
+                    "missing_buy": ["HA_PA_RECLAIM", "VSA_BUY_PRESSURE"],
+                    "latest": {
+                        "Fib_0618": 4048.0,
+                        "Fib_0786": 4038.0,
+                        "Fib_0886": 4029.0,
+                    },
+                },
+                "blueprint": {
+                    "current_price": 4060.51,
+                    "harmonic": {
+                        "is_real_harmonic": True,
+                        "pattern": "Bullish Bat",
+                        "state": "FORMING",
+                        "source_tf": "1H",
+                        "direction": "BUY",
+                        "candidate_patterns": [
+                            {"pattern": "Bullish Bat"},
+                            {"pattern": "Bullish Gartley"},
+                        ],
+                    },
+                    "prz_layers": {
+                        "htf": {},
+                        "tunnel_state": {
+                            "state": "DOWNTREND",
+                            "valid": True,
+                            "retest_valid": True,
+                            "buy_sweep_armed": False,
+                            "sell_sweep_armed": False,
+                        },
+                    },
+                },
+            },
+            "ea": {"action": "WAIT"},
+        }
+        context = runtime._owner_v4_context(payload)
+        message = runtime.format_telegram_owner_v4_context(payload)
+
+        assert_true(context["eligible"], "PRZ/pattern context must be owner-observable")
+        assert_true("BULLISH BAT" in message, "selected harmonic is compared")
+        assert_true("BULLISH GARTLEY" in message, "candidate pattern is compared")
+        assert_true("HA_PA_RECLAIM" in message, "missing V4 trigger is explicit")
+        assert_true("EA: HOLD" in message, "private context cannot claim execution")
+    finally:
+        runtime.TELEGRAM_OWNER_CHAT_IDS = original_owner
+        runtime.TELEGRAM_CHAT_IDS = original_group
+
+
 TESTS = [
     test_upper_sell_not_blocked_by_bullish_context,
     test_lower_buy_not_blocked_by_bearish_context,
@@ -1561,6 +1667,8 @@ TESTS = [
     test_configured_holiday_blocks_session_and_telegram,
     test_weekend_direct_sender_never_calls_telegram_network,
     test_every_repository_telegram_sender_uses_central_closed_gate,
+    test_recent_m15_prz_touch_is_observable_without_forcing_v4_open,
+    test_v4_pattern_comparison_routes_only_to_owner,
 ]
 
 

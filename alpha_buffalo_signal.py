@@ -137,6 +137,9 @@ TELEGRAM_OWNER_CHAT_IDS = _parse_telegram_chat_ids(
 # TELEGRAM_NOTIFY_WAIT flag is intentionally ignored because it represented
 # noisy generic WAIT updates in previous deployments.
 TELEGRAM_NOTIFY_WAIT = os.getenv("TELEGRAM_NOTIFY_CONFIRMATION", "true").lower() in {"1", "true", "yes", "on"}
+TELEGRAM_NOTIFY_OWNER_CONTEXT = os.getenv(
+    "TELEGRAM_NOTIFY_OWNER_CONTEXT", "true"
+).lower() in {"1", "true", "yes", "on"}
 TELEGRAM_TIMEOUT_SECONDS = float(os.getenv("TELEGRAM_TIMEOUT_SECONDS", "5"))
 TRADE_MIN_RR = float(os.getenv("TRADE_MIN_RR", "1.5"))
 TELEGRAM_MIN_RR = float(os.getenv("TELEGRAM_MIN_RR", str(TRADE_MIN_RR)))
@@ -164,6 +167,7 @@ LAST_TELEGRAM_TREND_UPDATE_AT: datetime | None = None
 LAST_TELEGRAM_H1_CROSS_KEY = ""
 LAST_TELEGRAM_TREND_STATE_LOADED = False
 LAST_TELEGRAM_CONFIRM_KEY = ""
+LAST_TELEGRAM_OWNER_CONTEXT_KEY = ""
 LAST_TELEGRAM_LOCK = threading.Lock()
 TELEGRAM_DELIVERY_STATUS = {
     "last_attempt_at": "",
@@ -689,7 +693,10 @@ def _format_time_pair(value) -> str:
 
 def _telegram_targets(audience: str = "GROUP") -> list[str]:
     """Resolve isolated destinations; Pine never falls back to group IDs."""
-    if str(audience or "GROUP").upper() == "PINE":
+    audience = str(audience or "GROUP").upper()
+    if audience == "OWNER":
+        return list(TELEGRAM_OWNER_CHAT_IDS)
+    if audience == "PINE":
         candidates = TELEGRAM_PINE_CHAT_IDS or TELEGRAM_OWNER_CHAT_IDS
         group_ids = set(TELEGRAM_CHAT_IDS)
         return [chat_id for chat_id in candidates if chat_id not in group_ids]
@@ -1545,6 +1552,261 @@ def format_telegram_confirmation(payload: Dict) -> str:
     ])
 
 
+def _owner_pattern_names(candidates) -> list[str]:
+    names: list[str] = []
+    for candidate in candidates or []:
+        if isinstance(candidate, dict):
+            name = (
+                candidate.get("pattern")
+                or candidate.get("name")
+                or candidate.get("selected_pattern")
+                or candidate.get("type")
+            )
+        else:
+            name = candidate
+        normalized = str(name or "").strip().upper()
+        if normalized and normalized not in names:
+            names.append(normalized)
+    return names[:4]
+
+
+def _owner_v4_context(payload: Dict) -> Dict:
+    """Build an owner-only comparison of V4, PRZ, tunnel, Kivanc and harmonic."""
+    signal = payload.get("signal", {}) or {}
+    ea = payload.get("ea", {}) or {}
+    blueprint = signal.get("blueprint", {}) or {}
+    diagnostic = signal.get("engine_v4_diagnostics", {}) or {}
+
+    h1_ok, h1_direction, h1_price, _, h1_low, h1_high = (
+        _h1_prz_confirmation_context(payload)
+    )
+    direction = str(diagnostic.get("context_direction") or "NONE").upper()
+    if direction not in {"BUY", "SELL"} and h1_direction in {"BUY", "SELL"}:
+        direction = h1_direction
+
+    harmonic = blueprint.get("harmonic", {}) or diagnostic.get("harmonic", {}) or {}
+    harmonic_direction = str(
+        harmonic.get("direction") or harmonic.get("approach_direction") or "NONE"
+    ).upper()
+    if direction not in {"BUY", "SELL"} and harmonic_direction in {"BUY", "SELL"}:
+        direction = harmonic_direction
+
+    tunnel = _deep_get(blueprint, ["prz_layers", "tunnel_state"], {}) or {}
+    if not tunnel:
+        raw_tunnel = blueprint.get("tunnel", {}) or {}
+        tunnel = {
+            **raw_tunnel,
+            "state": raw_tunnel.get("state") or "NONE",
+            "buy_sweep_armed": False,
+            "sell_sweep_armed": False,
+            "retest_valid": False,
+        }
+    if direction not in {"BUY", "SELL"}:
+        if _truthy(tunnel.get("buy_sweep_armed")):
+            direction = "BUY"
+        elif _truthy(tunnel.get("sell_sweep_armed")):
+            direction = "SELL"
+
+    m15_touch = bool(diagnostic.get("recent_prz_touch"))
+    tunnel_event = any(
+        _truthy(tunnel.get(field))
+        for field in ("buy_sweep_armed", "sell_sweep_armed", "retest_valid")
+    )
+    harmonic_found = _truthy(
+        harmonic.get("is_real_harmonic")
+        if "is_real_harmonic" in harmonic
+        else harmonic.get("found")
+    )
+    candidates = harmonic.get("candidate_patterns") or []
+    candidate_names = _owner_pattern_names(candidates)
+    kivanc_state = str(
+        diagnostic.get("recent_kivanc_state") or "OUTSIDE"
+    ).upper()
+    kivanc_event = kivanc_state not in {"", "NONE", "OUTSIDE"}
+
+    eligible = bool(
+        m15_touch
+        or h1_ok
+        or tunnel_event
+        or harmonic_found
+        or (kivanc_event and direction in {"BUY", "SELL"})
+    )
+
+    missing = []
+    if direction == "BUY":
+        missing = list(diagnostic.get("missing_buy") or [])
+    elif direction == "SELL":
+        missing = list(diagnostic.get("missing_sell") or [])
+
+    latest = diagnostic.get("latest", {}) or {}
+    market_map = blueprint.get("market_close_map", {}) or {}
+    map_kivanc = market_map.get("kivanc", {}) or {}
+    kivanc_levels = [
+        _safe_float(map_kivanc.get("fibo_0618") or latest.get("Fib_0618")),
+        _safe_float(map_kivanc.get("fibo_0786") or latest.get("Fib_0786")),
+        _safe_float(map_kivanc.get("fibo_0886") or latest.get("Fib_0886")),
+    ]
+    kivanc_levels = [value for value in kivanc_levels if value > 0]
+
+    pattern = str(
+        harmonic.get("selected_pattern")
+        or harmonic.get("pattern")
+        or ""
+    ).strip()
+    pattern_state = str(
+        harmonic.get("pattern_state") or harmonic.get("state") or "NONE"
+    ).upper()
+    pattern_tf = str(harmonic.get("source_tf") or "NONE").upper()
+
+    locations = []
+    if diagnostic.get("recent_buy_prz_touch"):
+        locations.append("M15 DEMAND PRZ TOUCH")
+    if diagnostic.get("recent_sell_prz_touch"):
+        locations.append("M15 SUPPLY PRZ TOUCH")
+    if h1_ok:
+        locations.append(f"H1 {'DEMAND' if h1_direction == 'BUY' else 'SUPPLY'} PRZ")
+
+    return {
+        "eligible": eligible,
+        "direction": direction,
+        "price": _safe_float(
+            diagnostic.get("current_price")
+            or h1_price
+            or blueprint.get("current_price")
+        ),
+        "locations": locations,
+        "h1_zone_low": h1_low,
+        "h1_zone_high": h1_high,
+        "v4_status": str(diagnostic.get("status") or "WAIT").upper(),
+        "v4_selected": bool(diagnostic.get("v4_selected")),
+        "missing": missing,
+        "touch_time": str(
+            diagnostic.get("buy_touch_time")
+            if direction == "BUY"
+            else diagnostic.get("sell_touch_time")
+            if direction == "SELL"
+            else diagnostic.get("latest_bar_time")
+            or ""
+        ),
+        "kivanc_state": kivanc_state,
+        "kivanc_levels": kivanc_levels,
+        "tunnel_state": str(tunnel.get("state") or "NONE").upper(),
+        "tunnel_valid": bool(tunnel.get("valid")),
+        "tunnel_event": tunnel_event,
+        "buy_tunnel_sweep": bool(tunnel.get("buy_sweep_armed")),
+        "sell_tunnel_sweep": bool(tunnel.get("sell_sweep_armed")),
+        "harmonic_found": harmonic_found,
+        "harmonic_pattern": pattern,
+        "harmonic_state": pattern_state,
+        "harmonic_tf": pattern_tf,
+        "candidate_names": candidate_names,
+        "ea_action": str(ea.get("action") or "WAIT").upper(),
+    }
+
+
+def format_telegram_owner_v4_context(payload: Dict) -> str:
+    """Private diagnostics only; this message never represents an EA order."""
+    context = _owner_v4_context(payload)
+    direction = str(context.get("direction") or "NONE")
+    icon, side = _public_side(direction)
+    locations = context.get("locations") or ["WAIT LOCATION"]
+    missing = context.get("missing") or []
+    levels = context.get("kivanc_levels") or []
+    tunnel_flags = []
+    if context.get("buy_tunnel_sweep"):
+        tunnel_flags.append("BUY SWEEP")
+    if context.get("sell_tunnel_sweep"):
+        tunnel_flags.append("SELL SWEEP")
+    if context.get("tunnel_event") and not tunnel_flags:
+        tunnel_flags.append("RETEST")
+
+    if context.get("harmonic_found"):
+        harmonic_text = " ".join(
+            value
+            for value in (
+                str(context.get("harmonic_pattern") or "XABCD").upper(),
+                str(context.get("harmonic_state") or ""),
+                f"({context.get('harmonic_tf')})"
+                if str(context.get("harmonic_tf") or "NONE") != "NONE"
+                else "",
+            )
+            if value
+        )
+    else:
+        harmonic_text = "NO VALID XABCD"
+
+    candidate_text = (
+        ", ".join(context.get("candidate_names") or [])
+        or "NO MATCHING PATTERN"
+    )
+    kivanc_level_text = (
+        " / ".join(f"{value:,.2f}" for value in levels)
+        if levels
+        else "NO NEWDAY LEVEL"
+    )
+
+    return "\n".join([
+        "🔎 <b>V4 OWNER CONTEXT</b>",
+        "━━━━━━━━━━━━━━━━━",
+        f"📌 {_clean_text(payload.get('symbol') or PUBLIC_SYMBOL_DEFAULT)} | {icon} {_clean_text(side)}",
+        f"💰 Price: {_safe_float(context.get('price')):,.2f}",
+        f"📍 PRZ: {_clean_text(' + '.join(locations))}",
+        f"🧩 V4: {_clean_text(context.get('v4_status'))}",
+        f"🚇 Tunnel: {_clean_text(context.get('tunnel_state'))}"
+        + (f" | {_clean_text(', '.join(tunnel_flags))}" if tunnel_flags else ""),
+        f"🟡 Kivanc: {_clean_text(context.get('kivanc_state'))} | {kivanc_level_text}",
+        f"🔷 Harmonic: {_clean_text(harmonic_text)}",
+        f"📐 Pattern compare: {_clean_text(candidate_text)}",
+        f"⛔ Missing: {_clean_text(', '.join(missing) if missing else 'NONE')}",
+        "🤖 EA: HOLD — รอ V4 trigger; ยังไม่มีคำสั่งเปิดออเดอร์",
+        TELEGRAM_DISCLAIMER,
+    ])
+
+
+def maybe_broadcast_owner_v4_context(payload: Dict) -> bool:
+    """Send one private state transition; never route V4 internals to groups."""
+    global LAST_TELEGRAM_OWNER_CONTEXT_KEY
+    if (
+        not TELEGRAM_NOTIFY_OWNER_CONTEXT
+        or not _telegram_market_is_open(payload)
+        or not _telegram_enabled("OWNER")
+    ):
+        return False
+
+    context = _owner_v4_context(payload)
+    if not context.get("eligible") or context.get("ea_action") == "OPEN":
+        return False
+
+    key = "|".join([
+        str(payload.get("symbol") or PUBLIC_SYMBOL_DEFAULT).upper(),
+        str(context.get("direction") or "NONE"),
+        str(context.get("touch_time") or ""),
+        str(context.get("v4_status") or ""),
+        str(context.get("kivanc_state") or ""),
+        str(context.get("tunnel_state") or ""),
+        str(context.get("buy_tunnel_sweep") or False),
+        str(context.get("sell_tunnel_sweep") or False),
+        str(context.get("harmonic_pattern") or ""),
+        str(context.get("harmonic_state") or ""),
+        ",".join(context.get("candidate_names") or []),
+    ])
+    with LAST_TELEGRAM_LOCK:
+        if key == LAST_TELEGRAM_OWNER_CONTEXT_KEY:
+            return False
+        previous = LAST_TELEGRAM_OWNER_CONTEXT_KEY
+        LAST_TELEGRAM_OWNER_CONTEXT_KEY = key
+
+    sent = send_telegram_message(
+        format_telegram_owner_v4_context(payload),
+        audience="OWNER",
+    )
+    if not sent:
+        with LAST_TELEGRAM_LOCK:
+            if LAST_TELEGRAM_OWNER_CONTEXT_KEY == key:
+                LAST_TELEGRAM_OWNER_CONTEXT_KEY = previous
+    return sent
+
+
 def build_telegram_test_messages(direction: str = "SELL") -> list[str]:
     """Build the four public templates without creating an EA command."""
     direction = str(direction or "SELL").upper()
@@ -1814,6 +2076,208 @@ def _iso_timestamp(value) -> str:
         return ""
 
 
+def _engine_v4_scalar(value):
+    """Convert pandas/numpy diagnostic values into JSON-safe primitives."""
+    try:
+        if hasattr(value, "item"):
+            value = value.item()
+    except Exception:
+        pass
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return _iso_timestamp(value)
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (bool, int, float, str)) or value is None:
+        return value
+    return str(value)
+
+
+def _engine_v4_wait_diagnostics(
+    df: pd.DataFrame,
+    blueprint=None,
+    *,
+    lookback_bars: int = 6,
+) -> Dict:
+    """
+    Explain a V4 HOLD without relaxing the entry gate.
+
+    A wick/close may leave a PRZ before the next cloud poll.  Retaining six
+    closed M15 bars makes that location observable while HA/PA/VSA confirmation
+    still remains mandatory for an executable order.
+    """
+    if df is None or getattr(df, "empty", True):
+        return {
+            "status": "NO_DATA",
+            "v4_selected": False,
+            "recent_prz_touch": False,
+        }
+
+    tail = df.tail(max(1, int(lookback_bars)))
+    last = tail.iloc[-1]
+
+    def _count(field: str) -> int:
+        if field not in tail:
+            return 0
+        try:
+            return int(tail[field].fillna(False).astype(bool).sum())
+        except Exception:
+            return 0
+
+    def _any(*fields: str) -> bool:
+        return any(_count(field) > 0 for field in fields)
+
+    def _latest_time(*fields: str) -> str:
+        mask = pd.Series(False, index=tail.index)
+        for field in fields:
+            if field in tail:
+                try:
+                    mask = mask | tail[field].fillna(False).astype(bool)
+                except Exception:
+                    continue
+        matches = tail.index[mask]
+        return _iso_timestamp(matches[-1]) if len(matches) else ""
+
+    buy_touch = _any("Deep_Buy_PRZ_Context", "In_Pine_PRZ_Support")
+    sell_touch = _any("Deep_Sell_PRZ_Context", "In_Pine_PRZ_Resistance")
+    buy_touch_time = _latest_time("Deep_Buy_PRZ_Context", "In_Pine_PRZ_Support")
+    sell_touch_time = _latest_time("Deep_Sell_PRZ_Context", "In_Pine_PRZ_Resistance")
+
+    context_direction = "NONE"
+    if buy_touch and not sell_touch:
+        context_direction = "BUY"
+    elif sell_touch and not buy_touch:
+        context_direction = "SELL"
+    elif buy_touch and sell_touch:
+        try:
+            context_direction = (
+                "BUY"
+                if pd.Timestamp(buy_touch_time) >= pd.Timestamp(sell_touch_time)
+                else "SELL"
+            )
+        except Exception:
+            context_direction = "NONE"
+
+    recent_kivanc_state = "OUTSIDE"
+    if "Kivanc_Scenario_State" in tail:
+        for value in reversed(tail["Kivanc_Scenario_State"].tolist()):
+            normalized = str(value or "OUTSIDE").upper()
+            if normalized != "OUTSIDE":
+                recent_kivanc_state = normalized
+                break
+
+    missing_buy = []
+    if not buy_touch:
+        missing_buy.append("M15_DEMAND_PRZ_TOUCH")
+    if not _any(
+        "Near_BB_Lower",
+        "Bull_Sweep",
+        "Deep_Buy_Reclaim_Trigger",
+        "Zone_Buy_Pinbar_Trigger",
+    ):
+        missing_buy.append("BB_LOWER_OR_SWEEP")
+    if not _any(
+        "HA_Bull_Reversal",
+        "Bullish_Pinbar",
+        "Deep_Buy_Reclaim_Trigger",
+        "Zone_Buy_Pinbar_Trigger",
+    ):
+        missing_buy.append("HA_PA_RECLAIM")
+    if not _any("VSA_Buy_Wins", "Deep_Buy_Reclaim_Trigger"):
+        missing_buy.append("VSA_BUY_PRESSURE")
+
+    missing_sell = []
+    if not sell_touch:
+        missing_sell.append("M15_SUPPLY_PRZ_TOUCH")
+    if not _any(
+        "Near_BB_Upper",
+        "Bear_Sweep",
+        "Deep_Sell_Reclaim_Trigger",
+        "Zone_Sell_Pinbar_Trigger",
+    ):
+        missing_sell.append("BB_UPPER_OR_SWEEP")
+    if not _any(
+        "HA_Bear_Reversal",
+        "Bearish_Pinbar",
+        "Deep_Sell_Reclaim_Trigger",
+        "Zone_Sell_Pinbar_Trigger",
+    ):
+        missing_sell.append("HA_PA_RECLAIM")
+    if not _any("VSA_Sell_Wins", "Deep_Sell_Reclaim_Trigger"):
+        missing_sell.append("VSA_SELL_PRESSURE")
+
+    buy_ready = _any("V4_Buy_Setup")
+    sell_ready = _any("V4_Sell_Setup")
+    recent_prz_touch = buy_touch or sell_touch
+    status = (
+        "V4_READY"
+        if buy_ready or sell_ready
+        else "WAIT_CONFIRM"
+        if recent_prz_touch
+        else "WAIT_LOCATION"
+    )
+
+    trace_fields = (
+        "close",
+        "Pine_PRZ_Support_Low",
+        "Pine_PRZ_Support_High",
+        "Pine_PRZ_Resistance_Low",
+        "Pine_PRZ_Resistance_High",
+        "Fib_0618",
+        "Fib_072",
+        "Fib_0786",
+        "Fib_0886",
+        "Fib_100",
+        "Fib_R_0618",
+        "Fib_R_072",
+        "Fib_R_0786",
+        "Fib_R_0886",
+        "Fib_R_100",
+        "Kivanc_Scenario_State",
+        "HA_Bull_Reversal",
+        "HA_Bear_Reversal",
+        "Bullish_Pinbar",
+        "Bearish_Pinbar",
+        "Bull_Sweep",
+        "Bear_Sweep",
+        "VSA_Buy_Wins",
+        "VSA_Sell_Wins",
+        "V4_Buy_Setup",
+        "V4_Sell_Setup",
+    )
+    latest = {
+        field: _engine_v4_scalar(last.get(field))
+        for field in trace_fields
+        if field in last
+    }
+
+    return {
+        "status": status,
+        "v4_selected": False,
+        "selected_direction": None,
+        "lookback_bars": len(tail),
+        "latest_bar_time": _iso_timestamp(tail.index[-1]),
+        "current_price": _safe_float(last.get("close")),
+        "context_direction": context_direction,
+        "recent_prz_touch": recent_prz_touch,
+        "recent_buy_prz_touch": buy_touch,
+        "recent_sell_prz_touch": sell_touch,
+        "buy_touch_time": buy_touch_time,
+        "sell_touch_time": sell_touch_time,
+        "recent_kivanc_state": recent_kivanc_state,
+        "buy_setup_count": _count("V4_Buy_Setup"),
+        "sell_setup_count": _count("V4_Sell_Setup"),
+        "buy_entry_zone_count": _count("V4_Buy_Entry_Zone"),
+        "sell_entry_zone_count": _count("V4_Sell_Entry_Zone"),
+        "missing_buy": missing_buy,
+        "missing_sell": missing_sell,
+        "latest": latest,
+        "harmonic": _harmonic_gate_context(blueprint),
+    }
+
+
 
 def _log_engine_v4_debug(message: str) -> None:
     """Best-effort runtime trace for engine_v4 selection. Never blocks trading loop."""
@@ -1864,9 +2328,18 @@ def _run_engine_v4_baseline(
     df_15m: pd.DataFrame,
     symbol: str = PUBLIC_SYMBOL_DEFAULT,
     blueprint=None,
+    diagnostics_out: Dict | None = None,
 ) -> Dict | None:
 
     if add_indicators is None or SignalRouter is None or FinalGate is None or BuySignalEngine is None or SellSignalEngine is None:
+        if diagnostics_out is not None:
+            diagnostics_out.update(
+                {
+                    "status": "IMPORT_ERROR",
+                    "v4_selected": False,
+                    "recent_prz_touch": False,
+                }
+            )
         print(
             "AlphaBuffalo engine_v4 | none reason=IMPORT_ERROR "
             f"type={type(ENGINE_V4_IMPORT_ERROR).__name__ if ENGINE_V4_IMPORT_ERROR else 'Unknown'} "
@@ -1890,11 +2363,26 @@ def _run_engine_v4_baseline(
     ]
     try:
         if df_15m is None or getattr(df_15m, "empty", True):
+            if diagnostics_out is not None:
+                diagnostics_out.update(
+                    {
+                        "status": "NO_DATA",
+                        "v4_selected": False,
+                        "recent_prz_touch": False,
+                    }
+                )
             _log_engine_v4_debug("none reason=EMPTY_DF")
             return None
 
         df = _ensure_engine_v4_datetime_index(df_15m)
         df = add_indicators(df)
+        diagnostics = _engine_v4_wait_diagnostics(
+            df,
+            blueprint,
+            lookback_bars=int(os.getenv("ENGINE_V4_LOOKBACK_BARS", "6")),
+        )
+        if diagnostics_out is not None:
+            diagnostics_out.update(diagnostics)
         session_clock = SessionClock()
         risk_permissions = execution_lifecycle.risk_permissions(symbol)
         harmonic_context = _harmonic_gate_context(blueprint) if blueprint else None
@@ -1922,6 +2410,8 @@ def _run_engine_v4_baseline(
                 require_harmonic=True,
             )
             if not bias_gate.allowed:
+                if diagnostics_out is not None:
+                    diagnostics_out["status"] = "BLOCKED_HARMONIC_RESEARCH_GATE"
                 blocked_direction = (
                     harmonic_direction
                     if harmonic_direction in {"BUY", "SELL"}
@@ -1945,6 +2435,13 @@ def _run_engine_v4_baseline(
             require_harmonic=REQUIRE_HARMONIC_BIAS,
         )
         signal = routed[0] if routed else None
+        if diagnostics_out is not None:
+            diagnostics_out["v4_selected"] = bool(signal)
+            diagnostics_out["selected_direction"] = (
+                str(signal.get("direction") or "").upper() if signal else None
+            )
+            if signal:
+                diagnostics_out["status"] = "V4_READY"
 
         tail = df.tail(int(os.getenv("ENGINE_V4_LOOKBACK_BARS", "6")))
         last = tail.iloc[-1]
@@ -1983,6 +2480,14 @@ def _run_engine_v4_baseline(
             _log_engine_v4_debug(f"none reason=NO_RECENT_V4_SETUP counts={counts} last={flags}")
         return signal
     except Exception as exc:
+        if diagnostics_out is not None:
+            diagnostics_out.update(
+                {
+                    "status": "ERROR",
+                    "v4_selected": False,
+                    "error_type": type(exc).__name__,
+                }
+            )
         _log_engine_v4_debug(f"none reason=EXCEPTION type={type(exc).__name__} error={exc}")
         return None
 
@@ -2558,12 +3063,17 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
         # Production baseline overlay:
         # v12 scanner/blueprint stays intact, but proven engine_v4 BUY/SELL baseline
         # becomes the actual trade source when it produces confirmed levels.
+        engine_v4_diagnostics: Dict = {}
         engine_v4_signal = _run_engine_v4_baseline(
             df_15m,
             public_symbol,
             blueprint=blueprint,
+            diagnostics_out=engine_v4_diagnostics,
         )
         signal = _apply_engine_v4_signal(signal, engine_v4_signal)
+        # Read-only owner observability. This snapshot can explain a PRZ touch
+        # that is still waiting for HA/PA/VSA, but can never create an EA OPEN.
+        signal["engine_v4_diagnostics"] = engine_v4_diagnostics
         ea = build_ea_payload(public_symbol, signal)
         ea = _attach_execution_lifecycle(
             data_symbol=symbol,
@@ -2650,6 +3160,7 @@ def _cloud_signal_loop() -> None:
             maybe_broadcast_signal(payload)
             maybe_broadcast_trend_update(payload)
             maybe_broadcast_confirmation(payload)
+            maybe_broadcast_owner_v4_context(payload)
             decision = payload.get("signal", {}).get("decision", {})
             ea = payload.get("ea", {})
             print(
@@ -2699,6 +3210,7 @@ def _pine_monitor_loop() -> None:
                 monitor = _pine_monitor_payload()
                 maybe_broadcast_trend_update(monitor)
                 maybe_broadcast_confirmation(monitor)
+                maybe_broadcast_owner_v4_context(monitor)
         except Exception as exc:
             print(
                 "AlphaBuffalo Pine Telegram monitor error | "
@@ -2771,6 +3283,7 @@ def telegram_status(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
     with LAST_TELEGRAM_LOCK:
         delivery = dict(TELEGRAM_DELIVERY_STATUS)
     pine_targets = _telegram_targets("PINE")
+    owner_targets = _telegram_targets("OWNER")
     pending = (
         pine_signal_bridge.pending_command(public_symbol)
         if SIGNAL_SOURCE == "PINE"
@@ -2781,12 +3294,16 @@ def telegram_status(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
         "signal_source": SIGNAL_SOURCE,
         "telegram_enabled": _telegram_enabled(),
         "pine_telegram_enabled": _telegram_enabled("PINE"),
+        "owner_context_enabled": bool(
+            TELEGRAM_NOTIFY_OWNER_CONTEXT and _telegram_enabled("OWNER")
+        ),
         "chat_ids_count": len(TELEGRAM_CHAT_IDS),
         "group_owner": "PYTHON",
         "group_chat_ids_count": len(TELEGRAM_CHAT_IDS),
         "pine_chat_ids_count": len(TELEGRAM_PINE_CHAT_IDS),
         "pine_effective_chat_ids_count": len(pine_targets),
         "owner_fallback_configured": bool(TELEGRAM_OWNER_CHAT_IDS),
+        "owner_chat_ids_count": len(owner_targets),
         "pine_destination": (
             "PINE_ROOM"
             if TELEGRAM_PINE_CHAT_IDS and pine_targets
