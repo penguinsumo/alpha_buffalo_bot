@@ -141,6 +141,10 @@ TELEGRAM_TIMEOUT_SECONDS = float(os.getenv("TELEGRAM_TIMEOUT_SECONDS", "5"))
 TRADE_MIN_RR = float(os.getenv("TRADE_MIN_RR", "1.5"))
 TELEGRAM_MIN_RR = float(os.getenv("TELEGRAM_MIN_RR", str(TRADE_MIN_RR)))
 TELEGRAM_NOTIFY_TREND_UPDATE = os.getenv("TELEGRAM_NOTIFY_TREND_UPDATE", "true").lower() in {"1", "true", "yes", "on"}
+TELEGRAM_TREND_MIN_INTERVAL_SECONDS = max(
+    300,
+    int(os.getenv("TELEGRAM_TREND_MIN_INTERVAL_SECONDS", "3600")),
+)
 TELEGRAM_TREND_STATE_FILE = os.getenv(
     "TELEGRAM_TREND_STATE_FILE",
     "/tmp/alpha_buffalo_trend_update_state.json",
@@ -156,6 +160,8 @@ TELEGRAM_MAX_OPEN_SIGNAL_AGE_SECONDS = max(
 )
 LAST_TELEGRAM_SIGNAL_KEY = ""
 LAST_TELEGRAM_TREND_UPDATE_KEY = ""
+LAST_TELEGRAM_TREND_UPDATE_AT: datetime | None = None
+LAST_TELEGRAM_H1_CROSS_KEY = ""
 LAST_TELEGRAM_TREND_STATE_LOADED = False
 LAST_TELEGRAM_CONFIRM_KEY = ""
 LAST_TELEGRAM_LOCK = threading.Lock()
@@ -492,6 +498,55 @@ def _safe_float(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _confirmed_h1_indicator_snapshot(df_1h: pd.DataFrame) -> Dict:
+    """Return EMA200/RSI14 regimes from closed H1 bars only.
+
+    TwelveData can include a still-forming final candle.  Excluding it keeps
+    Telegram crossover events stable and avoids a repainting H1 notification.
+    """
+    if df_1h is None or getattr(df_1h, "empty", True) or "close" not in df_1h:
+        return {}
+
+    close = pd.to_numeric(df_1h["close"], errors="coerce").dropna()
+    if len(close) < 16:
+        return {}
+    confirmed = close.iloc[:-1]
+    if len(confirmed) < 15:
+        return {}
+
+    ema200 = confirmed.ewm(span=200, adjust=False).mean()
+    delta = confirmed.diff()
+    average_gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    average_loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+    relative_strength = average_gain / average_loss.replace(0, float("nan"))
+    rsi14 = 100 - (100 / (1 + relative_strength))
+    rsi14 = rsi14.mask((average_loss == 0) & (average_gain > 0), 100.0)
+    rsi14 = rsi14.mask((average_loss == 0) & (average_gain == 0), 50.0)
+    rsi14 = rsi14.fillna(50.0)
+
+    close_now = float(confirmed.iloc[-1])
+    ema_now = float(ema200.iloc[-1])
+    rsi_now = float(rsi14.iloc[-1])
+    ema_regime = "ABOVE_EMA200" if close_now >= ema_now else "BELOW_EMA200"
+    rsi_regime = "ABOVE_RSI50" if rsi_now >= 50.0 else "BELOW_RSI50"
+
+    bar_ref = confirmed.index[-1]
+    if "datetime" in df_1h.columns:
+        bar_ref = df_1h.loc[confirmed.index[-1], "datetime"]
+    elif "timestamp" in df_1h.columns:
+        bar_ref = df_1h.loc[confirmed.index[-1], "timestamp"]
+
+    return {
+        "timeframe": "1H",
+        "confirmed_bar": str(bar_ref),
+        "close": round(close_now, 6),
+        "ema200": round(ema_now, 6),
+        "rsi14": round(rsi_now, 4),
+        "ema_regime": ema_regime,
+        "rsi_regime": rsi_regime,
+    }
 
 
 def _first_float(*values, default: float = 0.0) -> float:
@@ -983,7 +1038,7 @@ def _deep_get(data: Dict, path: list[str], default=None):
 
 
 def _trend_update_key(payload: Dict) -> str:
-    """Match Clean-V5: notify only when session or a confirmed TF trend changes."""
+    """Build the public trend signature used by hourly/crossover throttling."""
     signal = payload.get("signal", {}) or {}
     ea = payload.get("ea", {}) or {}
     blueprint = signal.get("blueprint", {}) or {}
@@ -1011,9 +1066,26 @@ def _trend_update_key(payload: Dict) -> str:
     ])
 
 
+def _h1_cross_key(payload: Dict) -> str:
+    signal = payload.get("signal", {}) or {}
+    indicators = _deep_get(signal, ["blueprint", "h1_indicators"], {}) or {}
+    ema_regime = str(indicators.get("ema_regime") or "").upper()
+    rsi_regime = str(indicators.get("rsi_regime") or "").upper()
+    if not ema_regime or not rsi_regime:
+        return ""
+    return f"{ema_regime}|{rsi_regime}"
+
+
+def _trend_now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _load_last_trend_update_key() -> str:
     """Restore the last delivered session so a process restart does not resend it."""
-    global LAST_TELEGRAM_TREND_UPDATE_KEY, LAST_TELEGRAM_TREND_STATE_LOADED
+    global LAST_TELEGRAM_TREND_UPDATE_KEY
+    global LAST_TELEGRAM_TREND_UPDATE_AT
+    global LAST_TELEGRAM_H1_CROSS_KEY
+    global LAST_TELEGRAM_TREND_STATE_LOADED
     if LAST_TELEGRAM_TREND_STATE_LOADED:
         return LAST_TELEGRAM_TREND_UPDATE_KEY
 
@@ -1023,12 +1095,26 @@ def _load_last_trend_update_key() -> str:
     try:
         data = json.loads(Path(TELEGRAM_TREND_STATE_FILE).read_text(encoding="utf-8"))
         LAST_TELEGRAM_TREND_UPDATE_KEY = str(data.get("last_trend_update_key") or "")
+        LAST_TELEGRAM_H1_CROSS_KEY = str(data.get("last_h1_cross_key") or "")
+        updated_at = str(data.get("updated_at") or "")
+        if updated_at:
+            parsed = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            LAST_TELEGRAM_TREND_UPDATE_AT = (
+                parsed.replace(tzinfo=timezone.utc)
+                if parsed.tzinfo is None
+                else parsed.astimezone(timezone.utc)
+            )
     except (FileNotFoundError, OSError, ValueError, TypeError):
         pass
     return LAST_TELEGRAM_TREND_UPDATE_KEY
 
 
-def _persist_last_trend_update_key(key: str) -> None:
+def _persist_last_trend_update_key(
+    key: str,
+    *,
+    h1_cross_key: str,
+    updated_at: datetime,
+) -> None:
     if not TELEGRAM_TREND_STATE_FILE:
         return
     try:
@@ -1039,7 +1125,8 @@ def _persist_last_trend_update_key(key: str) -> None:
             json.dumps(
                 {
                     "last_trend_update_key": key,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "last_h1_cross_key": h1_cross_key,
+                    "updated_at": updated_at.astimezone(timezone.utc).isoformat(),
                 },
                 ensure_ascii=False,
             ),
@@ -1320,6 +1407,48 @@ def format_telegram_trend_update(payload: Dict) -> str:
     ])
 
 
+def _h1_prz_confirmation_context(
+    payload: Dict,
+) -> tuple[bool, str, float, int, float, float]:
+    """Expose H1 PRZ location independently from the Harmonic detector."""
+    signal = payload.get("signal", {}) or {}
+    ea = payload.get("ea", {}) or {}
+    blueprint = signal.get("blueprint", {}) or {}
+    htf = _deep_get(blueprint, ["prz_layers", "htf"], {}) or {}
+    price = _safe_float(
+        blueprint.get("current_price")
+        or _deep_get(blueprint, ["price_action", "current_price"], 0)
+        or ea.get("entry")
+    )
+    score = int(
+        _safe_float(
+            ea.get("score")
+            or signal.get("score")
+            or _deep_get(signal, ["decision", "score"], 0)
+        )
+    )
+
+    support_low = _safe_float(htf.get("support_low"))
+    support_high = _safe_float(htf.get("support_high"))
+    resistance_low = _safe_float(htf.get("resistance_low"))
+    resistance_high = _safe_float(htf.get("resistance_high"))
+
+    in_support = False
+    in_resistance = False
+    if price > 0 and support_low > 0 and support_high > 0:
+        support_low, support_high = sorted((support_low, support_high))
+        in_support = support_low <= price <= support_high
+    if price > 0 and resistance_low > 0 and resistance_high > 0:
+        resistance_low, resistance_high = sorted((resistance_low, resistance_high))
+        in_resistance = resistance_low <= price <= resistance_high
+
+    if in_support and not in_resistance:
+        return True, "BUY", price, score, support_low, support_high
+    if in_resistance and not in_support:
+        return True, "SELL", price, score, resistance_low, resistance_high
+    return False, "NONE", price, score, 0.0, 0.0
+
+
 def _bos_confirmation_context(payload: Dict) -> tuple[bool, str, float, int]:
     signal = payload.get("signal", {}) or {}
     ea = payload.get("ea", {}) or {}
@@ -1349,11 +1478,62 @@ def _bos_confirmation_context(payload: Dict) -> tuple[bool, str, float, int]:
     return eligible and direction in {"BUY", "SELL"}, direction, price, score
 
 
+def _confirmation_event_context(payload: Dict) -> Dict:
+    prz_ok, prz_direction, price, score, zone_low, zone_high = (
+        _h1_prz_confirmation_context(payload)
+    )
+    if prz_ok:
+        return {
+            "eligible": True,
+            "event": "H1_PRZ",
+            "direction": prz_direction,
+            "price": price,
+            "score": score,
+            "zone_low": zone_low,
+            "zone_high": zone_high,
+            "sources": ["H1_PRZ"],
+        }
+
+    bos_ok, bos_direction, price, score = _bos_confirmation_context(payload)
+    signal = payload.get("signal", {}) or {}
+    blueprint = signal.get("blueprint", {}) or {}
+    sources = blueprint.get("harmonic_bos_sources") or _deep_get(
+        blueprint, ["harmonic", "bos_sources"], []
+    )
+    return {
+        "eligible": bos_ok,
+        "event": "BOS",
+        "direction": bos_direction,
+        "price": price,
+        "score": score,
+        "zone_low": 0.0,
+        "zone_high": 0.0,
+        "sources": sources,
+    }
+
+
 def format_telegram_confirmation(payload: Dict) -> str:
-    _, direction, price, score = _bos_confirmation_context(payload)
+    context = _confirmation_event_context(payload)
+    direction = str(context.get("direction") or "NONE")
+    price = _safe_float(context.get("price"))
+    score = int(_safe_float(context.get("score")))
     symbol = payload.get("symbol", SYMBOL_DEFAULT.replace("/", ""))
     icon, label = _public_side(direction)
     score_icon = "📈" if direction == "BUY" else "📉"
+    if context.get("event") == "H1_PRZ":
+        role = "Demand" if direction == "BUY" else "Supply"
+        zone_low = _safe_float(context.get("zone_low"))
+        zone_high = _safe_float(context.get("zone_high"))
+        return "\n".join([
+            "🎯 <b>H1 PRZ — WAIT CONFIRM</b>",
+            "━━━━━━━━━━━━━━━━━",
+            f"{icon} {label[0]}  {_clean_text(symbol)}",
+            f"📍 {role} PRZ: {zone_low:,.2f} - {zone_high:,.2f}",
+            f"💰 Price: {price:,.2f}",
+            f"{score_icon} Evidence: {score}/10",
+            "⚡ รอสัญญาณ CF จาก PA / HA / VSA / BOS",
+            TELEGRAM_DISCLAIMER,
+        ])
     return "\n".join([
         "🎯 <b>BOS CONFIRMED — ENTRY READY</b>",
         "━━━━━━━━━━━━━━━━━",
@@ -1441,7 +1621,7 @@ def build_telegram_test_messages(direction: str = "SELL") -> list[str]:
 
 
 def maybe_broadcast_confirmation(payload: Dict) -> bool:
-    """Send one WAIT-CF message per active confirmed BOS, never on every poll."""
+    """Send one WAIT-CF event per H1 PRZ entry or confirmed BOS."""
     global LAST_TELEGRAM_CONFIRM_KEY
     audience = _telegram_payload_audience(payload)
     if (
@@ -1451,22 +1631,23 @@ def maybe_broadcast_confirmation(payload: Dict) -> bool:
     ):
         return False
     ea = payload.get("ea", {}) or {}
-    eligible, direction, price, _ = _bos_confirmation_context(payload)
+    context = _confirmation_event_context(payload)
+    eligible = bool(context.get("eligible"))
+    direction = str(context.get("direction") or "NONE").upper()
     if not eligible or str(ea.get("action") or "WAIT").upper() == "OPEN":
         if not eligible:
             with LAST_TELEGRAM_LOCK:
                 LAST_TELEGRAM_CONFIRM_KEY = ""
         return False
-    signal = payload.get("signal", {}) or {}
-    blueprint = signal.get("blueprint", {}) or {}
-    sources = blueprint.get("harmonic_bos_sources") or _deep_get(
-        blueprint, ["harmonic", "bos_sources"], []
-    )
+    sources = context.get("sources") or []
     key = "|".join([
         _telegram_payload_source(payload),
         str(payload.get("symbol") or PUBLIC_SYMBOL_DEFAULT).upper(),
+        str(context.get("event") or "WAIT_CF"),
         direction,
         ",".join(sources) if isinstance(sources, list) else str(sources),
+        f"{_safe_float(context.get('zone_low')):.2f}",
+        f"{_safe_float(context.get('zone_high')):.2f}",
     ])
     with LAST_TELEGRAM_LOCK:
         if key == LAST_TELEGRAM_CONFIRM_KEY:
@@ -1485,8 +1666,10 @@ def maybe_broadcast_confirmation(payload: Dict) -> bool:
 
 
 def maybe_broadcast_trend_update(payload: Dict) -> bool:
-    """Send once when the session changes, matching Clean-V5 behavior."""
+    """Send hourly, or immediately when closed-H1 EMA/RSI regime changes."""
     global LAST_TELEGRAM_TREND_UPDATE_KEY
+    global LAST_TELEGRAM_TREND_UPDATE_AT
+    global LAST_TELEGRAM_H1_CROSS_KEY
     if not _telegram_market_is_open(payload):
         return False
 
@@ -1497,14 +1680,31 @@ def maybe_broadcast_trend_update(payload: Dict) -> bool:
         return False
 
     key = _trend_update_key(payload)
+    h1_cross_key = _h1_cross_key(payload)
+    now = _trend_now_utc()
     with LAST_TELEGRAM_LOCK:
         _load_last_trend_update_key()
-        if key == LAST_TELEGRAM_TREND_UPDATE_KEY:
+        hour_due = (
+            LAST_TELEGRAM_TREND_UPDATE_AT is None
+            or (now - LAST_TELEGRAM_TREND_UPDATE_AT).total_seconds()
+            >= TELEGRAM_TREND_MIN_INTERVAL_SECONDS
+        )
+        h1_crossed = bool(
+            h1_cross_key
+            and LAST_TELEGRAM_H1_CROSS_KEY
+            and h1_cross_key != LAST_TELEGRAM_H1_CROSS_KEY
+        )
+        if not hour_due and not h1_crossed:
             return False
         previous_key = LAST_TELEGRAM_TREND_UPDATE_KEY
-        # Reserve this transition before the network call so parallel loops
-        # cannot publish the same session snapshot twice.
+        previous_at = LAST_TELEGRAM_TREND_UPDATE_AT
+        previous_h1_cross_key = LAST_TELEGRAM_H1_CROSS_KEY
+        # Reserve this delivery before the network call so parallel loops
+        # cannot publish the same hourly/crossover snapshot twice.
         LAST_TELEGRAM_TREND_UPDATE_KEY = key
+        LAST_TELEGRAM_TREND_UPDATE_AT = now
+        if h1_cross_key:
+            LAST_TELEGRAM_H1_CROSS_KEY = h1_cross_key
 
     sent = send_telegram_message(
         format_telegram_trend_update(payload),
@@ -1512,11 +1712,17 @@ def maybe_broadcast_trend_update(payload: Dict) -> bool:
     )
     if sent:
         with LAST_TELEGRAM_LOCK:
-            _persist_last_trend_update_key(key)
+            _persist_last_trend_update_key(
+                key,
+                h1_cross_key=LAST_TELEGRAM_H1_CROSS_KEY,
+                updated_at=now,
+            )
     else:
         with LAST_TELEGRAM_LOCK:
             if LAST_TELEGRAM_TREND_UPDATE_KEY == key:
                 LAST_TELEGRAM_TREND_UPDATE_KEY = previous_key
+                LAST_TELEGRAM_TREND_UPDATE_AT = previous_at
+                LAST_TELEGRAM_H1_CROSS_KEY = previous_h1_cross_key
     return sent
 
 def maybe_broadcast_signal(payload: Dict) -> bool:
@@ -2342,6 +2548,11 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
             blueprint=blueprint,
             decision=decision,
             symbol=public_symbol,
+        )
+        # Operational notification metadata only.  This does not participate
+        # in the entry gate and therefore cannot create an EA command.
+        signal.setdefault("blueprint", {})["h1_indicators"] = (
+            _confirmed_h1_indicator_snapshot(df_1h)
         )
 
         # Production baseline overlay:

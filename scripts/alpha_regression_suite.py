@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -1259,6 +1260,131 @@ def test_closed_market_suppresses_all_telegram() -> None:
         runtime.requests.post = original_post
 
 
+def test_h1_prz_wait_confirmation_does_not_require_harmonic() -> None:
+    payload = {
+        "source": "PYTHON",
+        "symbol": "XAUUSD",
+        "signal": {
+            "decision": {"score": 3},
+            "blueprint": {
+                "current_price": 4005.0,
+                "harmonic": {
+                    "state": "NONE",
+                    "direction": "NONE",
+                    "bos_eligible": False,
+                },
+                "prz_layers": {
+                    "htf": {
+                        "timeframe": "1H",
+                        "support_low": 3998.0,
+                        "support_high": 4010.0,
+                        "resistance_low": 4050.0,
+                        "resistance_high": 4060.0,
+                    }
+                },
+            },
+        },
+        "ea": {"action": "WAIT", "score": 3},
+    }
+
+    context = runtime._confirmation_event_context(payload)
+    assert_true(context["eligible"], "H1 PRZ location must create WAIT-CF event")
+    assert_equal(context["event"], "H1_PRZ", "H1 PRZ event type")
+    assert_equal(context["direction"], "BUY", "H1 demand PRZ direction")
+    text = runtime.format_telegram_confirmation(payload)
+    assert_true("H1 PRZ" in text, "H1 PRZ must be visible in Telegram")
+    assert_true("WAIT CONFIRM" in text, "H1 PRZ is confirmation-only")
+    assert_true("Harmonic" not in text, "Harmonic must not gate H1 PRZ output")
+
+
+def test_trend_update_is_hourly_except_h1_ema_or_rsi_regime_cross() -> None:
+    payload = {
+        "source": "PYTHON",
+        "symbol": "XAUUSD",
+        "signal": {
+            "gates": {"session": "NY"},
+            "blueprint": {
+                "current_price": 4000.0,
+                "trend_h1": "DOWN",
+                "trend_h4": "DOWN",
+                "price_action": {
+                    "m15_phase": "IMPULSE_DOWN",
+                    "h1_phase": "IMPULSE_DOWN",
+                    "h4_phase": "IMPULSE_DOWN",
+                },
+                "h1_indicators": {
+                    "ema_regime": "BELOW_EMA200",
+                    "rsi_regime": "BELOW_RSI50",
+                },
+            },
+        },
+        "ea": {"action": "WAIT", "session": "NY"},
+    }
+    sent = []
+    now = [datetime(2026, 7, 23, 1, 0, tzinfo=timezone.utc)]
+    original_market_open = runtime._telegram_market_is_open
+    original_enabled = runtime._telegram_enabled
+    original_send = runtime.send_telegram_message
+    original_now = runtime._trend_now_utc
+    original_state_file = runtime.TELEGRAM_TREND_STATE_FILE
+    original_notify = runtime.TELEGRAM_NOTIFY_TREND_UPDATE
+    original_interval = runtime.TELEGRAM_TREND_MIN_INTERVAL_SECONDS
+    original_key = runtime.LAST_TELEGRAM_TREND_UPDATE_KEY
+    original_at = runtime.LAST_TELEGRAM_TREND_UPDATE_AT
+    original_h1 = runtime.LAST_TELEGRAM_H1_CROSS_KEY
+    original_loaded = runtime.LAST_TELEGRAM_TREND_STATE_LOADED
+    try:
+        runtime._telegram_market_is_open = lambda payload=None, now=None: True
+        runtime._telegram_enabled = lambda audience="GROUP": True
+        runtime.send_telegram_message = (
+            lambda text, **kwargs: sent.append(text) or True
+        )
+        runtime._trend_now_utc = lambda: now[0]
+        runtime.TELEGRAM_TREND_STATE_FILE = ""
+        runtime.TELEGRAM_NOTIFY_TREND_UPDATE = True
+        runtime.TELEGRAM_TREND_MIN_INTERVAL_SECONDS = 3600
+        runtime.LAST_TELEGRAM_TREND_UPDATE_KEY = ""
+        runtime.LAST_TELEGRAM_TREND_UPDATE_AT = None
+        runtime.LAST_TELEGRAM_H1_CROSS_KEY = ""
+        runtime.LAST_TELEGRAM_TREND_STATE_LOADED = True
+
+        assert_true(runtime.maybe_broadcast_trend_update(payload), "initial trend")
+        now[0] += timedelta(minutes=10)
+        payload["signal"]["blueprint"]["price_action"]["m15_phase"] = "PULLBACK_UP"
+        assert_true(
+            not runtime.maybe_broadcast_trend_update(payload),
+            "M15 noise inside one hour must stay silent",
+        )
+
+        now[0] += timedelta(minutes=10)
+        payload["signal"]["blueprint"]["h1_indicators"]["rsi_regime"] = "ABOVE_RSI50"
+        assert_true(
+            runtime.maybe_broadcast_trend_update(payload),
+            "confirmed H1 RSI regime cross must bypass hourly throttle",
+        )
+
+        now[0] += timedelta(minutes=30)
+        assert_true(
+            not runtime.maybe_broadcast_trend_update(payload),
+            "unchanged H1 state remains throttled",
+        )
+        now[0] += timedelta(minutes=31)
+        assert_true(runtime.maybe_broadcast_trend_update(payload), "hourly refresh")
+        assert_equal(len(sent), 3, "initial + H1 cross + hourly")
+    finally:
+        runtime._telegram_market_is_open = original_market_open
+        runtime._telegram_enabled = original_enabled
+        runtime.send_telegram_message = original_send
+        runtime._trend_now_utc = original_now
+        runtime.TELEGRAM_TREND_STATE_FILE = original_state_file
+        runtime.TELEGRAM_NOTIFY_TREND_UPDATE = original_notify
+        runtime.TELEGRAM_TREND_MIN_INTERVAL_SECONDS = original_interval
+        runtime.LAST_TELEGRAM_TREND_UPDATE_KEY = original_key
+        runtime.LAST_TELEGRAM_TREND_UPDATE_AT = original_at
+        runtime.LAST_TELEGRAM_H1_CROSS_KEY = original_h1
+        runtime.LAST_TELEGRAM_TREND_STATE_LOADED = original_loaded
+
+
 def test_weekend_is_hard_closed_before_session_resolution() -> None:
     saturday = pd.Timestamp("2026-07-11T10:00:00+07:00").to_pydatetime()
     sunday = pd.Timestamp("2026-07-12T20:00:00+07:00").to_pydatetime()
@@ -1427,6 +1553,8 @@ TESTS = [
     test_pine_monitor_does_not_promote_blocked_buy_inside_sell_ha_context,
     test_confirmed_open_is_the_only_public_directional_setup,
     test_closed_market_suppresses_all_telegram,
+    test_h1_prz_wait_confirmation_does_not_require_harmonic,
+    test_trend_update_is_hourly_except_h1_ema_or_rsi_regime_cross,
     test_weekend_is_hard_closed_before_session_resolution,
     test_seasonal_bangkok_sessions_survive_conflict_resolution,
     test_closed_market_pipeline_is_canonical_and_skips_data_fetch,
