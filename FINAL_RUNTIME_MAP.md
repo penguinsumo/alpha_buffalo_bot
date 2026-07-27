@@ -7,6 +7,12 @@ Files not listed here are not deployment entry points.
 
 - FastAPI entry point: `alpha_buffalo_signal.py`
 - Railway command: `uvicorn alpha_buffalo_signal:app`
+- Compatibility facade: `alpha_buffalo_signal.py` keeps every existing
+  endpoint and import name stable while delegating pure runtime work to:
+  - `runtime_layers/common.py` — normalization and confirmed-time helpers
+  - `runtime_layers/evidence.py` — PRZ memory, M5 sniper, and HOLD diagnostics
+  - `runtime_layers/harmonic.py` — Newday/harmonic guidance normalization
+  - `runtime_layers/execution.py` — canonical EA and API signal contracts
 - Signal contract: `signal_schema.py`
 - Market/session guard: `session_clock.py`, `telegram_guard.py`
 - Execution lifecycle: `execution_lifecycle.py`, `pine_signal_bridge.py`
@@ -55,6 +61,10 @@ are directions. RR and directional price validation still decide EA readiness.
 ## Supported Checks
 
 - `scripts/alpha_regression_suite.py`
+- `scripts/regression_cases/engine_core.py`
+- `scripts/regression_cases/lifecycle.py`
+- `scripts/regression_cases/telegram.py`
+- `scripts/regression_cases/prz_runtime.py`
 - `scripts/test_python_execution_roundtrip.py`
 - `scripts/test_pine_webhook_roundtrip.py`
 - `scripts/test_pine_ea_bridge.py`
