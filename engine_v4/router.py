@@ -144,10 +144,12 @@ class SignalRouter:
             "BUY_PRESSURE" if direction == "BUY" else "SELL_PRESSURE"
         )
         sig["bos_confirmed"] = bool(is_cf_ready)
-        sig["bb_prz_confluence"] = bool(
-            sig.get("bb_prz_confluence") or sig.get("zone_confluence")
+        bb_prz_confluence = bool(sig.get("bb_prz_confluence"))
+        zone_confluence = bool(sig.get("zone_confluence"))
+        sig["bb_prz_confluence"] = bb_prz_confluence
+        sig["zone_confluence"] = bool(
+            bb_prz_confluence or zone_confluence
         )
-        sig["zone_confluence"] = bool(sig.get("bb_prz_confluence"))
         sig["close_at_signal"] = float(row.get("close", 0.0) or 0.0)
         sig["harmonic_bias"] = harmonic_gate.to_dict()
 

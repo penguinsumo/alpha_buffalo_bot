@@ -445,6 +445,7 @@ class ScenarioScanner:
 
         htf_support_low, htf_support_high, htf_resistance_low, htf_resistance_high = self._prz_zone(df_1h)
         micro_support_low, micro_support_high, micro_resistance_low, micro_resistance_high = self._prz_zone(df_15m)
+        prz_forecast = self._prz_forecast_grid(df_1h, current_price)
 
         selected_harmonic = self._select_harmonic_prz(
             df_4h=df_4h,
@@ -757,6 +758,28 @@ class ScenarioScanner:
             htf_prz_support_high=round(htf_support_high, 3),
             htf_prz_resistance_low=round(htf_resistance_low, 3),
             htf_prz_resistance_high=round(htf_resistance_high, 3),
+            prz_forecast_timeframe="1H",
+            prz_forecast_source="confirmed_h1_range_kivanc",
+            prz_forecast_swing_high=round(prz_forecast["swing_high"], 3),
+            prz_forecast_swing_low=round(prz_forecast["swing_low"], 3),
+            prz_forecast_status=str(prz_forecast["status"]),
+            prz_a_support_low=round(prz_forecast["prz_a_support_low"], 3),
+            prz_a_support_high=round(prz_forecast["prz_a_support_high"], 3),
+            prz_a_resistance_low=round(prz_forecast["prz_a_resistance_low"], 3),
+            prz_a_resistance_high=round(prz_forecast["prz_a_resistance_high"], 3),
+            prz_b_support_low=round(prz_forecast["prz_b_support_low"], 3),
+            prz_b_support_high=round(prz_forecast["prz_b_support_high"], 3),
+            prz_b_resistance_low=round(prz_forecast["prz_b_resistance_low"], 3),
+            prz_b_resistance_high=round(prz_forecast["prz_b_resistance_high"], 3),
+            nearest_prz_name=str(prz_forecast["nearest_name"]),
+            nearest_prz_role=str(prz_forecast["nearest_role"]),
+            nearest_prz_direction=str(prz_forecast["nearest_direction"]),
+            nearest_prz_low=round(prz_forecast["nearest_low"], 3),
+            nearest_prz_high=round(prz_forecast["nearest_high"], 3),
+            nearest_prz_distance=round(prz_forecast["nearest_distance"], 3),
+            nearest_prz_distance_pct=round(prz_forecast["nearest_distance_pct"], 6),
+            active_prz_name=str(prz_forecast["active_name"]),
+            active_prz_tier=str(prz_forecast["active_tier"]),
             harmonic_prz_low=round(harmonic_prz_low, 3),
             harmonic_prz_high=round(harmonic_prz_high, 3),
             micro_prz_low=round(micro_support_low, 3),
@@ -1310,7 +1333,11 @@ class ScenarioScanner:
         return low > 0 and high > 0 and low <= price <= high
 
     def _prz_zone(self, df: pd.DataFrame) -> Tuple[float, float, float, float]:
-        lookback = df.tail(80)
+        # The current provider row may still be forming. Build M15/H1 PRZ
+        # boundaries only from closed candles so the zone cannot move after
+        # V4 has latched a location.
+        confirmed = df.iloc[:-1] if len(df) > 1 else df
+        lookback = confirmed.tail(80)
         high = float(lookback["high"].max())
         low = float(lookback["low"].min())
         diff = high - low
@@ -1323,6 +1350,131 @@ class ScenarioScanner:
         resistance_low = high - diff * 0.382
         resistance_high = high
         return support_low, support_high, resistance_low, resistance_high
+
+    def _prz_forecast_grid(
+        self,
+        df: pd.DataFrame,
+        current_price: float,
+    ) -> Dict[str, Any]:
+        """
+        Build confirmed H1 Kivanc/OTE forecast boxes.
+
+        PRZ-A is the classic 0.618-0.705 retracement. PRZ-B is the deeper
+        0.72-0.88 band used by the deep-sweep model. Both demand and supply
+        mirrors are calculated so direction comes from the later reaction,
+        not from a hard harmonic prerequisite.
+        """
+        confirmed = df.iloc[:-1] if len(df) > 1 else df
+        lookback = confirmed.tail(80)
+        swing_high = float(lookback["high"].max())
+        swing_low = float(lookback["low"].min())
+        span = swing_high - swing_low
+        empty = {
+            "status": "NO_RANGE",
+            "swing_high": 0.0,
+            "swing_low": 0.0,
+            "prz_a_support_low": 0.0,
+            "prz_a_support_high": 0.0,
+            "prz_a_resistance_low": 0.0,
+            "prz_a_resistance_high": 0.0,
+            "prz_b_support_low": 0.0,
+            "prz_b_support_high": 0.0,
+            "prz_b_resistance_low": 0.0,
+            "prz_b_resistance_high": 0.0,
+            "nearest_name": "NONE",
+            "nearest_role": "NONE",
+            "nearest_direction": "NONE",
+            "nearest_low": 0.0,
+            "nearest_high": 0.0,
+            "nearest_distance": 0.0,
+            "nearest_distance_pct": 0.0,
+            "active_name": "NONE",
+            "active_tier": "NONE",
+        }
+        if span <= 0:
+            return empty
+
+        zones = [
+            {
+                "name": "PRZ-A DEMAND",
+                "tier": "A",
+                "role": "SUPPORT",
+                "direction": "BUY",
+                "low": swing_high - span * 0.705,
+                "high": swing_high - span * 0.618,
+            },
+            {
+                "name": "PRZ-A SUPPLY",
+                "tier": "A",
+                "role": "RESISTANCE",
+                "direction": "SELL",
+                "low": swing_low + span * 0.618,
+                "high": swing_low + span * 0.705,
+            },
+            {
+                "name": "PRZ-B DEMAND",
+                "tier": "B",
+                "role": "SUPPORT",
+                "direction": "BUY",
+                "low": swing_high - span * 0.88,
+                "high": swing_high - span * 0.72,
+            },
+            {
+                "name": "PRZ-B SUPPLY",
+                "tier": "B",
+                "role": "RESISTANCE",
+                "direction": "SELL",
+                "low": swing_low + span * 0.72,
+                "high": swing_low + span * 0.88,
+            },
+        ]
+
+        for zone in zones:
+            if zone["low"] > zone["high"]:
+                zone["low"], zone["high"] = zone["high"], zone["low"]
+            if zone["low"] <= current_price <= zone["high"]:
+                zone["distance"] = 0.0
+            else:
+                zone["distance"] = min(
+                    abs(current_price - zone["low"]),
+                    abs(current_price - zone["high"]),
+                )
+
+        nearest = min(zones, key=lambda zone: zone["distance"])
+        active = next(
+            (zone for zone in zones if zone["distance"] == 0.0),
+            None,
+        )
+        result = dict(empty)
+        result.update(
+            {
+                "status": "ACTIVE" if active else "READY",
+                "swing_high": swing_high,
+                "swing_low": swing_low,
+                "prz_a_support_low": zones[0]["low"],
+                "prz_a_support_high": zones[0]["high"],
+                "prz_a_resistance_low": zones[1]["low"],
+                "prz_a_resistance_high": zones[1]["high"],
+                "prz_b_support_low": zones[2]["low"],
+                "prz_b_support_high": zones[2]["high"],
+                "prz_b_resistance_low": zones[3]["low"],
+                "prz_b_resistance_high": zones[3]["high"],
+                "nearest_name": nearest["name"],
+                "nearest_role": nearest["role"],
+                "nearest_direction": nearest["direction"],
+                "nearest_low": nearest["low"],
+                "nearest_high": nearest["high"],
+                "nearest_distance": nearest["distance"],
+                "nearest_distance_pct": (
+                    nearest["distance"] / current_price
+                    if current_price > 0
+                    else 0.0
+                ),
+                "active_name": active["name"] if active else "NONE",
+                "active_tier": active["tier"] if active else "NONE",
+            }
+        )
+        return result
 
     def _prz(self, df: pd.DataFrame, trend: str) -> Tuple[float, float, float, float]:
         high = float(df["high"].tail(50).max())

@@ -1623,12 +1623,16 @@ def _owner_v4_context(payload: Dict) -> Dict:
         diagnostic.get("recent_kivanc_state") or "OUTSIDE"
     ).upper()
     kivanc_event = kivanc_state not in {"", "NONE", "OUTSIDE"}
+    buy_sniper_armed = bool(diagnostic.get("buy_sniper_armed"))
+    sell_sniper_armed = bool(diagnostic.get("sell_sniper_armed"))
+    sniper_event = buy_sniper_armed or sell_sniper_armed
 
     eligible = bool(
         m15_touch
         or h1_ok
         or tunnel_event
         or harmonic_found
+        or sniper_event
         or (kivanc_event and direction in {"BUY", "SELL"})
     )
 
@@ -1658,13 +1662,15 @@ def _owner_v4_context(payload: Dict) -> Dict:
     ).upper()
     pattern_tf = str(harmonic.get("source_tf") or "NONE").upper()
 
-    locations = []
-    if diagnostic.get("recent_buy_prz_touch"):
-        locations.append("M15 DEMAND PRZ TOUCH")
-    if diagnostic.get("recent_sell_prz_touch"):
-        locations.append("M15 SUPPLY PRZ TOUCH")
-    if h1_ok:
-        locations.append(f"H1 {'DEMAND' if h1_direction == 'BUY' else 'SUPPLY'} PRZ")
+    locations = list(diagnostic.get("location_sources") or [])
+    if not locations:
+        if diagnostic.get("recent_buy_prz_touch"):
+            locations.append("M15 DEMAND PRZ TOUCH")
+        if diagnostic.get("recent_sell_prz_touch"):
+            locations.append("M15 SUPPLY PRZ TOUCH")
+    h1_label = f"H1 {'DEMAND' if h1_direction == 'BUY' else 'SUPPLY'} PRZ"
+    if h1_ok and h1_label not in locations:
+        locations.append(h1_label)
 
     return {
         "eligible": eligible,
@@ -1679,6 +1685,15 @@ def _owner_v4_context(payload: Dict) -> Dict:
         "h1_zone_high": h1_high,
         "v4_status": str(diagnostic.get("status") or "WAIT").upper(),
         "v4_selected": bool(diagnostic.get("v4_selected")),
+        "buy_evidence_score": int(
+            _safe_float(diagnostic.get("buy_evidence_score"))
+        ),
+        "sell_evidence_score": int(
+            _safe_float(diagnostic.get("sell_evidence_score"))
+        ),
+        "evidence_min": int(
+            _safe_float(diagnostic.get("evidence_min") or 3)
+        ),
         "missing": missing,
         "touch_time": str(
             diagnostic.get("buy_touch_time")
@@ -1690,6 +1705,36 @@ def _owner_v4_context(payload: Dict) -> Dict:
         ),
         "kivanc_state": kivanc_state,
         "kivanc_levels": kivanc_levels,
+        "buy_sniper_armed": buy_sniper_armed,
+        "sell_sniper_armed": sell_sniper_armed,
+        "sniper_move": _safe_float(
+            diagnostic.get("buy_sniper_move")
+            if direction == "BUY"
+            else diagnostic.get("sell_sniper_move")
+            if direction == "SELL"
+            else 0.0
+        ),
+        "sniper_kivanc": _safe_float(
+            diagnostic.get("buy_sniper_kivanc")
+            if direction == "BUY"
+            else diagnostic.get("sell_sniper_kivanc")
+            if direction == "SELL"
+            else 0.0
+        ),
+        "sniper_bb": _safe_float(
+            diagnostic.get("buy_sniper_bb")
+            if direction == "BUY"
+            else diagnostic.get("sell_sniper_bb")
+            if direction == "SELL"
+            else 0.0
+        ),
+        "sniper_bb_tf": str(
+            diagnostic.get("buy_sniper_bb_tf")
+            if direction == "BUY"
+            else diagnostic.get("sell_sniper_bb_tf")
+            if direction == "SELL"
+            else "NONE"
+        ).upper(),
         "tunnel_state": str(tunnel.get("state") or "NONE").upper(),
         "tunnel_valid": bool(tunnel.get("valid")),
         "tunnel_event": tunnel_event,
@@ -1744,6 +1789,21 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
         if levels
         else "NO NEWDAY LEVEL"
     )
+    sniper_side = (
+        "BUY ARMED"
+        if context.get("buy_sniper_armed")
+        else "SELL ARMED"
+        if context.get("sell_sniper_armed")
+        else "WAIT"
+    )
+    sniper_text = sniper_side
+    if sniper_side != "WAIT":
+        sniper_text += (
+            f" | M5 ${_safe_float(context.get('sniper_move')):,.2f}"
+            f" | K {_safe_float(context.get('sniper_kivanc')):,.2f}"
+            f" | BB-{_clean_text(context.get('sniper_bb_tf') or 'NONE')}"
+            f" {_safe_float(context.get('sniper_bb')):,.2f}"
+        )
 
     return "\n".join([
         "🔎 <b>V4 OWNER CONTEXT</b>",
@@ -1752,6 +1812,10 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
         f"💰 Price: {_safe_float(context.get('price')):,.2f}",
         f"📍 PRZ: {_clean_text(' + '.join(locations))}",
         f"🧩 V4: {_clean_text(context.get('v4_status'))}",
+        f"📊 Evidence B/S: {int(context.get('buy_evidence_score') or 0)}"
+        f" / {int(context.get('sell_evidence_score') or 0)}"
+        f" (need {int(context.get('evidence_min') or 3)})",
+        f"🎯 M5 Sniper: {_clean_text(sniper_text)}",
         f"🚇 Tunnel: {_clean_text(context.get('tunnel_state'))}"
         + (f" | {_clean_text(', '.join(tunnel_flags))}" if tunnel_flags else ""),
         f"🟡 Kivanc: {_clean_text(context.get('kivanc_state'))} | {kivanc_level_text}",
@@ -1782,7 +1846,12 @@ def maybe_broadcast_owner_v4_context(payload: Dict) -> bool:
         str(context.get("direction") or "NONE"),
         str(context.get("touch_time") or ""),
         str(context.get("v4_status") or ""),
+        str(context.get("buy_evidence_score") or 0),
+        str(context.get("sell_evidence_score") or 0),
         str(context.get("kivanc_state") or ""),
+        str(context.get("buy_sniper_armed") or False),
+        str(context.get("sell_sniper_armed") or False),
+        str(context.get("sniper_move") or 0.0),
         str(context.get("tunnel_state") or ""),
         str(context.get("buy_tunnel_sweep") or False),
         str(context.get("sell_tunnel_sweep") or False),
@@ -2095,6 +2164,648 @@ def _engine_v4_scalar(value):
     return str(value)
 
 
+def _blueprint_float(blueprint, field: str) -> float:
+    """Read a numeric blueprint field from either the dataclass or a dict."""
+    if blueprint is None:
+        return 0.0
+    value = (
+        blueprint.get(field, 0.0)
+        if isinstance(blueprint, dict)
+        else getattr(blueprint, field, 0.0)
+    )
+    return _safe_float(value)
+
+
+def _blueprint_zone_overlap(
+    df: pd.DataFrame,
+    blueprint,
+    low_field: str,
+    high_field: str,
+) -> pd.Series:
+    """Return causal wick overlap against one already-confirmed blueprint zone."""
+    zone_low = _blueprint_float(blueprint, low_field)
+    zone_high = _blueprint_float(blueprint, high_field)
+    if zone_low <= 0 or zone_high <= 0:
+        return pd.Series(False, index=df.index, dtype=bool)
+    if zone_low > zone_high:
+        zone_low, zone_high = zone_high, zone_low
+    return (
+        (pd.to_numeric(df["low"], errors="coerce") <= zone_high)
+        & (pd.to_numeric(df["high"], errors="coerce") >= zone_low)
+    ).fillna(False)
+
+
+def _v4_bool_series(df: pd.DataFrame, field: str) -> pd.Series:
+    if field not in df:
+        return pd.Series(False, index=df.index, dtype=bool)
+    return df[field].fillna(False).astype(bool)
+
+
+def _timed_ohlc_frame(df: pd.DataFrame | None) -> pd.DataFrame:
+    """Normalize an OHLC frame to a sorted UTC index without inventing time."""
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame()
+
+    out = df.copy()
+    if "datetime" in out.columns:
+        timestamps = pd.to_datetime(out["datetime"], errors="coerce", utc=True)
+        out = out.loc[timestamps.notna()].copy()
+        out.index = pd.DatetimeIndex(timestamps[timestamps.notna()])
+    elif isinstance(out.index, pd.DatetimeIndex):
+        if out.index.tz is None:
+            out.index = out.index.tz_localize("UTC")
+        else:
+            out.index = out.index.tz_convert("UTC")
+    else:
+        return pd.DataFrame()
+
+    for field in ("open", "high", "low", "close"):
+        if field not in out:
+            return pd.DataFrame()
+        out[field] = pd.to_numeric(out[field], errors="coerce")
+    return (
+        out.dropna(subset=["open", "high", "low", "close"])
+        .sort_index()
+        .loc[lambda frame: ~frame.index.duplicated(keep="last")]
+    )
+
+
+def _positive_levels(*values) -> list[float]:
+    levels = []
+    for value in values:
+        number = _safe_float(value)
+        if number > 0 and not any(abs(number - existing) < 1e-6 for existing in levels):
+            levels.append(number)
+    return levels
+
+
+def _m5_sniper_sweep_overlay(
+    df_15m: pd.DataFrame,
+    df_5m: pd.DataFrame | None,
+    df_1h: pd.DataFrame | None,
+    blueprint,
+) -> pd.DataFrame:
+    """
+    Add confirmed M5 wick-sweep evidence to the matching M15 setup bar.
+
+    A sniper event is evidence, never an independent order trigger:
+    - completed M5 range >= configured XAU dollar threshold;
+    - prior three-bar extreme is swept and reclaimed;
+    - the wick overlaps a confirmed Kivanc level;
+    - the same wick touches/reclaims M15 or H1 Bollinger edge;
+    - the wick overlaps a confirmed M15/H1/PRZ-A/PRZ-B location.
+
+    The final M5 and H1 provider rows are excluded because they may still be
+    forming. M15/H1 reference values are shifted so the sweep cannot read a
+    candle that had not closed when it occurred.
+    """
+    out = df_15m.copy()
+    defaults = {
+        "V4_Buy_M5_Sniper_Evidence": False,
+        "V4_Sell_M5_Sniper_Evidence": False,
+        "V4_Buy_M5_Sniper_Move": 0.0,
+        "V4_Sell_M5_Sniper_Move": 0.0,
+        "V4_Buy_M5_Sniper_Kivanc": 0.0,
+        "V4_Sell_M5_Sniper_Kivanc": 0.0,
+        "V4_Buy_M5_Sniper_BB": 0.0,
+        "V4_Sell_M5_Sniper_BB": 0.0,
+        "V4_Buy_M5_Sniper_BB_TF": "NONE",
+        "V4_Sell_M5_Sniper_BB_TF": "NONE",
+        "V4_Buy_M5_Sniper_Time": "",
+        "V4_Sell_M5_Sniper_Time": "",
+    }
+    for field, value in defaults.items():
+        out[field] = value
+
+    m5 = _timed_ohlc_frame(df_5m)
+    if len(m5) < 5 or not isinstance(out.index, pd.DatetimeIndex):
+        return out
+    # TwelveData includes the updating provider candle as its final row.
+    m5 = m5.iloc[:-1].copy()
+    if len(m5) < 4:
+        return out
+
+    minimum_move = max(
+        0.1,
+        float(os.getenv("ENGINE_V4_SNIPER_M5_MIN_MOVE", "10.0")),
+    )
+    level_tolerance = max(
+        0.0,
+        float(os.getenv("ENGINE_V4_SNIPER_LEVEL_TOLERANCE", "1.5")),
+    )
+    sweep_lookback = max(
+        1,
+        int(os.getenv("ENGINE_V4_SNIPER_SWEEP_LOOKBACK", "3")),
+    )
+
+    m15_index = out.index
+    if m15_index.tz is None:
+        m15_index = m15_index.tz_localize("UTC")
+    else:
+        m15_index = m15_index.tz_convert("UTC")
+
+    # An H1 candle stamped 14:00 is only usable after its 15:00 close.
+    h1 = _timed_ohlc_frame(df_1h)
+    h1_lower = pd.Series(dtype=float)
+    h1_upper = pd.Series(dtype=float)
+    if len(h1) >= 3:
+        h1 = h1.iloc[:-1].copy()
+        if "BB_Lower" in h1 and "BB_Upper" in h1:
+            raw_h1_lower = pd.to_numeric(h1["BB_Lower"], errors="coerce")
+            raw_h1_upper = pd.to_numeric(h1["BB_Upper"], errors="coerce")
+        else:
+            h1_mid = h1["close"].rolling(20, min_periods=20).mean()
+            h1_std = h1["close"].rolling(20, min_periods=20).std()
+            raw_h1_lower = h1_mid - (2.0 * h1_std)
+            raw_h1_upper = h1_mid + (2.0 * h1_std)
+        h1_lower = raw_h1_lower.copy()
+        h1_upper = raw_h1_upper.copy()
+        h1_lower.index = h1_lower.index + pd.Timedelta(hours=1)
+        h1_upper.index = h1_upper.index + pd.Timedelta(hours=1)
+
+    prior_low = m5["low"].rolling(sweep_lookback, min_periods=sweep_lookback).min().shift(1)
+    prior_high = m5["high"].rolling(sweep_lookback, min_periods=sweep_lookback).max().shift(1)
+    candle_range = m5["high"] - m5["low"]
+
+    def _zone_overlap(low: float, high: float, zone_low: float, zone_high: float) -> bool:
+        if zone_low <= 0 or zone_high <= 0:
+            return False
+        if zone_low > zone_high:
+            zone_low, zone_high = zone_high, zone_low
+        return low <= zone_high + level_tolerance and high >= zone_low - level_tolerance
+
+    def _asof_value(series: pd.Series, timestamp: pd.Timestamp) -> float:
+        if series.empty:
+            return 0.0
+        eligible = series.loc[series.index <= timestamp].dropna()
+        return _safe_float(eligible.iloc[-1]) if not eligible.empty else 0.0
+
+    market_levels = _positive_levels(
+        _blueprint_float(blueprint, "kivanc_boundary_low"),
+        _blueprint_float(blueprint, "kivanc_boundary_high"),
+        _blueprint_float(blueprint, "kivanc_fibo_0618"),
+        _blueprint_float(blueprint, "kivanc_fibo_0786"),
+        _blueprint_float(blueprint, "kivanc_fibo_0886"),
+    )
+    blueprint_buy_zones = [
+        (
+            _blueprint_float(blueprint, low_field),
+            _blueprint_float(blueprint, high_field),
+        )
+        for low_field, high_field in (
+            ("htf_prz_support_low", "htf_prz_support_high"),
+            ("prz_a_support_low", "prz_a_support_high"),
+            ("prz_b_support_low", "prz_b_support_high"),
+        )
+    ]
+    blueprint_sell_zones = [
+        (
+            _blueprint_float(blueprint, low_field),
+            _blueprint_float(blueprint, high_field),
+        )
+        for low_field, high_field in (
+            ("htf_prz_resistance_low", "htf_prz_resistance_high"),
+            ("prz_a_resistance_low", "prz_a_resistance_high"),
+            ("prz_b_resistance_low", "prz_b_resistance_high"),
+        )
+    ]
+
+    # Only recent completed M5 bars can affect the live four-M15-bar memory.
+    for m5_position in range(max(sweep_lookback, len(m5) - 24), len(m5)):
+        timestamp = pd.Timestamp(m5.index[m5_position])
+        m15_position = int(m15_index.searchsorted(timestamp, side="right") - 1)
+        if m15_position < 0 or m15_position >= len(out):
+            continue
+        reference_position = max(0, m15_position - 1)
+        reference = out.iloc[reference_position]
+        bar = m5.iloc[m5_position]
+        low = _safe_float(bar["low"])
+        high = _safe_float(bar["high"])
+        open_price = _safe_float(bar["open"])
+        close = _safe_float(bar["close"])
+        move = _safe_float(candle_range.iloc[m5_position])
+        if move < minimum_move or low <= 0 or high <= 0:
+            continue
+
+        m15_buy_zones = blueprint_buy_zones + [
+            (
+                _safe_float(reference.get("Pine_PRZ_Support_Low")),
+                _safe_float(reference.get("Pine_PRZ_Support_High")),
+            )
+        ]
+        m15_sell_zones = blueprint_sell_zones + [
+            (
+                _safe_float(reference.get("Pine_PRZ_Resistance_Low")),
+                _safe_float(reference.get("Pine_PRZ_Resistance_High")),
+            )
+        ]
+        buy_location = any(
+            _zone_overlap(low, high, zone_low, zone_high)
+            for zone_low, zone_high in m15_buy_zones
+        )
+        sell_location = any(
+            _zone_overlap(low, high, zone_low, zone_high)
+            for zone_low, zone_high in m15_sell_zones
+        )
+
+        buy_levels = _positive_levels(
+            reference.get("Fib_0618"),
+            reference.get("Fib_072"),
+            reference.get("Fib_0786"),
+            reference.get("Fib_0886"),
+            reference.get("Fib_100"),
+            *market_levels,
+        )
+        sell_levels = _positive_levels(
+            reference.get("Fib_R_0618"),
+            reference.get("Fib_R_072"),
+            reference.get("Fib_R_0786"),
+            reference.get("Fib_R_0886"),
+            reference.get("Fib_R_100"),
+            *market_levels,
+        )
+        lower_body = min(open_price, close)
+        upper_body = max(open_price, close)
+        touched_buy_levels = [
+            level
+            for level in buy_levels
+            if low <= level + level_tolerance
+            and lower_body >= level - level_tolerance
+        ]
+        touched_sell_levels = [
+            level
+            for level in sell_levels
+            if high >= level - level_tolerance
+            and upper_body <= level + level_tolerance
+        ]
+
+        m15_lower = _safe_float(reference.get("BB_Lower"))
+        m15_upper = _safe_float(reference.get("BB_Upper"))
+        h1_bb_lower = _asof_value(h1_lower, timestamp)
+        h1_bb_upper = _asof_value(h1_upper, timestamp)
+        buy_bb_candidates = [
+            ("M15", m15_lower),
+            ("H1", h1_bb_lower),
+        ]
+        sell_bb_candidates = [
+            ("M15", m15_upper),
+            ("H1", h1_bb_upper),
+        ]
+        touched_buy_bb = [
+            (timeframe, level)
+            for timeframe, level in buy_bb_candidates
+            if level > 0
+            and low <= level + level_tolerance
+            and close > level
+        ]
+        touched_sell_bb = [
+            (timeframe, level)
+            for timeframe, level in sell_bb_candidates
+            if level > 0
+            and high >= level - level_tolerance
+            and close < level
+        ]
+
+        prior_low_value = _safe_float(prior_low.iloc[m5_position])
+        prior_high_value = _safe_float(prior_high.iloc[m5_position])
+        buy_kivanc_level = (
+            min(touched_buy_levels, key=lambda level: abs(low - level))
+            if touched_buy_levels
+            else 0.0
+        )
+        sell_kivanc_level = (
+            min(touched_sell_levels, key=lambda level: abs(high - level))
+            if touched_sell_levels
+            else 0.0
+        )
+        buy_sweep = bool(
+            buy_location
+            and prior_low_value > 0
+            and low < prior_low_value
+            and close > prior_low_value
+            and touched_buy_levels
+            and touched_buy_bb
+            and close > buy_kivanc_level
+        )
+        sell_sweep = bool(
+            sell_location
+            and prior_high_value > 0
+            and high > prior_high_value
+            and close < prior_high_value
+            and touched_sell_levels
+            and touched_sell_bb
+            and close < sell_kivanc_level
+        )
+
+        row_index = out.index[m15_position]
+        if buy_sweep:
+            bb_tf, bb_level = min(
+                touched_buy_bb,
+                key=lambda item: abs(low - item[1]),
+            )
+            out.at[row_index, "V4_Buy_M5_Sniper_Evidence"] = True
+            out.at[row_index, "V4_Buy_M5_Sniper_Move"] = max(
+                _safe_float(out.at[row_index, "V4_Buy_M5_Sniper_Move"]),
+                move,
+            )
+            out.at[row_index, "V4_Buy_M5_Sniper_Kivanc"] = buy_kivanc_level
+            out.at[row_index, "V4_Buy_M5_Sniper_BB"] = bb_level
+            out.at[row_index, "V4_Buy_M5_Sniper_BB_TF"] = bb_tf
+            out.at[row_index, "V4_Buy_M5_Sniper_Time"] = timestamp.isoformat()
+        if sell_sweep:
+            bb_tf, bb_level = min(
+                touched_sell_bb,
+                key=lambda item: abs(high - item[1]),
+            )
+            out.at[row_index, "V4_Sell_M5_Sniper_Evidence"] = True
+            out.at[row_index, "V4_Sell_M5_Sniper_Move"] = max(
+                _safe_float(out.at[row_index, "V4_Sell_M5_Sniper_Move"]),
+                move,
+            )
+            out.at[row_index, "V4_Sell_M5_Sniper_Kivanc"] = sell_kivanc_level
+            out.at[row_index, "V4_Sell_M5_Sniper_BB"] = bb_level
+            out.at[row_index, "V4_Sell_M5_Sniper_BB_TF"] = bb_tf
+            out.at[row_index, "V4_Sell_M5_Sniper_Time"] = timestamp.isoformat()
+
+    return out
+
+
+def _v4_location_evidence_memory(
+    df: pd.DataFrame,
+    *,
+    touch: pd.Series,
+    reset: pd.Series,
+    component_weights: Dict[str, int],
+    lock_bars: int,
+    wall_side: str,
+) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    """
+    Latch PRZ location/evidence for closed M15 bars without looking ahead.
+
+    A new touch starts or refreshes the four-bar window. Evidence observed
+    after that touch is retained until expiry. An opposite BOS/CHoCH clears
+    the state before an entry can be emitted.
+    """
+    limit = max(1, int(lock_bars))
+    active_values = []
+    score_values = []
+    age_values = []
+    wall_values = []
+    active = False
+    age = -1
+    seen = {field: False for field in component_weights}
+    wall = 0.0
+
+    for position in range(len(df)):
+        if bool(reset.iloc[position]):
+            active = False
+            age = -1
+            wall = 0.0
+            seen = {field: False for field in component_weights}
+        else:
+            touched = bool(touch.iloc[position])
+            if touched:
+                if not active:
+                    seen = {field: False for field in component_weights}
+                    wall = 0.0
+                active = True
+                age = 0
+                candle_wall = _safe_float(
+                    df["low"].iloc[position]
+                    if wall_side == "LOW"
+                    else df["high"].iloc[position]
+                )
+                if candle_wall > 0:
+                    if wall <= 0:
+                        wall = candle_wall
+                    elif wall_side == "LOW":
+                        wall = min(wall, candle_wall)
+                    else:
+                        wall = max(wall, candle_wall)
+            elif active:
+                age += 1
+
+            if active and age >= limit:
+                active = False
+                age = -1
+                wall = 0.0
+                seen = {field: False for field in component_weights}
+
+            if active:
+                for field in component_weights:
+                    if field in df and bool(
+                        df[field].fillna(False).astype(bool).iloc[position]
+                    ):
+                        seen[field] = True
+
+        if active:
+            # PRZ location contributes one point. A multi-layer overlap is
+            # retained as a separate evidence component for the full window.
+            evidence_score = 1 + sum(
+                weight
+                for field, weight in component_weights.items()
+                if seen.get(field, False)
+            )
+        else:
+            evidence_score = 0
+
+        active_values.append(active)
+        score_values.append(evidence_score)
+        age_values.append(age)
+        wall_values.append(wall)
+
+    return (
+        pd.Series(active_values, index=df.index, dtype=bool),
+        pd.Series(score_values, index=df.index, dtype=int),
+        pd.Series(age_values, index=df.index, dtype=int),
+        pd.Series(wall_values, index=df.index, dtype=float),
+    )
+
+
+def _overlay_blueprint_prz_memory(
+    df: pd.DataFrame,
+    blueprint,
+    *,
+    lock_bars: int = 4,
+    df_5m: pd.DataFrame | None = None,
+    df_1h: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """
+    Connect scanner H1/forecast PRZ layers to the executable V4 dataframe.
+
+    Harmonic and tunnel remain guidance/owner context. They are deliberately
+    not execution prerequisites and cannot create an order on their own.
+    """
+    out = df.copy()
+
+    out["In_H1_PRZ_Support"] = _blueprint_zone_overlap(
+        out,
+        blueprint,
+        "htf_prz_support_low",
+        "htf_prz_support_high",
+    )
+    out["In_H1_PRZ_Resistance"] = _blueprint_zone_overlap(
+        out,
+        blueprint,
+        "htf_prz_resistance_low",
+        "htf_prz_resistance_high",
+    )
+    out["In_PRZ_A_Support"] = _blueprint_zone_overlap(
+        out,
+        blueprint,
+        "prz_a_support_low",
+        "prz_a_support_high",
+    )
+    out["In_PRZ_A_Resistance"] = _blueprint_zone_overlap(
+        out,
+        blueprint,
+        "prz_a_resistance_low",
+        "prz_a_resistance_high",
+    )
+    out["In_PRZ_B_Support"] = _blueprint_zone_overlap(
+        out,
+        blueprint,
+        "prz_b_support_low",
+        "prz_b_support_high",
+    )
+    out["In_PRZ_B_Resistance"] = _blueprint_zone_overlap(
+        out,
+        blueprint,
+        "prz_b_resistance_low",
+        "prz_b_resistance_high",
+    )
+
+    buy_layers = (
+        _v4_bool_series(out, "Deep_Buy_PRZ_Context").astype(int)
+        + _v4_bool_series(out, "In_H1_PRZ_Support").astype(int)
+        + _v4_bool_series(out, "In_PRZ_A_Support").astype(int)
+        + _v4_bool_series(out, "In_PRZ_B_Support").astype(int)
+    )
+    sell_layers = (
+        _v4_bool_series(out, "Deep_Sell_PRZ_Context").astype(int)
+        + _v4_bool_series(out, "In_H1_PRZ_Resistance").astype(int)
+        + _v4_bool_series(out, "In_PRZ_A_Resistance").astype(int)
+        + _v4_bool_series(out, "In_PRZ_B_Resistance").astype(int)
+    )
+    out["V4_Demand_PRZ_Layer_Count"] = buy_layers
+    out["V4_Supply_PRZ_Layer_Count"] = sell_layers
+    out["V4_Demand_PRZ_Touch"] = buy_layers > 0
+    out["V4_Supply_PRZ_Touch"] = sell_layers > 0
+    out = _m5_sniper_sweep_overlay(out, df_5m, df_1h, blueprint)
+
+    # Evidence can substitute for other evidence. None of BB/VSA/OB/Kivanc is
+    # a mandatory gate by itself. HA colour flip remains the actual trigger.
+    buy_components = {
+        "V4_Buy_PRZ_Overlap_Evidence": 1,
+        "V4_Buy_Sweep_Evidence": 2,
+        "V4_Buy_Pinbar_Evidence": 2,
+        "Near_BB_Lower": 1,
+        "VSA_Buy_Wins": 1,
+        "Bull_OB": 1,
+        "In_Session_Kivanc_Buy_Zone": 1,
+        "V4_Buy_M5_Sniper_Evidence": 2,
+    }
+    sell_components = {
+        "V4_Sell_PRZ_Overlap_Evidence": 1,
+        "V4_Sell_Sweep_Evidence": 2,
+        "V4_Sell_Pinbar_Evidence": 2,
+        "Near_BB_Upper": 1,
+        "VSA_Sell_Wins": 1,
+        "Bear_OB": 1,
+        "In_Session_Kivanc_Sell_Zone": 1,
+        "V4_Sell_M5_Sniper_Evidence": 2,
+    }
+    out["V4_Buy_Sweep_Evidence"] = (
+        _v4_bool_series(out, "Bull_Sweep")
+        | _v4_bool_series(out, "Deep_Buy_Reclaim_Trigger")
+    )
+    out["V4_Sell_Sweep_Evidence"] = (
+        _v4_bool_series(out, "Bear_Sweep")
+        | _v4_bool_series(out, "Deep_Sell_Reclaim_Trigger")
+    )
+    out["V4_Buy_Pinbar_Evidence"] = (
+        _v4_bool_series(out, "Bullish_Pinbar")
+        | _v4_bool_series(out, "Zone_Buy_Pinbar_Trigger")
+    )
+    out["V4_Sell_Pinbar_Evidence"] = (
+        _v4_bool_series(out, "Bearish_Pinbar")
+        | _v4_bool_series(out, "Zone_Sell_Pinbar_Trigger")
+    )
+    out["V4_Buy_PRZ_Overlap_Evidence"] = buy_layers >= 2
+    out["V4_Sell_PRZ_Overlap_Evidence"] = sell_layers >= 2
+
+    (
+        out["V4_Buy_Location_Memory"],
+        out["V4_Buy_Evidence_Score"],
+        out["V4_Buy_Location_Age_Bars"],
+        out["V4_Buy_Location_Wall"],
+    ) = _v4_location_evidence_memory(
+        out,
+        touch=out["V4_Demand_PRZ_Touch"],
+        reset=(
+            _v4_bool_series(out, "CHoCH_Bear")
+            | _v4_bool_series(out, "Micro_BOS_Down")
+        ),
+        component_weights=buy_components,
+        lock_bars=lock_bars,
+        wall_side="LOW",
+    )
+    (
+        out["V4_Sell_Location_Memory"],
+        out["V4_Sell_Evidence_Score"],
+        out["V4_Sell_Location_Age_Bars"],
+        out["V4_Sell_Location_Wall"],
+    ) = _v4_location_evidence_memory(
+        out,
+        touch=out["V4_Supply_PRZ_Touch"],
+        reset=(
+            _v4_bool_series(out, "CHoCH_Bull")
+            | _v4_bool_series(out, "Micro_BOS_Up")
+        ),
+        component_weights=sell_components,
+        lock_bars=lock_bars,
+        wall_side="HIGH",
+    )
+
+    evidence_min = max(1, int(os.getenv("ENGINE_V4_EVIDENCE_MIN", "3")))
+    out["V4_Buy_Memory_Trigger"] = (
+        out["V4_Buy_Location_Memory"]
+        & (out["V4_Buy_Evidence_Score"] >= evidence_min)
+        & _v4_bool_series(out, "HA_Bull_Reversal")
+    )
+    out["V4_Sell_Memory_Trigger"] = (
+        out["V4_Sell_Location_Memory"]
+        & (out["V4_Sell_Evidence_Score"] >= evidence_min)
+        & _v4_bool_series(out, "HA_Bear_Reversal")
+    )
+
+    out["V4_Buy_Entry_Zone"] = (
+        _v4_bool_series(out, "V4_Buy_Entry_Zone")
+        | out["V4_Buy_Location_Memory"]
+    )
+    out["V4_Sell_Entry_Zone"] = (
+        _v4_bool_series(out, "V4_Sell_Entry_Zone")
+        | out["V4_Sell_Location_Memory"]
+    )
+    out["V4_Buy_Setup"] = (
+        _v4_bool_series(out, "V4_Buy_Setup")
+        | out["V4_Buy_Memory_Trigger"]
+    )
+    out["V4_Sell_Setup"] = (
+        _v4_bool_series(out, "V4_Sell_Setup")
+        | out["V4_Sell_Memory_Trigger"]
+    )
+    out["V4_Block_Sell_At_Lower"] = (
+        _v4_bool_series(out, "V4_Block_Sell_At_Lower")
+        | out["V4_Buy_Location_Memory"]
+    )
+    out["V4_Block_Buy_At_Upper"] = (
+        _v4_bool_series(out, "V4_Block_Buy_At_Upper")
+        | out["V4_Sell_Location_Memory"]
+    )
+    return out
+
+
 def _engine_v4_wait_diagnostics(
     df: pd.DataFrame,
     blueprint=None,
@@ -2129,6 +2840,16 @@ def _engine_v4_wait_diagnostics(
     def _any(*fields: str) -> bool:
         return any(_count(field) > 0 for field in fields)
 
+    def _max_int(field: str) -> int:
+        if field not in tail:
+            return 0
+        try:
+            return int(
+                pd.to_numeric(tail[field], errors="coerce").fillna(0).max()
+            )
+        except Exception:
+            return 0
+
     def _latest_time(*fields: str) -> str:
         mask = pd.Series(False, index=tail.index)
         for field in fields:
@@ -2140,10 +2861,62 @@ def _engine_v4_wait_diagnostics(
         matches = tail.index[mask]
         return _iso_timestamp(matches[-1]) if len(matches) else ""
 
-    buy_touch = _any("Deep_Buy_PRZ_Context", "In_Pine_PRZ_Support")
-    sell_touch = _any("Deep_Sell_PRZ_Context", "In_Pine_PRZ_Resistance")
-    buy_touch_time = _latest_time("Deep_Buy_PRZ_Context", "In_Pine_PRZ_Support")
-    sell_touch_time = _latest_time("Deep_Sell_PRZ_Context", "In_Pine_PRZ_Resistance")
+    def _latest_event(field: str) -> pd.Series | None:
+        if field not in tail:
+            return None
+        try:
+            matches = tail.loc[tail[field].fillna(False).astype(bool)]
+        except Exception:
+            return None
+        return matches.iloc[-1] if not matches.empty else None
+
+    buy_touch = _any(
+        "V4_Demand_PRZ_Touch",
+        "V4_Buy_Location_Memory",
+        "Deep_Buy_PRZ_Context",
+        "In_Pine_PRZ_Support",
+        "In_H1_PRZ_Support",
+    )
+    sell_touch = _any(
+        "V4_Supply_PRZ_Touch",
+        "V4_Sell_Location_Memory",
+        "Deep_Sell_PRZ_Context",
+        "In_Pine_PRZ_Resistance",
+        "In_H1_PRZ_Resistance",
+    )
+    buy_touch_time = _latest_time(
+        "V4_Demand_PRZ_Touch",
+        "Deep_Buy_PRZ_Context",
+        "In_Pine_PRZ_Support",
+        "In_H1_PRZ_Support",
+    )
+    sell_touch_time = _latest_time(
+        "V4_Supply_PRZ_Touch",
+        "Deep_Sell_PRZ_Context",
+        "In_Pine_PRZ_Resistance",
+        "In_H1_PRZ_Resistance",
+    )
+    buy_reset_time = _latest_time("CHoCH_Bear", "Micro_BOS_Down")
+    sell_reset_time = _latest_time("CHoCH_Bull", "Micro_BOS_Up")
+
+    def _not_before(left: str, right: str) -> bool:
+        if not left or not right:
+            return False
+        try:
+            return pd.Timestamp(left) >= pd.Timestamp(right)
+        except Exception:
+            return False
+
+    buy_structure_reset = bool(
+        buy_touch
+        and not bool(last.get("V4_Buy_Location_Memory", False))
+        and _not_before(buy_reset_time, buy_touch_time)
+    )
+    sell_structure_reset = bool(
+        sell_touch
+        and not bool(last.get("V4_Sell_Location_Memory", False))
+        and _not_before(sell_reset_time, sell_touch_time)
+    )
 
     context_direction = "NONE"
     if buy_touch and not sell_touch:
@@ -2168,45 +2941,54 @@ def _engine_v4_wait_diagnostics(
                 recent_kivanc_state = normalized
                 break
 
+    buy_sniper_row = _latest_event("V4_Buy_M5_Sniper_Evidence")
+    sell_sniper_row = _latest_event("V4_Sell_M5_Sniper_Evidence")
+    buy_sniper_armed = buy_sniper_row is not None
+    sell_sniper_armed = sell_sniper_row is not None
+
+    buy_evidence_score = _max_int("V4_Buy_Evidence_Score")
+    sell_evidence_score = _max_int("V4_Sell_Evidence_Score")
+    evidence_min = max(1, int(os.getenv("ENGINE_V4_EVIDENCE_MIN", "3")))
+
     missing_buy = []
     if not buy_touch:
-        missing_buy.append("M15_DEMAND_PRZ_TOUCH")
-    if not _any(
-        "Near_BB_Lower",
-        "Bull_Sweep",
-        "Deep_Buy_Reclaim_Trigger",
-        "Zone_Buy_Pinbar_Trigger",
-    ):
-        missing_buy.append("BB_LOWER_OR_SWEEP")
-    if not _any(
-        "HA_Bull_Reversal",
-        "Bullish_Pinbar",
-        "Deep_Buy_Reclaim_Trigger",
-        "Zone_Buy_Pinbar_Trigger",
-    ):
-        missing_buy.append("HA_PA_RECLAIM")
-    if not _any("VSA_Buy_Wins", "Deep_Buy_Reclaim_Trigger"):
-        missing_buy.append("VSA_BUY_PRESSURE")
+        missing_buy.append("M15_OR_H1_DEMAND_PRZ_TOUCH")
+    if buy_structure_reset:
+        missing_buy.append("CANCELLED_BY_BEAR_BOS_CHOCH")
+    if buy_evidence_score < evidence_min:
+        missing_buy.append(
+            f"EVIDENCE_{buy_evidence_score}_OF_{evidence_min}"
+        )
+    if not _any("HA_Bull_Reversal", "V4_Buy_Memory_Trigger"):
+        missing_buy.append("HA_M15_BULL_FLIP")
 
     missing_sell = []
     if not sell_touch:
-        missing_sell.append("M15_SUPPLY_PRZ_TOUCH")
-    if not _any(
-        "Near_BB_Upper",
-        "Bear_Sweep",
-        "Deep_Sell_Reclaim_Trigger",
-        "Zone_Sell_Pinbar_Trigger",
-    ):
-        missing_sell.append("BB_UPPER_OR_SWEEP")
-    if not _any(
-        "HA_Bear_Reversal",
-        "Bearish_Pinbar",
-        "Deep_Sell_Reclaim_Trigger",
-        "Zone_Sell_Pinbar_Trigger",
-    ):
-        missing_sell.append("HA_PA_RECLAIM")
-    if not _any("VSA_Sell_Wins", "Deep_Sell_Reclaim_Trigger"):
-        missing_sell.append("VSA_SELL_PRESSURE")
+        missing_sell.append("M15_OR_H1_SUPPLY_PRZ_TOUCH")
+    if sell_structure_reset:
+        missing_sell.append("CANCELLED_BY_BULL_BOS_CHOCH")
+    if sell_evidence_score < evidence_min:
+        missing_sell.append(
+            f"EVIDENCE_{sell_evidence_score}_OF_{evidence_min}"
+        )
+    if not _any("HA_Bear_Reversal", "V4_Sell_Memory_Trigger"):
+        missing_sell.append("HA_M15_BEAR_FLIP")
+
+    source_fields = (
+        ("M15 DEMAND PRZ", ("Deep_Buy_PRZ_Context", "In_Pine_PRZ_Support")),
+        ("M15 SUPPLY PRZ", ("Deep_Sell_PRZ_Context", "In_Pine_PRZ_Resistance")),
+        ("H1 DEMAND PRZ", ("In_H1_PRZ_Support",)),
+        ("H1 SUPPLY PRZ", ("In_H1_PRZ_Resistance",)),
+        ("PRZ-A DEMAND", ("In_PRZ_A_Support",)),
+        ("PRZ-A SUPPLY", ("In_PRZ_A_Resistance",)),
+        ("PRZ-B DEMAND", ("In_PRZ_B_Support",)),
+        ("PRZ-B SUPPLY", ("In_PRZ_B_Resistance",)),
+    )
+    location_sources = [
+        label
+        for label, fields in source_fields
+        if _any(*fields)
+    ]
 
     buy_ready = _any("V4_Buy_Setup")
     sell_ready = _any("V4_Sell_Setup")
@@ -2214,6 +2996,8 @@ def _engine_v4_wait_diagnostics(
     status = (
         "V4_READY"
         if buy_ready or sell_ready
+        else "WAIT_REARM"
+        if buy_structure_reset or sell_structure_reset
         else "WAIT_CONFIRM"
         if recent_prz_touch
         else "WAIT_LOCATION"
@@ -2236,6 +3020,34 @@ def _engine_v4_wait_diagnostics(
         "Fib_R_0886",
         "Fib_R_100",
         "Kivanc_Scenario_State",
+        "In_H1_PRZ_Support",
+        "In_H1_PRZ_Resistance",
+        "In_PRZ_A_Support",
+        "In_PRZ_A_Resistance",
+        "In_PRZ_B_Support",
+        "In_PRZ_B_Resistance",
+        "V4_Demand_PRZ_Layer_Count",
+        "V4_Supply_PRZ_Layer_Count",
+        "V4_Buy_M5_Sniper_Evidence",
+        "V4_Sell_M5_Sniper_Evidence",
+        "V4_Buy_M5_Sniper_Move",
+        "V4_Sell_M5_Sniper_Move",
+        "V4_Buy_M5_Sniper_Kivanc",
+        "V4_Sell_M5_Sniper_Kivanc",
+        "V4_Buy_M5_Sniper_BB",
+        "V4_Sell_M5_Sniper_BB",
+        "V4_Buy_M5_Sniper_BB_TF",
+        "V4_Sell_M5_Sniper_BB_TF",
+        "V4_Buy_M5_Sniper_Time",
+        "V4_Sell_M5_Sniper_Time",
+        "V4_Buy_Location_Memory",
+        "V4_Sell_Location_Memory",
+        "V4_Buy_Location_Age_Bars",
+        "V4_Sell_Location_Age_Bars",
+        "V4_Buy_Evidence_Score",
+        "V4_Sell_Evidence_Score",
+        "V4_Buy_Memory_Trigger",
+        "V4_Sell_Memory_Trigger",
         "HA_Bull_Reversal",
         "HA_Bear_Reversal",
         "Bullish_Pinbar",
@@ -2266,7 +3078,57 @@ def _engine_v4_wait_diagnostics(
         "recent_sell_prz_touch": sell_touch,
         "buy_touch_time": buy_touch_time,
         "sell_touch_time": sell_touch_time,
+        "buy_reset_time": buy_reset_time,
+        "sell_reset_time": sell_reset_time,
+        "buy_structure_reset": buy_structure_reset,
+        "sell_structure_reset": sell_structure_reset,
         "recent_kivanc_state": recent_kivanc_state,
+        "buy_sniper_armed": buy_sniper_armed,
+        "sell_sniper_armed": sell_sniper_armed,
+        "buy_sniper_move": _safe_float(
+            buy_sniper_row.get("V4_Buy_M5_Sniper_Move")
+            if buy_sniper_row is not None
+            else 0.0
+        ),
+        "sell_sniper_move": _safe_float(
+            sell_sniper_row.get("V4_Sell_M5_Sniper_Move")
+            if sell_sniper_row is not None
+            else 0.0
+        ),
+        "buy_sniper_kivanc": _safe_float(
+            buy_sniper_row.get("V4_Buy_M5_Sniper_Kivanc")
+            if buy_sniper_row is not None
+            else 0.0
+        ),
+        "sell_sniper_kivanc": _safe_float(
+            sell_sniper_row.get("V4_Sell_M5_Sniper_Kivanc")
+            if sell_sniper_row is not None
+            else 0.0
+        ),
+        "buy_sniper_bb": _safe_float(
+            buy_sniper_row.get("V4_Buy_M5_Sniper_BB")
+            if buy_sniper_row is not None
+            else 0.0
+        ),
+        "sell_sniper_bb": _safe_float(
+            sell_sniper_row.get("V4_Sell_M5_Sniper_BB")
+            if sell_sniper_row is not None
+            else 0.0
+        ),
+        "buy_sniper_bb_tf": str(
+            buy_sniper_row.get("V4_Buy_M5_Sniper_BB_TF", "NONE")
+            if buy_sniper_row is not None
+            else "NONE"
+        ),
+        "sell_sniper_bb_tf": str(
+            sell_sniper_row.get("V4_Sell_M5_Sniper_BB_TF", "NONE")
+            if sell_sniper_row is not None
+            else "NONE"
+        ),
+        "location_sources": location_sources,
+        "buy_evidence_score": buy_evidence_score,
+        "sell_evidence_score": sell_evidence_score,
+        "evidence_min": evidence_min,
         "buy_setup_count": _count("V4_Buy_Setup"),
         "sell_setup_count": _count("V4_Sell_Setup"),
         "buy_entry_zone_count": _count("V4_Buy_Entry_Zone"),
@@ -2329,6 +3191,8 @@ def _run_engine_v4_baseline(
     symbol: str = PUBLIC_SYMBOL_DEFAULT,
     blueprint=None,
     diagnostics_out: Dict | None = None,
+    df_5m: pd.DataFrame | None = None,
+    df_1h: pd.DataFrame | None = None,
 ) -> Dict | None:
 
     if add_indicators is None or SignalRouter is None or FinalGate is None or BuySignalEngine is None or SellSignalEngine is None:
@@ -2358,6 +3222,19 @@ def _run_engine_v4_baseline(
         "Deep_Buy_Wall_Candidate", "Deep_Sell_Wall_Candidate",
         "Deep_Buy_Reclaim_Active", "Deep_Sell_Reclaim_Active",
         "Deep_Buy_Reclaim_Trigger", "Deep_Sell_Reclaim_Trigger", "Kivanc_Scenario_State",
+        "In_H1_PRZ_Support", "In_H1_PRZ_Resistance",
+        "In_PRZ_A_Support", "In_PRZ_A_Resistance",
+        "In_PRZ_B_Support", "In_PRZ_B_Resistance",
+        "V4_Demand_PRZ_Touch", "V4_Supply_PRZ_Touch",
+        "V4_Demand_PRZ_Layer_Count", "V4_Supply_PRZ_Layer_Count",
+        "V4_Buy_M5_Sniper_Evidence", "V4_Sell_M5_Sniper_Evidence",
+        "V4_Buy_M5_Sniper_Move", "V4_Sell_M5_Sniper_Move",
+        "V4_Buy_M5_Sniper_Kivanc", "V4_Sell_M5_Sniper_Kivanc",
+        "V4_Buy_M5_Sniper_BB", "V4_Sell_M5_Sniper_BB",
+        "V4_Buy_M5_Sniper_BB_TF", "V4_Sell_M5_Sniper_BB_TF",
+        "V4_Buy_Location_Memory", "V4_Sell_Location_Memory",
+        "V4_Buy_Evidence_Score", "V4_Sell_Evidence_Score",
+        "V4_Buy_Memory_Trigger", "V4_Sell_Memory_Trigger",
         "V4_Buy_Entry_Zone", "V4_Sell_Entry_Zone", "V4_Buy_Setup", "V4_Sell_Setup",
         "V4_Block_Sell_At_Lower", "V4_Block_Buy_At_Upper", "CHoCH_Bull", "CHoCH_Bear",
     ]
@@ -2376,6 +3253,13 @@ def _run_engine_v4_baseline(
 
         df = _ensure_engine_v4_datetime_index(df_15m)
         df = add_indicators(df)
+        df = _overlay_blueprint_prz_memory(
+            df,
+            blueprint,
+            lock_bars=int(os.getenv("ENGINE_V4_LOCATION_LOCK_BARS", "4")),
+            df_5m=df_5m,
+            df_1h=df_1h,
+        )
         diagnostics = _engine_v4_wait_diagnostics(
             df,
             blueprint,
@@ -2459,6 +3343,10 @@ def _run_engine_v4_baseline(
         counts = {}
         for field in [
             "BB_PRZ_Support_Confluence", "BB_PRZ_Resistance_Confluence",
+            "V4_Demand_PRZ_Touch", "V4_Supply_PRZ_Touch",
+            "V4_Buy_M5_Sniper_Evidence", "V4_Sell_M5_Sniper_Evidence",
+            "V4_Buy_Location_Memory", "V4_Sell_Location_Memory",
+            "V4_Buy_Memory_Trigger", "V4_Sell_Memory_Trigger",
             "V4_Buy_Entry_Zone", "V4_Sell_Entry_Zone", "V4_Buy_Setup", "V4_Sell_Setup",
             "Pine_PA_Bull_Confirmed", "Pine_PA_Bear_Confirmed", "VSA_Buy_Wins", "VSA_Sell_Wins",
         ]:
@@ -3064,11 +3952,14 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
         # v12 scanner/blueprint stays intact, but proven engine_v4 BUY/SELL baseline
         # becomes the actual trade source when it produces confirmed levels.
         engine_v4_diagnostics: Dict = {}
+        df_5m = fetch_management_m5(symbol)
         engine_v4_signal = _run_engine_v4_baseline(
             df_15m,
             public_symbol,
             blueprint=blueprint,
             diagnostics_out=engine_v4_diagnostics,
+            df_5m=df_5m,
+            df_1h=df_1h,
         )
         signal = _apply_engine_v4_signal(signal, engine_v4_signal)
         # Read-only owner observability. This snapshot can explain a PRZ touch

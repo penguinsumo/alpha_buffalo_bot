@@ -69,6 +69,20 @@ class SellSignalEngine(BaseEngine):
         deep_wall_high = float(row.get("Deep_Sell_Wall_High", 0.0) or 0.0)
         pinbar_break = bool(row.get("Zone_Sell_Pinbar_Trigger", False))
         pinbar_wall_high = float(row.get("Zone_Sell_Wall_High", 0.0) or 0.0)
+        memory_trigger = bool(row.get("V4_Sell_Memory_Trigger", False))
+        memory_wall_high = float(row.get("V4_Sell_Location_Wall", 0.0) or 0.0)
+        sniper_window = df.iloc[max(0, idx - 4): idx + 1]
+        sniper_rows = (
+            sniper_window.loc[
+                sniper_window["V4_Sell_M5_Sniper_Evidence"]
+                .fillna(False)
+                .astype(bool)
+            ]
+            if "V4_Sell_M5_Sniper_Evidence" in sniper_window
+            else sniper_window.iloc[0:0]
+        )
+        m5_sniper = bool(memory_trigger and not sniper_rows.empty)
+        sniper_row = sniper_rows.iloc[-1] if m5_sniper else None
 
         # V4 BB+PRZ confluence uses local sweep/reaction high for SL.
         # Do not use the far side of the whole PRZ for scalp SL; it destroys RR.
@@ -77,6 +91,9 @@ class SellSignalEngine(BaseEngine):
             sl = sl_anchor + max(atr * 0.12, entry * 0.00015)
         elif pinbar_break and pinbar_wall_high > 0:
             sl_anchor = pinbar_wall_high
+            sl = sl_anchor + max(atr * 0.12, entry * 0.00015)
+        elif memory_trigger and memory_wall_high > 0:
+            sl_anchor = memory_wall_high
             sl = sl_anchor + max(atr * 0.12, entry * 0.00015)
         elif bb_prz_confluence or bool(row.get("V4_Sell_Entry_Zone", False)):
             sl_anchor = max(float(row["high"]), micro_high)
@@ -123,6 +140,11 @@ class SellSignalEngine(BaseEngine):
             quality_score += 2
         if pinbar_break:
             quality_score += 1
+        if memory_trigger:
+            quality_score += min(
+                3,
+                int(row.get("V4_Sell_Evidence_Score", 0) or 0),
+            )
 
         if quality_score >= 5:
             quality_grade = "PREMIUM"
@@ -144,12 +166,20 @@ class SellSignalEngine(BaseEngine):
             basis_parts.append("DEEP_100_RECLAIM")
         if pinbar_break:
             basis_parts.append("PINBAR_LOW_BREAK")
+        if memory_trigger:
+            basis_parts.append("PRZ_MEMORY_HA_FLIP")
+        if m5_sniper:
+            basis_parts.append("M5_SNIPER_KIVANC_BB")
         v5_basis = "|".join(basis_parts) if basis_parts else "UPPER_REJECTION"
 
         if deep_reclaim:
             entry_mode = "V4_SELL_DEEP_100_WALL_RECLAIM"
         elif pinbar_break:
             entry_mode = "V4_SELL_KIVANC_PINBAR_BREAK"
+        elif memory_trigger and m5_sniper:
+            entry_mode = "V4_SELL_M5_SNIPER_PRZ_HA_FLIP"
+        elif memory_trigger:
+            entry_mode = "V4_SELL_PRZ_MEMORY_HA_FLIP"
         elif bb_prz_confluence:
             entry_mode = "V4_SELL_BB_PRZ_CONFLUENCE"
         elif upper_setup or pine_valid:
@@ -180,7 +210,7 @@ class SellSignalEngine(BaseEngine):
             "tp2_price": tp,
             "score": quality_score,
             "reason": f"V4 Engine: {session_state.session} SELL",
-            "zone_confluence": bool(bb_prz_confluence or deep_reclaim or pinbar_break),
+            "zone_confluence": bool(bb_prz_confluence or deep_reclaim or pinbar_break or memory_trigger),
             "bb_prz_confluence": bb_prz_confluence,
             "v4_entry_zone": bool(row.get("V4_Sell_Entry_Zone", False)),
             "entry": entry,
@@ -222,7 +252,7 @@ class SellSignalEngine(BaseEngine):
             "entry_rr": rr,
             "rr_ok": rr_ok,
             "min_rr": min_rr,
-            "session_quality_gate": "DEEP_100_WALL_RECLAIM" if deep_reclaim else "KIVANC_PINBAR_BREAK" if pinbar_break else "PINE_PRZ_RESISTANCE_PA_VSA" if upper_setup or pine_valid else "BOS_CONTINUATION",
+            "session_quality_gate": "DEEP_100_WALL_RECLAIM" if deep_reclaim else "KIVANC_PINBAR_BREAK" if pinbar_break else "M5_SNIPER_KIVANC_BB_HA_FLIP" if m5_sniper else "PRZ_MEMORY_EVIDENCE_HA_FLIP" if memory_trigger else "PINE_PRZ_RESISTANCE_PA_VSA" if upper_setup or pine_valid else "BOS_CONTINUATION",
             "sell_dot_reason": "PINE_PRZ_PA_VSA" if pine_valid else "MICRO_BOS_CONTINUATION",
             "pine_valid": pine_valid,
             "pa_bear_confirmed": bool(row.get("Pine_PA_Bear_Confirmed", False)),
@@ -231,8 +261,16 @@ class SellSignalEngine(BaseEngine):
             "micro_lot0_high": micro_high,
             "deep_reclaim": deep_reclaim,
             "pinbar_break": pinbar_break,
+            "prz_memory_trigger": memory_trigger,
+            "m5_sniper": m5_sniper,
+            "m5_sniper_move": float(sniper_row.get("V4_Sell_M5_Sniper_Move", 0.0) or 0.0) if sniper_row is not None else 0.0,
+            "m5_sniper_kivanc": float(sniper_row.get("V4_Sell_M5_Sniper_Kivanc", 0.0) or 0.0) if sniper_row is not None else 0.0,
+            "m5_sniper_bb": float(sniper_row.get("V4_Sell_M5_Sniper_BB", 0.0) or 0.0) if sniper_row is not None else 0.0,
+            "m5_sniper_bb_timeframe": str(sniper_row.get("V4_Sell_M5_Sniper_BB_TF", "NONE")) if sniper_row is not None else "NONE",
+            "prz_evidence_score": int(row.get("V4_Sell_Evidence_Score", 0) or 0),
+            "prz_location_age_bars": int(row.get("V4_Sell_Location_Age_Bars", -1) or 0),
             "vsa_wall_low": float(row.get("Deep_Sell_Wall_Low", 0.0) or 0.0) if deep_reclaim else float(row.get("Zone_Sell_Wall_Low", 0.0) or 0.0) if pinbar_break else 0.0,
-            "vsa_wall_high": deep_wall_high if deep_reclaim else pinbar_wall_high if pinbar_break else micro_high,
+            "vsa_wall_high": deep_wall_high if deep_reclaim else pinbar_wall_high if pinbar_break else memory_wall_high if memory_trigger else micro_high,
             "kivanc_scenario_state": str(row.get("Kivanc_Scenario_State", "OUTSIDE")),
             "kivanc_zone_low": float(row.get("Kivanc_Sell_Zone_Low", 0.0) or 0.0),
             "kivanc_zone_high": float(row.get("Kivanc_Sell_Zone_High", 0.0) or 0.0),
