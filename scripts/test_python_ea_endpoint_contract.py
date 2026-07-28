@@ -45,8 +45,12 @@ def main() -> None:
         "EA points to the live alpha_buffalo_bot service",
     )
     require(
-        'candidates = TELEGRAM_PINE_CHAT_IDS or TELEGRAM_OWNER_CHAT_IDS' in SERVICE,
-        "Pine falls back to owner when no Pine room is configured",
+        '"TELEGRAM_PINE_NOTIFICATIONS_ENABLED", "false"' in SERVICE,
+        "Pine Telegram delivery is disabled by default",
+    )
+    require(
+        "if not TELEGRAM_PINE_NOTIFICATIONS_ENABLED:" in SERVICE,
+        "disabled Pine cannot resolve any Telegram destination",
     )
     require(
         'return list(TELEGRAM_CHAT_IDS)' in SERVICE,
@@ -74,7 +78,7 @@ def main() -> None:
         in SERVICE,
         "misconfigured Pine destinations cannot overlap grouping IDs",
     )
-    print("Summary: 14/14 Python EA and Telegram ownership checks passed")
+    print("Summary: 15/15 Python EA and Telegram ownership checks passed")
 
 
 if __name__ == "__main__":

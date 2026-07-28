@@ -54,6 +54,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         os.environ["ALPHA_SIGNAL_SOURCE"] = "PINE"
         os.environ["ALPHA_API_KEY"] = "PINE_TEST_KEY"
+        os.environ["TELEGRAM_PINE_NOTIFICATIONS_ENABLED"] = "true"
         os.environ["TELEGRAM_PINE_MONITOR_ENABLED"] = "false"
         bridge_state = Path(temporary) / "bridge.json"
         os.environ["ALPHA_PINE_BRIDGE_STATE_FILE"] = str(bridge_state)

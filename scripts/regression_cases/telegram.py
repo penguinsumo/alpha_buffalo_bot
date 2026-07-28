@@ -153,6 +153,88 @@ def test_confirmed_open_is_the_only_public_directional_setup() -> None:
     text = format_telegram_trend_update(payload)
     assert_true("Watch for 🟢 B Setup..." in text, "confirmed OPEN may publish BUY setup")
 
+
+def test_pine_payload_is_silent_on_every_telegram_destination() -> None:
+    payload = {
+        "source": "PINE",
+        "symbol": "XAUUSD",
+        "signal": {
+            "source": "PINE",
+            "timestamp": "2026-07-28T06:00:00+00:00",
+            "blueprint": {"current_price": 4040.0},
+        },
+        "ea": {
+            "action": "OPEN",
+            "execution_state": "READY",
+            "command_owner": "PINE_TRADINGVIEW",
+            "direction": "BUY",
+            "entry": 4040.0,
+            "sl": 4030.0,
+            "tp_final": 4060.0,
+            "rr": 2.0,
+            "rr_ok": True,
+            "levels_ready": True,
+            "directional_levels_ok": True,
+            "setup_ok": True,
+            "zone_ok": True,
+            "session": "NY",
+        },
+    }
+    original_flag = runtime.TELEGRAM_PINE_NOTIFICATIONS_ENABLED
+    original_pine = runtime.TELEGRAM_PINE_CHAT_IDS
+    original_owner = runtime.TELEGRAM_OWNER_CHAT_IDS
+    original_group = runtime.TELEGRAM_CHAT_IDS
+    original_market = runtime._telegram_market_is_open
+    original_enabled = runtime._telegram_enabled
+    original_send = runtime.send_telegram_message
+    sent = []
+    try:
+        runtime.TELEGRAM_PINE_NOTIFICATIONS_ENABLED = False
+        runtime.TELEGRAM_PINE_CHAT_IDS = ["pine-room"]
+        runtime.TELEGRAM_OWNER_CHAT_IDS = ["owner-room"]
+        runtime.TELEGRAM_CHAT_IDS = ["group-room"]
+        runtime._telegram_market_is_open = lambda payload=None, now=None: True
+        runtime._telegram_enabled = lambda audience="GROUP": True
+        runtime.send_telegram_message = (
+            lambda text, **kwargs: sent.append((kwargs.get("audience"), text)) or True
+        )
+
+        assert_equal(runtime._telegram_targets("PINE"), [], "Pine resolves no chat")
+        assert_true(
+            not runtime._telegram_payload_notifications_enabled(payload),
+            "Pine source is silent by default",
+        )
+        assert_true(not runtime.maybe_broadcast_signal(payload), "Pine OPEN stays silent")
+        assert_true(
+            not runtime.maybe_broadcast_trend_update(payload),
+            "Pine trend stays silent",
+        )
+        assert_true(
+            not runtime.maybe_broadcast_confirmation(payload),
+            "Pine confirmation stays silent",
+        )
+        assert_true(
+            not runtime.maybe_broadcast_owner_v4_context(payload),
+            "Pine owner context stays silent",
+        )
+        assert_equal(sent, [], "no Pine Telegram network delivery is attempted")
+
+        python_payload = dict(payload)
+        python_payload["source"] = "PYTHON"
+        assert_true(
+            runtime._telegram_payload_notifications_enabled(python_payload),
+            "Python/EA Telegram remains enabled",
+        )
+    finally:
+        runtime.TELEGRAM_PINE_NOTIFICATIONS_ENABLED = original_flag
+        runtime.TELEGRAM_PINE_CHAT_IDS = original_pine
+        runtime.TELEGRAM_OWNER_CHAT_IDS = original_owner
+        runtime.TELEGRAM_CHAT_IDS = original_group
+        runtime._telegram_market_is_open = original_market
+        runtime._telegram_enabled = original_enabled
+        runtime.send_telegram_message = original_send
+
+
 def test_closed_market_suppresses_all_telegram() -> None:
     payload = {
         "symbol": "XAUUSD",

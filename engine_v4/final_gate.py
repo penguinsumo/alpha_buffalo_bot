@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
-"""
-Final Production Gate — HA-Filtered Buy (ASIA/LONDON Profit Hours) + Baseline (NY >=15)
+"""Final production permission gate.
+
+Entry confirmation belongs to the V4 setup:
+
+    PRZ layers >= 2 + evidence >= 3
+        -> closed M15 HA flip OR pinbar break OR closed M5 sniper reclaim
+
+This gate therefore owns only market/risk permission and an optional research
+harmonic restriction.  It must not repeat an HA check or restrict BUY to a
+small list of historical "profit hours" after a valid closed-bar trigger has
+already fired.
 """
 from session_clock import SessionState
 from engine_v4.harmonic_bias_gate import evaluate_harmonic_bias
 from engine_v4.session_gate import GateResult
 
 class FinalGate:
-    ASIA_BUY_HOURS_BKK = {5,6,7,8,12,13}
-    LONDON_BUY_HOURS_BKK = {15,17}
-
     def __init__(self, clock):
         self.clock = clock
 
@@ -40,32 +46,10 @@ class FinalGate:
             else ""
         )
 
-        if direction == 'BUY':
-            sess = session_state.session
-            bkk_hour = session_state.bkk_hour
-            utc_hour = session_state.utc_hour
-
-            # Baseline: NY >=15 UTC
-            if sess == 'NY' and utc_hour >= 15:
-                return GateResult(True, "NY buy" + harmonic_reason)
-
-            # ASIA profit hours (HA filter if data available)
-            if sess == 'ASIA' and bkk_hour in self.ASIA_BUY_HOURS_BKK:
-                if df is not None and idx is not None:
-                    row = df.iloc[idx]
-                    if not row.get('HA_Bullish', True):
-                        return GateResult(False, "HA not bullish in ASIA")
-                return GateResult(True, f"ASIA buy BKK {bkk_hour}" + harmonic_reason)
-
-            # LONDON profit hours (HA filter)
-            if sess == 'LONDON' and bkk_hour in self.LONDON_BUY_HOURS_BKK:
-                if df is not None and idx is not None:
-                    row = df.iloc[idx]
-                    if not row.get('HA_Bullish', True):
-                        return GateResult(False, "HA not bullish in LONDON")
-                return GateResult(True, f"LONDON buy BKK {bkk_hour}" + harmonic_reason)
-
-            return GateResult(False, "Buy not allowed")
-        if direction == 'SELL':
-            return GateResult(True, "Sell allowed" + harmonic_reason)
+        if direction in {"BUY", "SELL"}:
+            return GateResult(
+                True,
+                f"{session_state.session} {direction.lower()} allowed"
+                + harmonic_reason,
+            )
         return GateResult(False, "Unknown direction")

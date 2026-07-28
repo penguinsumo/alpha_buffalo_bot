@@ -104,6 +104,13 @@ if SIGNAL_SOURCE not in {"PYTHON", "PINE", "HYBRID"}:
 PINE_NOTIFICATION_ONLY = os.getenv(
     "ALPHA_PINE_NOTIFICATION_ONLY", "true"
 ).lower() in {"1", "true", "yes", "on"}
+# Pine webhooks may still be accepted for validation/observability, but they
+# are silent on Telegram by default.  This keeps the production grouping and
+# owner chat focused on the Python/EA decision source.  A dedicated Pine room
+# can be re-enabled explicitly for controlled testing.
+TELEGRAM_PINE_NOTIFICATIONS_ENABLED = os.getenv(
+    "TELEGRAM_PINE_NOTIFICATIONS_ENABLED", "false"
+).lower() in {"1", "true", "yes", "on"}
 python_signal_bridge = PineSignalBridge(
     os.getenv(
         "ALPHA_PYTHON_BRIDGE_STATE_FILE",
@@ -566,11 +573,13 @@ def _format_time_pair(value) -> str:
 
 
 def _telegram_targets(audience: str = "GROUP") -> list[str]:
-    """Resolve isolated destinations; Pine never falls back to group IDs."""
+    """Resolve isolated destinations; silent Pine never falls back anywhere."""
     audience = str(audience or "GROUP").upper()
     if audience == "OWNER":
         return list(TELEGRAM_OWNER_CHAT_IDS)
     if audience == "PINE":
+        if not TELEGRAM_PINE_NOTIFICATIONS_ENABLED:
+            return []
         candidates = TELEGRAM_PINE_CHAT_IDS or TELEGRAM_OWNER_CHAT_IDS
         group_ids = set(TELEGRAM_CHAT_IDS)
         return [chat_id for chat_id in candidates if chat_id not in group_ids]
@@ -601,6 +610,14 @@ def _telegram_payload_source(payload: Dict | None = None) -> str:
 def _telegram_payload_audience(payload: Dict | None = None) -> str:
     """Route Pine to a Pine room or owner; Python keeps grouping ownership."""
     return "PINE" if _telegram_payload_source(payload) == "PINE" else "GROUP"
+
+
+def _telegram_payload_notifications_enabled(payload: Dict | None = None) -> bool:
+    """Keep Pine data out of every Telegram destination unless opted in."""
+    return (
+        _telegram_payload_source(payload) != "PINE"
+        or TELEGRAM_PINE_NOTIFICATIONS_ENABLED
+    )
 
 
 def _telegram_signal_key(payload: Dict) -> str:
@@ -1768,6 +1785,7 @@ def maybe_broadcast_owner_v4_context(payload: Dict) -> bool:
     global LAST_TELEGRAM_OWNER_CONTEXT_KEY
     if (
         not TELEGRAM_NOTIFY_OWNER_CONTEXT
+        or not _telegram_payload_notifications_enabled(payload)
         or not _telegram_market_is_open(payload)
         or not _telegram_enabled("OWNER")
     ):
@@ -1893,6 +1911,7 @@ def maybe_broadcast_confirmation(payload: Dict) -> bool:
     audience = _telegram_payload_audience(payload)
     if (
         not TELEGRAM_NOTIFY_WAIT
+        or not _telegram_payload_notifications_enabled(payload)
         or not _telegram_market_is_open(payload)
         or not _telegram_enabled(audience)
     ):
@@ -1937,7 +1956,10 @@ def maybe_broadcast_trend_update(payload: Dict) -> bool:
     global LAST_TELEGRAM_TREND_UPDATE_KEY
     global LAST_TELEGRAM_TREND_UPDATE_AT
     global LAST_TELEGRAM_H1_CROSS_KEY
-    if not _telegram_market_is_open(payload):
+    if (
+        not _telegram_payload_notifications_enabled(payload)
+        or not _telegram_market_is_open(payload)
+    ):
         return False
 
     audience = _telegram_payload_audience(payload)
@@ -1997,7 +2019,11 @@ def maybe_broadcast_signal(payload: Dict) -> bool:
     global LAST_TELEGRAM_SIGNAL_KEY
 
     audience = _telegram_payload_audience(payload)
-    if not _telegram_market_is_open(payload) or not _telegram_enabled(audience):
+    if (
+        not _telegram_payload_notifications_enabled(payload)
+        or not _telegram_market_is_open(payload)
+        or not _telegram_enabled(audience)
+    ):
         return False
 
     ea = payload.get("ea", {}) or {}
@@ -2478,7 +2504,7 @@ def _pine_monitor_payload() -> Dict:
 
 
 def _pine_monitor_loop() -> None:
-    """Keep Telegram observable in Pine mode without manufacturing trades."""
+    """Optional dedicated-Pine monitoring; disabled in production by default."""
     print(
         "AlphaBuffalo Pine Telegram monitor started | "
         f"interval={TELEGRAM_PINE_MONITOR_INTERVAL_SECONDS}s",
@@ -2509,10 +2535,11 @@ def _start_cloud_signal_loop() -> None:
     if SIGNAL_SOURCE == "PINE":
         print(
             "AlphaBuffalo Pine signal mode | Python trade loop disabled; "
-            "Telegram monitor remains active",
+            "Telegram output="
+            f"{'ENABLED' if TELEGRAM_PINE_NOTIFICATIONS_ENABLED else 'DISABLED'}",
             flush=True,
         )
-        if TELEGRAM_PINE_MONITOR_ENABLED:
+        if TELEGRAM_PINE_NOTIFICATIONS_ENABLED and TELEGRAM_PINE_MONITOR_ENABLED:
             worker = threading.Thread(
                 target=_pine_monitor_loop,
                 name="alpha-pine-telegram-monitor",
@@ -2573,6 +2600,7 @@ def telegram_status(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
         "signal_source": SIGNAL_SOURCE,
         "telegram_enabled": _telegram_enabled(),
         "pine_telegram_enabled": _telegram_enabled("PINE"),
+        "pine_notifications_enabled": TELEGRAM_PINE_NOTIFICATIONS_ENABLED,
         "owner_context_enabled": bool(
             TELEGRAM_NOTIFY_OWNER_CONTEXT and _telegram_enabled("OWNER")
         ),
@@ -2594,7 +2622,10 @@ def telegram_status(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
         "pine_notification_only": bool(
             SIGNAL_SOURCE == "PYTHON" and PINE_NOTIFICATION_ONLY
         ),
-        "pine_monitor_enabled": TELEGRAM_PINE_MONITOR_ENABLED,
+        "pine_monitor_enabled": bool(
+            TELEGRAM_PINE_NOTIFICATIONS_ENABLED
+            and TELEGRAM_PINE_MONITOR_ENABLED
+        ),
         "trend_update_enabled": TELEGRAM_NOTIFY_TREND_UPDATE,
         "market_open": _telegram_market_is_open(),
         "last_delivery": delivery,

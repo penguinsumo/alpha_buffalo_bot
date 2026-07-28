@@ -248,7 +248,7 @@ def test_closed_m15_break_invalidates_h1_tunnel_but_forming_wick_does_not() -> N
         "closed M15 candle above falling upper boundary must invalidate tunnel",
     )
 
-def test_final_gate_combines_hours_risk_and_harmonic_bias() -> None:
+def test_final_gate_owns_market_risk_and_optional_harmonic_only() -> None:
     gate = FinalGate(SessionClock())
     context = {
         "found": True,
@@ -282,6 +282,38 @@ def test_final_gate_combines_hours_risk_and_harmonic_bias() -> None:
     assert_equal(blocked.reason, "HARMONIC_BIAS_BUY_ONLY", "hard bias reason")
     assert_true(not waiting.allowed, "pattern far from D must not create an entry")
     assert_equal(waiting.reason, "WAIT_HARMONIC_D_PRZ", "wait for D location")
+
+def test_final_gate_does_not_repeat_hour_or_ha_entry_checks() -> None:
+    gate = FinalGate(SessionClock())
+    asia_outside_legacy_profit_hours = SessionState(
+        session="ASIA",
+        liquidity="NORMAL",
+        bkk_hour=10,
+        utc_hour=3,
+        timestamp="2026-07-28T03:00:00+00:00",
+    )
+    row = base_row()
+    row.update(
+        {
+            # A pinbar or M5 sniper trigger is allowed to be the independent
+            # V4 trigger.  FinalGate must not require HA_Bullish again.
+            "HA_Bullish": False,
+            "V4_Buy_Setup": True,
+            "V4_Buy_Entry_Zone": True,
+        }
+    )
+    allowed = gate.evaluate(
+        asia_outside_legacy_profit_hours,
+        "BUY",
+        df=frame([row]),
+        idx=0,
+    )
+
+    assert_true(
+        allowed.allowed,
+        "closed V4 BUY trigger must survive every open session hour without duplicate HA",
+    )
+    assert_equal(allowed.reason, "ASIA buy allowed", "permission reason")
 
 def test_low_rr_candidate_waits_in_ea_payload() -> None:
     row = base_row()
