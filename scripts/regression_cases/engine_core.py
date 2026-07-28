@@ -334,6 +334,46 @@ def test_low_rr_candidate_waits_in_ea_payload() -> None:
     assert_equal(response["status"], BLOCKED, "low-RR candidate must be BLOCKED at API")
     assert_equal(response["direction"], "BUY", "blocked candidate keeps market direction")
 
+def test_vsa_is_evidence_bonus_not_duplicate_ea_hard_gate() -> None:
+    row = base_row()
+    row.update(
+        {
+            "EMA20": 80.0,
+            "EMA50": 100.0,
+            "Trend_1H_Up": False,
+            "V4_Buy_Setup": True,
+            "V4_Sell_Setup": False,
+            "V4_Buy_Entry_Zone": True,
+            "V4_Sell_Entry_Zone": False,
+            "V4_Block_Buy_At_Upper": False,
+            "BB_PRZ_Support_Confluence": True,
+            "BB_PRZ_Resistance_Confluence": False,
+            "VSA_Buy_Wins": False,
+            "VSA_Sell_Wins": False,
+            "VSA_Buy_Pressure": 0.0,
+            "VSA_Sell_Pressure": 0.0,
+            "Pine_PA_Bull_Confirmed": False,
+            "Pine_PA_Bear_Confirmed": False,
+        }
+    )
+    candidate = BuySignalEngine().evaluate(
+        frame([row]),
+        0,
+        NY_SESSION,
+        ALLOWED,
+    )
+    assert_true(candidate is not None, "accepted trigger must remain visible without VSA")
+    assert_true(candidate["rr_ok"], "fixture levels must pass RR")
+
+    ea = build_ea_payload("XAUUSD", _runtime_signal(candidate))
+    assert_equal(ea["action"], "OPEN", "EA must not hard-block a selected V4 trigger on VSA")
+    assert_true(not ea["vsa_gate_ok"], "VSA absence remains observable as a bonus field")
+    assert_equal(
+        ea["plan_lifecycle"]["ready_checks"]["vsa_bonus"],
+        False,
+        "plan reports VSA as bonus rather than readiness gate",
+    )
+
 def test_buy_and_sell_share_one_api_schema() -> None:
     buy_row = base_row()
     buy_row.update(

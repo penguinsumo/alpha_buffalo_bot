@@ -54,6 +54,9 @@ class BuySignalEngine(BaseEngine):
         pinbar_wall_low = float(row.get("Zone_Buy_Wall_Low", 0.0) or 0.0)
         memory_trigger = bool(row.get("V4_Buy_Memory_Trigger", False))
         memory_wall_low = float(row.get("V4_Buy_Location_Wall", 0.0) or 0.0)
+        trigger_source = str(
+            row.get("V4_Buy_Trigger_Source", "NONE") or "NONE"
+        ).upper()
         sniper_window = df.iloc[max(0, idx - 4): idx + 1]
         sniper_rows = (
             sniper_window.loc[
@@ -64,7 +67,14 @@ class BuySignalEngine(BaseEngine):
             if "V4_Buy_M5_Sniper_Evidence" in sniper_window
             else sniper_window.iloc[0:0]
         )
-        m5_sniper = bool(memory_trigger and not sniper_rows.empty)
+        m5_sniper = bool(
+            trigger_source == "M5_SNIPER_RECLAIM"
+            or (
+                trigger_source == "NONE"
+                and memory_trigger
+                and not sniper_rows.empty
+            )
+        )
         sniper_row = sniper_rows.iloc[-1] if m5_sniper else None
 
         # V4 BB+PRZ confluence uses local sweep/reaction low for SL.
@@ -145,12 +155,22 @@ class BuySignalEngine(BaseEngine):
         if pinbar_break:
             basis_parts.append("PINBAR_HIGH_BREAK")
         if memory_trigger:
-            basis_parts.append("PRZ_MEMORY_HA_FLIP")
+            basis_parts.append(
+                trigger_source
+                if trigger_source != "NONE"
+                else "PRZ_MEMORY_TRIGGER"
+            )
         if m5_sniper:
             basis_parts.append("M5_SNIPER_KIVANC_BB")
         v5_basis = "|".join(basis_parts) if basis_parts else "LOWER_REACTION"
 
-        if deep_reclaim:
+        if trigger_source == "M5_SNIPER_RECLAIM":
+            entry_mode = "V4_BUY_M5_SNIPER_RECLAIM"
+        elif trigger_source == "BULL_PINBAR_HIGH_BREAK":
+            entry_mode = "V4_BUY_PINBAR_HIGH_BREAK"
+        elif trigger_source == "M15_HA_BULL_FLIP":
+            entry_mode = "V4_BUY_M15_HA_FLIP"
+        elif deep_reclaim:
             entry_mode = "V4_BUY_DEEP_100_WALL_RECLAIM"
         elif pinbar_break:
             entry_mode = "V4_BUY_KIVANC_PINBAR_BREAK"
@@ -192,7 +212,7 @@ class BuySignalEngine(BaseEngine):
             "v5_quality_score": quality_score,
             "v5_quality_grade": quality_grade,
             "v5_basis": v5_basis,
-            "session_quality_gate": "DEEP_100_WALL_RECLAIM" if deep_reclaim else "KIVANC_PINBAR_BREAK" if pinbar_break else "M5_SNIPER_KIVANC_BB_HA_FLIP" if m5_sniper else "PRZ_MEMORY_EVIDENCE_HA_FLIP" if memory_trigger else "PINE_PRZ_SUPPORT_PA_VSA",
+            "session_quality_gate": trigger_source if trigger_source != "NONE" else "DEEP_100_WALL_RECLAIM" if deep_reclaim else "KIVANC_PINBAR_BREAK" if pinbar_break else "M5_SNIPER_KIVANC_BB_HA_FLIP" if m5_sniper else "PRZ_MEMORY_EVIDENCE_TRIGGER" if memory_trigger else "PINE_PRZ_SUPPORT_PA_VSA",
             "pine_valid": pine_valid,
             "pa_bull_confirmed": bool(row.get("Pine_PA_Bull_Confirmed", False)),
             "vsa_buy_pressure": float(row.get("VSA_Buy_Pressure", 0.0) or 0.0),
@@ -201,6 +221,7 @@ class BuySignalEngine(BaseEngine):
             "deep_reclaim": deep_reclaim,
             "pinbar_break": pinbar_break,
             "prz_memory_trigger": memory_trigger,
+            "trigger_source": trigger_source,
             "m5_sniper": m5_sniper,
             "m5_sniper_move": float(sniper_row.get("V4_Buy_M5_Sniper_Move", 0.0) or 0.0) if sniper_row is not None else 0.0,
             "m5_sniper_kivanc": float(sniper_row.get("V4_Buy_M5_Sniper_Kivanc", 0.0) or 0.0) if sniper_row is not None else 0.0,

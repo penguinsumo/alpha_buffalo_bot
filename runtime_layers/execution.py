@@ -323,7 +323,7 @@ def _python_plan_lifecycle_contract(
     """
     if action == "OPEN" and execution_state == "READY":
         plan_status = "READY"
-    elif trade_direction_ok and setup_ok and zone_ok and vsa_gate_ok:
+    elif trade_direction_ok and setup_ok and zone_ok:
         plan_status = "ARMED"
     elif trade_direction_ok:
         plan_status = "WATCH"
@@ -355,7 +355,7 @@ def _python_plan_lifecycle_contract(
         "ready_checks": {
             "setup_ok": setup_ok,
             "zone_ok": zone_ok,
-            "vsa_gate_ok": vsa_gate_ok,
+            "vsa_bonus": vsa_gate_ok,
             "rr_ok": rr_ok,
             "levels_ready": levels_ready,
             "directional_levels_ok": directional_levels_ok,
@@ -366,7 +366,8 @@ def build_ea_payload(symbol: str, signal: Dict, *, min_rr: float) -> Dict:
     """
     EA execution payload.
     Adapter-only: ไม่ตัดสินใจตลาดใหม่ ไม่คำนวณ PRZ/BOS/TP/SL เอง
-    RR/setup/VSA gates only convert low-quality candidates to WAIT before EA/Telegram.
+    Levels/RR/setup are checked once here before EA/Telegram. VSA is evidence
+    metadata and trade-management context, never a second hard entry gate.
     """
     decision = signal.get("decision", {}) or {}
     gates = signal.get("gates", {}) or {}
@@ -451,7 +452,6 @@ def build_ea_payload(symbol: str, signal: Dict, *, min_rr: float) -> Dict:
         and rr_ok
         and setup_ok
         and zone_ok
-        and vsa_gate_ok
         else "WATCH"
     )
 
@@ -465,8 +465,6 @@ def build_ea_payload(symbol: str, signal: Dict, *, min_rr: float) -> Dict:
         blocked_reasons.append(f"setup={setup_info['setup_state']}")
     if not zone_ok:
         blocked_reasons.append("zone_not_confirmed")
-    if not vsa_gate_ok:
-        blocked_reasons.append("vsa_gate_not_confirmed")
     if blocked_reasons:
         reason = "|".join([part for part in [reason, *blocked_reasons] if part])
 

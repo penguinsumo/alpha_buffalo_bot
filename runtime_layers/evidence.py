@@ -27,7 +27,7 @@ def _m5_sniper_sweep_overlay(
     """
     Add confirmed M5 wick-sweep evidence to the matching M15 setup bar.
 
-    A sniper event is evidence, never an independent order trigger:
+    A sniper event is a confirmed entry trigger once the PRZ setup is ARMED:
     - completed M5 range >= configured XAU dollar threshold;
     - prior three-bar extreme is swept and reclaimed;
     - the wick overlaps a confirmed Kivanc level;
@@ -377,9 +377,10 @@ def _v4_location_evidence_memory(
                         seen[field] = True
 
         if active:
-            # PRZ location contributes one point. A multi-layer overlap is
-            # retained as a separate evidence component for the full window.
-            evidence_score = 1 + sum(
+            # Location qualification is a separate prerequisite. The score
+            # contains confirmation evidence only, preventing PRZ from being
+            # counted once as location and again as evidence.
+            evidence_score = sum(
                 weight
                 for field, weight in component_weights.items()
                 if seen.get(field, False)
@@ -470,27 +471,30 @@ def _overlay_blueprint_prz_memory(
     out["V4_Supply_PRZ_Touch"] = sell_layers > 0
     out = _m5_sniper_sweep_overlay(out, df_5m, df_1h, blueprint)
 
-    # Evidence can substitute for other evidence. None of BB/VSA/OB/Kivanc is
-    # a mandatory gate by itself. HA colour flip remains the actual trigger.
+    out["V4_Demand_PRZ_Qualified"] = buy_layers >= 2
+    out["V4_Supply_PRZ_Qualified"] = sell_layers >= 2
+
+    # Evidence can substitute for other evidence. PRZ qualification is kept
+    # separate from evidence so "layers >= 2" and "evidence >= 3" cannot be
+    # satisfied by counting the same location twice. M5 sniper is worth three
+    # points because it already confirms sweep/reclaim + Kivanc + BB.
     buy_components = {
-        "V4_Buy_PRZ_Overlap_Evidence": 1,
         "V4_Buy_Sweep_Evidence": 2,
         "V4_Buy_Pinbar_Evidence": 2,
         "Near_BB_Lower": 1,
         "VSA_Buy_Wins": 1,
         "Bull_OB": 1,
         "In_Session_Kivanc_Buy_Zone": 1,
-        "V4_Buy_M5_Sniper_Evidence": 2,
+        "V4_Buy_M5_Sniper_Evidence": 3,
     }
     sell_components = {
-        "V4_Sell_PRZ_Overlap_Evidence": 1,
         "V4_Sell_Sweep_Evidence": 2,
         "V4_Sell_Pinbar_Evidence": 2,
         "Near_BB_Upper": 1,
         "VSA_Sell_Wins": 1,
         "Bear_OB": 1,
         "In_Session_Kivanc_Sell_Zone": 1,
-        "V4_Sell_M5_Sniper_Evidence": 2,
+        "V4_Sell_M5_Sniper_Evidence": 3,
     }
     out["V4_Buy_Sweep_Evidence"] = (
         _v4_bool_series(out, "Bull_Sweep")
@@ -518,7 +522,7 @@ def _overlay_blueprint_prz_memory(
         out["V4_Buy_Location_Wall"],
     ) = _v4_location_evidence_memory(
         out,
-        touch=out["V4_Demand_PRZ_Touch"],
+        touch=out["V4_Demand_PRZ_Qualified"],
         reset=(
             _v4_bool_series(out, "CHoCH_Bear")
             | _v4_bool_series(out, "Micro_BOS_Down")
@@ -534,7 +538,7 @@ def _overlay_blueprint_prz_memory(
         out["V4_Sell_Location_Wall"],
     ) = _v4_location_evidence_memory(
         out,
-        touch=out["V4_Supply_PRZ_Touch"],
+        touch=out["V4_Supply_PRZ_Qualified"],
         reset=(
             _v4_bool_series(out, "CHoCH_Bull")
             | _v4_bool_series(out, "Micro_BOS_Up")
@@ -545,40 +549,88 @@ def _overlay_blueprint_prz_memory(
     )
 
     evidence_min = max(1, int(os.getenv("ENGINE_V4_EVIDENCE_MIN", "3")))
-    out["V4_Buy_Memory_Trigger"] = (
+    out["V4_Buy_Armed"] = (
         out["V4_Buy_Location_Memory"]
         & (out["V4_Buy_Evidence_Score"] >= evidence_min)
-        & _v4_bool_series(out, "HA_Bull_Reversal")
     )
-    out["V4_Sell_Memory_Trigger"] = (
+    out["V4_Sell_Armed"] = (
         out["V4_Sell_Location_Memory"]
         & (out["V4_Sell_Evidence_Score"] >= evidence_min)
-        & _v4_bool_series(out, "HA_Bear_Reversal")
     )
 
-    out["V4_Buy_Entry_Zone"] = (
-        _v4_bool_series(out, "V4_Buy_Entry_Zone")
-        | out["V4_Buy_Location_Memory"]
+    if isinstance(out.index, pd.DatetimeIndex):
+        timestamps = out.index
+        if timestamps.tz is None:
+            timestamps = timestamps.tz_localize("UTC")
+        else:
+            timestamps = timestamps.tz_convert("UTC")
+        out["V4_M15_Bar_Closed"] = (
+            timestamps + pd.Timedelta(minutes=15)
+            <= pd.Timestamp.now(tz="UTC")
+        )
+    else:
+        out["V4_M15_Bar_Closed"] = False
+
+    out["V4_Buy_HA_Trigger"] = (
+        out["V4_Buy_Armed"]
+        & out["V4_M15_Bar_Closed"]
+        & _v4_bool_series(out, "HA_Bull_Reversal")
     )
-    out["V4_Sell_Entry_Zone"] = (
-        _v4_bool_series(out, "V4_Sell_Entry_Zone")
-        | out["V4_Sell_Location_Memory"]
+    out["V4_Sell_HA_Trigger"] = (
+        out["V4_Sell_Armed"]
+        & out["V4_M15_Bar_Closed"]
+        & _v4_bool_series(out, "HA_Bear_Reversal")
     )
-    out["V4_Buy_Setup"] = (
-        _v4_bool_series(out, "V4_Buy_Setup")
-        | out["V4_Buy_Memory_Trigger"]
+    out["V4_Buy_Pinbar_Trigger"] = (
+        out["V4_Buy_Armed"]
+        & _v4_bool_series(out, "Zone_Buy_Pinbar_Trigger")
     )
-    out["V4_Sell_Setup"] = (
-        _v4_bool_series(out, "V4_Sell_Setup")
-        | out["V4_Sell_Memory_Trigger"]
+    out["V4_Sell_Pinbar_Trigger"] = (
+        out["V4_Sell_Armed"]
+        & _v4_bool_series(out, "Zone_Sell_Pinbar_Trigger")
     )
+    out["V4_Buy_Sniper_Trigger"] = (
+        out["V4_Buy_Armed"]
+        & _v4_bool_series(out, "V4_Buy_M5_Sniper_Evidence")
+    )
+    out["V4_Sell_Sniper_Trigger"] = (
+        out["V4_Sell_Armed"]
+        & _v4_bool_series(out, "V4_Sell_M5_Sniper_Evidence")
+    )
+
+    out["V4_Buy_Memory_Trigger"] = (
+        out["V4_Buy_HA_Trigger"]
+        | out["V4_Buy_Pinbar_Trigger"]
+        | out["V4_Buy_Sniper_Trigger"]
+    )
+    out["V4_Sell_Memory_Trigger"] = (
+        out["V4_Sell_HA_Trigger"]
+        | out["V4_Sell_Pinbar_Trigger"]
+        | out["V4_Sell_Sniper_Trigger"]
+    )
+
+    out["V4_Buy_Trigger_Source"] = "NONE"
+    out.loc[out["V4_Buy_HA_Trigger"], "V4_Buy_Trigger_Source"] = "M15_HA_BULL_FLIP"
+    out.loc[out["V4_Buy_Pinbar_Trigger"], "V4_Buy_Trigger_Source"] = "BULL_PINBAR_HIGH_BREAK"
+    out.loc[out["V4_Buy_Sniper_Trigger"], "V4_Buy_Trigger_Source"] = "M5_SNIPER_RECLAIM"
+    out["V4_Sell_Trigger_Source"] = "NONE"
+    out.loc[out["V4_Sell_HA_Trigger"], "V4_Sell_Trigger_Source"] = "M15_HA_BEAR_FLIP"
+    out.loc[out["V4_Sell_Pinbar_Trigger"], "V4_Sell_Trigger_Source"] = "BEAR_PINBAR_LOW_BREAK"
+    out.loc[out["V4_Sell_Sniper_Trigger"], "V4_Sell_Trigger_Source"] = "M5_SNIPER_RECLAIM"
+
+    # Production V4 uses one canonical entry contract. Older setup flags from
+    # add_indicators() remain observable but cannot bypass ARMED + OR trigger.
+    out["V4_Buy_Entry_Zone"] = out["V4_Buy_Armed"]
+    out["V4_Sell_Entry_Zone"] = out["V4_Sell_Armed"]
+    out["V4_Buy_Setup"] = out["V4_Buy_Memory_Trigger"]
+    out["V4_Sell_Setup"] = out["V4_Sell_Memory_Trigger"]
     out["V4_Block_Sell_At_Lower"] = (
         _v4_bool_series(out, "V4_Block_Sell_At_Lower")
-        | out["V4_Buy_Location_Memory"]
+        | out["V4_Buy_Armed"]
     )
     out["V4_Block_Buy_At_Upper"] = (
         _v4_bool_series(out, "V4_Block_Buy_At_Upper")
-        | out["V4_Sell_Location_Memory"]
+        | out["V4_Sell_Armed"]
     )
     return out
 
@@ -645,6 +697,15 @@ def _engine_v4_wait_diagnostics(
         except Exception:
             return None
         return matches.iloc[-1] if not matches.empty else None
+
+    def _latest_text(field: str, default: str = "NONE") -> str:
+        if field not in tail:
+            return default
+        for value in reversed(tail[field].tolist()):
+            normalized = str(value or default).upper()
+            if normalized not in {"", "NONE", "NAN"}:
+                return normalized
+        return default
 
     buy_touch = _any(
         "V4_Demand_PRZ_Touch",
@@ -724,31 +785,37 @@ def _engine_v4_wait_diagnostics(
 
     buy_evidence_score = _max_int("V4_Buy_Evidence_Score")
     sell_evidence_score = _max_int("V4_Sell_Evidence_Score")
+    buy_layer_count = _max_int("V4_Demand_PRZ_Layer_Count")
+    sell_layer_count = _max_int("V4_Supply_PRZ_Layer_Count")
     evidence_min = max(1, int(os.getenv("ENGINE_V4_EVIDENCE_MIN", "3")))
+    buy_armed = _any("V4_Buy_Armed")
+    sell_armed = _any("V4_Sell_Armed")
+    buy_triggered = _any("V4_Buy_Memory_Trigger")
+    sell_triggered = _any("V4_Sell_Memory_Trigger")
 
     missing_buy = []
-    if not buy_touch:
-        missing_buy.append("M15_OR_H1_DEMAND_PRZ_TOUCH")
+    if buy_layer_count < 2:
+        missing_buy.append(f"PRZ_LAYERS_{buy_layer_count}_OF_2")
     if buy_structure_reset:
         missing_buy.append("CANCELLED_BY_BEAR_BOS_CHOCH")
     if buy_evidence_score < evidence_min:
         missing_buy.append(
             f"EVIDENCE_{buy_evidence_score}_OF_{evidence_min}"
         )
-    if not _any("HA_Bull_Reversal", "V4_Buy_Memory_Trigger"):
-        missing_buy.append("HA_M15_BULL_FLIP")
+    if buy_armed and not buy_triggered:
+        missing_buy.append("WAIT_HA_OR_PINBAR_OR_M5_SNIPER")
 
     missing_sell = []
-    if not sell_touch:
-        missing_sell.append("M15_OR_H1_SUPPLY_PRZ_TOUCH")
+    if sell_layer_count < 2:
+        missing_sell.append(f"PRZ_LAYERS_{sell_layer_count}_OF_2")
     if sell_structure_reset:
         missing_sell.append("CANCELLED_BY_BULL_BOS_CHOCH")
     if sell_evidence_score < evidence_min:
         missing_sell.append(
             f"EVIDENCE_{sell_evidence_score}_OF_{evidence_min}"
         )
-    if not _any("HA_Bear_Reversal", "V4_Sell_Memory_Trigger"):
-        missing_sell.append("HA_M15_BEAR_FLIP")
+    if sell_armed and not sell_triggered:
+        missing_sell.append("WAIT_HA_OR_PINBAR_OR_M5_SNIPER")
 
     source_fields = (
         ("M15 DEMAND PRZ", ("Deep_Buy_PRZ_Context", "In_Pine_PRZ_Support")),
@@ -770,8 +837,14 @@ def _engine_v4_wait_diagnostics(
     sell_ready = _any("V4_Sell_Setup")
     recent_prz_touch = buy_touch or sell_touch
     status = (
-        "V4_READY"
+        "V4_TRIGGERED"
         if buy_ready or sell_ready
+        else "BUY_ARMED"
+        if buy_armed and not sell_armed
+        else "SELL_ARMED"
+        if sell_armed and not buy_armed
+        else "BOTH_ARMED"
+        if buy_armed and sell_armed
         else "WAIT_REARM"
         if buy_structure_reset or sell_structure_reset
         else "WAIT_CONFIRM"
@@ -804,6 +877,8 @@ def _engine_v4_wait_diagnostics(
         "In_PRZ_B_Resistance",
         "V4_Demand_PRZ_Layer_Count",
         "V4_Supply_PRZ_Layer_Count",
+        "V4_Demand_PRZ_Qualified",
+        "V4_Supply_PRZ_Qualified",
         "V4_Buy_M5_Sniper_Evidence",
         "V4_Sell_M5_Sniper_Evidence",
         "V4_Buy_M5_Sniper_Move",
@@ -822,6 +897,17 @@ def _engine_v4_wait_diagnostics(
         "V4_Sell_Location_Age_Bars",
         "V4_Buy_Evidence_Score",
         "V4_Sell_Evidence_Score",
+        "V4_Buy_Armed",
+        "V4_Sell_Armed",
+        "V4_M15_Bar_Closed",
+        "V4_Buy_HA_Trigger",
+        "V4_Sell_HA_Trigger",
+        "V4_Buy_Pinbar_Trigger",
+        "V4_Sell_Pinbar_Trigger",
+        "V4_Buy_Sniper_Trigger",
+        "V4_Sell_Sniper_Trigger",
+        "V4_Buy_Trigger_Source",
+        "V4_Sell_Trigger_Source",
         "V4_Buy_Memory_Trigger",
         "V4_Sell_Memory_Trigger",
         "HA_Bull_Reversal",
@@ -904,7 +990,15 @@ def _engine_v4_wait_diagnostics(
         "location_sources": location_sources,
         "buy_evidence_score": buy_evidence_score,
         "sell_evidence_score": sell_evidence_score,
+        "buy_prz_layer_count": buy_layer_count,
+        "sell_prz_layer_count": sell_layer_count,
         "evidence_min": evidence_min,
+        "buy_armed": buy_armed,
+        "sell_armed": sell_armed,
+        "buy_triggered": buy_triggered,
+        "sell_triggered": sell_triggered,
+        "buy_trigger_source": _latest_text("V4_Buy_Trigger_Source"),
+        "sell_trigger_source": _latest_text("V4_Sell_Trigger_Source"),
         "buy_setup_count": _count("V4_Buy_Setup"),
         "sell_setup_count": _count("V4_Sell_Setup"),
         "buy_entry_zone_count": _count("V4_Buy_Entry_Zone"),

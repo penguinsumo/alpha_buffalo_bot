@@ -22,6 +22,7 @@ def test_recent_m15_prz_touch_is_observable_without_forcing_v4_open() -> None:
             "Zone_Buy_Pinbar_Trigger": False,
             "Zone_Sell_Pinbar_Trigger": False,
             "Kivanc_Scenario_State": "BUY_ZONE_ARMED",
+            "V4_Demand_PRZ_Layer_Count": 1,
             "V4_Buy_Setup": False,
             "V4_Sell_Setup": False,
             "VSA_Buy_Wins": False,
@@ -33,7 +34,7 @@ def test_recent_m15_prz_touch_is_observable_without_forcing_v4_open() -> None:
     assert_true(diagnostic["recent_prz_touch"], "recent wick overlap must remain observable")
     assert_equal(diagnostic["context_direction"], "BUY", "demand PRZ context direction")
     assert_equal(diagnostic["status"], "WAIT_CONFIRM", "touch alone must not create OPEN")
-    assert_true("HA_M15_BULL_FLIP" in diagnostic["missing_buy"], "owner sees missing HA flip")
+    assert_true("PRZ_LAYERS_1_OF_2" in diagnostic["missing_buy"], "owner sees PRZ layer gap")
     assert_true("EVIDENCE_0_OF_3" in diagnostic["missing_buy"], "owner sees aggregate evidence gap")
     assert_true(not diagnostic["v4_selected"], "diagnostics cannot manufacture a trade")
 
@@ -43,8 +44,8 @@ def test_h1_prz_location_memory_waits_for_evidence_and_ha_flip() -> None:
         htf_prz_support_high = 98.5
         htf_prz_resistance_low = 0.0
         htf_prz_resistance_high = 0.0
-        prz_a_support_low = 0.0
-        prz_a_support_high = 0.0
+        prz_a_support_low = 97.5
+        prz_a_support_high = 98.5
         prz_a_resistance_low = 0.0
         prz_a_resistance_high = 0.0
         prz_b_support_low = 0.0
@@ -58,6 +59,7 @@ def test_h1_prz_location_memory_waits_for_evidence_and_ha_flip() -> None:
             "high": 102.0,
             "low": 98.0,
             "Bullish_Pinbar": True,
+            "Near_BB_Lower": True,
             "Bearish_Pinbar": False,
             "HA_Bull_Reversal": False,
             "HA_Bear_Reversal": False,
@@ -112,7 +114,7 @@ def test_h1_prz_location_memory_waits_for_evidence_and_ha_flip() -> None:
     assert_true(candidate is not None, "confirmed memory setup reaches BUY engine")
     assert_equal(
         candidate["entry_mode"],
-        "V4_BUY_PRZ_MEMORY_HA_FLIP",
+        "V4_BUY_M15_HA_FLIP",
         "execution identifies the restored PRZ path",
     )
     assert_true(candidate["sl"] < candidate["entry"], "latched PRZ wall provides valid SL")
@@ -121,14 +123,90 @@ def test_h1_prz_location_memory_waits_for_evidence_and_ha_flip() -> None:
     assert_true("H1 DEMAND PRZ" in diagnostic["location_sources"], "owner sees H1 source")
     assert_equal(diagnostic["buy_evidence_score"], 3, "owner sees evidence score")
 
+def test_armed_buy_accepts_pinbar_break_but_rejects_forming_m15_ha() -> None:
+    class Blueprint:
+        htf_prz_support_low = 97.5
+        htf_prz_support_high = 98.5
+        htf_prz_resistance_low = 0.0
+        htf_prz_resistance_high = 0.0
+        prz_a_support_low = 97.5
+        prz_a_support_high = 98.5
+        prz_a_resistance_low = 0.0
+        prz_a_resistance_high = 0.0
+        prz_b_support_low = 0.0
+        prz_b_support_high = 0.0
+        prz_b_resistance_low = 0.0
+        prz_b_resistance_high = 0.0
+
+    touch = base_row()
+    touch.update(
+        {
+            "low": 98.0,
+            "high": 102.0,
+            "Bullish_Pinbar": True,
+            "Near_BB_Lower": True,
+            "HA_Bull_Reversal": False,
+            "Zone_Buy_Pinbar_Trigger": False,
+            "Deep_Buy_PRZ_Context": False,
+            "Deep_Sell_PRZ_Context": False,
+            "V4_Buy_Setup": False,
+            "V4_Sell_Setup": False,
+        }
+    )
+    pinbar_break = dict(touch)
+    pinbar_break.update(
+        {
+            "low": 99.0,
+            "high": 106.0,
+            "close": 104.0,
+            "Bullish_Pinbar": False,
+            "Near_BB_Lower": False,
+            "Zone_Buy_Pinbar_Trigger": True,
+            "Zone_Buy_Wall_Low": 98.0,
+            "BB_Mid": 110.0,
+            "BB_Upper": 120.0,
+        }
+    )
+    result = runtime._overlay_blueprint_prz_memory(
+        frame([touch, pinbar_break]),
+        Blueprint(),
+        lock_bars=4,
+    )
+    assert_true(bool(result["V4_Buy_Armed"].iloc[-1]), "two PRZ layers plus evidence arms BUY")
+    assert_equal(int(result["V4_Buy_Evidence_Score"].iloc[-1]), 3, "pinbar plus BB evidence")
+    assert_equal(
+        result["V4_Buy_Trigger_Source"].iloc[-1],
+        "BULL_PINBAR_HIGH_BREAK",
+        "pinbar high break is an independent trigger",
+    )
+    candidate = BuySignalEngine().evaluate(result, 1, NY_SESSION, ALLOWED)
+    assert_true(candidate is not None, "pinbar break reaches BUY engine without HA flip")
+    assert_equal(candidate["entry_mode"], "V4_BUY_PINBAR_HIGH_BREAK", "pinbar entry mode")
+
+    forming = frame([touch])
+    forming.index = pd.DatetimeIndex(
+        [pd.Timestamp.now(tz="UTC").floor("15min") + pd.Timedelta(hours=1)]
+    )
+    forming.loc[forming.index[-1], "HA_Bull_Reversal"] = True
+    forming_result = runtime._overlay_blueprint_prz_memory(
+        forming,
+        Blueprint(),
+        lock_bars=4,
+    )
+    assert_true(bool(forming_result["V4_Buy_Armed"].iloc[-1]), "forming bar may preserve ARMED")
+    assert_true(
+        not bool(forming_result["V4_Buy_HA_Trigger"].iloc[-1]),
+        "forming M15 HA flip cannot open",
+    )
+
 def test_m5_sniper_sweep_requires_closed_kivanc_bb_prz_reclaim_and_mirrors() -> None:
     class BuyBlueprint:
         htf_prz_support_low = 88.0
         htf_prz_support_high = 92.0
         htf_prz_resistance_low = 0.0
         htf_prz_resistance_high = 0.0
-        prz_a_support_low = 0.0
-        prz_a_support_high = 0.0
+        prz_a_support_low = 88.0
+        prz_a_support_high = 92.0
         prz_a_resistance_low = 0.0
         prz_a_resistance_high = 0.0
         prz_b_support_low = 0.0
@@ -171,7 +249,7 @@ def test_m5_sniper_sweep_requires_closed_kivanc_bb_prz_reclaim_and_mirrors() -> 
                 "Micro_BOS_Up": False,
                 "V4_Buy_Setup": False,
                 "V4_Sell_Setup": False,
-                "HA_Bull_Reversal": position == 2,
+                "HA_Bull_Reversal": False,
                 "HA_Bear_Reversal": False,
             }
         )
@@ -230,13 +308,13 @@ def test_m5_sniper_sweep_requires_closed_kivanc_bb_prz_reclaim_and_mirrors() -> 
     )
     assert_true(
         bool(buy_result["V4_Buy_Memory_Trigger"].iloc[-1]),
-        "M15 HA flip releases the armed BUY sniper",
+        "closed M5 sniper independently releases the armed BUY",
     )
     buy_candidate = BuySignalEngine().evaluate(buy_result, 2, NY_SESSION, ALLOWED)
     assert_true(buy_candidate is not None, "confirmed BUY sniper reaches engine")
     assert_equal(
         buy_candidate["entry_mode"],
-        "V4_BUY_M5_SNIPER_PRZ_HA_FLIP",
+        "V4_BUY_M5_SNIPER_RECLAIM",
         "BUY order retains its sniper source",
     )
 
@@ -245,6 +323,10 @@ def test_m5_sniper_sweep_requires_closed_kivanc_bb_prz_reclaim_and_mirrors() -> 
         htf_prz_support_high = 0.0
         htf_prz_resistance_low = 108.0
         htf_prz_resistance_high = 112.0
+        prz_a_support_low = 0.0
+        prz_a_support_high = 0.0
+        prz_a_resistance_low = 108.0
+        prz_a_resistance_high = 112.0
 
     sell_rows = []
     for position in range(3):
@@ -278,7 +360,7 @@ def test_m5_sniper_sweep_requires_closed_kivanc_bb_prz_reclaim_and_mirrors() -> 
                 "V4_Buy_Setup": False,
                 "V4_Sell_Setup": False,
                 "HA_Bull_Reversal": False,
-                "HA_Bear_Reversal": position == 2,
+                "HA_Bear_Reversal": False,
             }
         )
         sell_rows.append(row)
@@ -313,13 +395,13 @@ def test_m5_sniper_sweep_requires_closed_kivanc_bb_prz_reclaim_and_mirrors() -> 
     )
     assert_true(
         bool(sell_result["V4_Sell_Memory_Trigger"].iloc[-1]),
-        "M15 HA flip releases the armed SELL sniper",
+        "closed M5 sniper independently releases the armed SELL",
     )
     sell_candidate = SellSignalEngine().evaluate(sell_result, 2, NY_SESSION, ALLOWED)
     assert_true(sell_candidate is not None, "confirmed SELL sniper reaches engine")
     assert_equal(
         sell_candidate["entry_mode"],
-        "V4_SELL_M5_SNIPER_PRZ_HA_FLIP",
+        "V4_SELL_M5_SNIPER_RECLAIM",
         "SELL order retains its sniper source",
     )
 
@@ -522,16 +604,24 @@ def test_v4_pattern_comparison_routes_only_to_owner() -> None:
             "symbol": "XAUUSD",
             "signal": {
                 "engine_v4_diagnostics": {
-                    "status": "WAIT_CONFIRM",
+                    "status": "BUY_ARMED",
                     "v4_selected": False,
                     "current_price": 4060.51,
                     "context_direction": "BUY",
+                    "buy_prz_layer_count": 4,
+                    "sell_prz_layer_count": 0,
+                    "buy_evidence_score": 7,
+                    "sell_evidence_score": 0,
+                    "evidence_min": 3,
+                    "buy_armed": True,
+                    "sell_armed": False,
+                    "buy_trigger_source": "NONE",
                     "recent_prz_touch": True,
                     "recent_buy_prz_touch": True,
                     "recent_sell_prz_touch": False,
                     "buy_touch_time": "2026-07-23T14:30:00+00:00",
                     "recent_kivanc_state": "BUY_ZONE_ARMED",
-                    "missing_buy": ["HA_PA_RECLAIM", "VSA_BUY_PRESSURE"],
+                    "missing_buy": ["WAIT_HA_OR_PINBAR_OR_M5_SNIPER"],
                     "latest": {
                         "Fib_0618": 4048.0,
                         "Fib_0786": 4038.0,
@@ -571,7 +661,15 @@ def test_v4_pattern_comparison_routes_only_to_owner() -> None:
         assert_true(context["eligible"], "PRZ/pattern context must be owner-observable")
         assert_true("BULLISH BAT" in message, "selected harmonic is compared")
         assert_true("BULLISH GARTLEY" in message, "candidate pattern is compared")
-        assert_true("HA_PA_RECLAIM" in message, "missing V4 trigger is explicit")
+        assert_true("Layers B/S 4 / 0" in message, "PRZ layers are explicit")
+        assert_true(
+            "WAIT_HA_OR_PINBAR_OR_M5_SNIPER" in message,
+            "the exact remaining trigger is explicit",
+        )
+        assert_true(
+            "ARMED; รอ HA / Pinbar break / M5 Sniper" in message,
+            "armed context cannot be mistaken for an unqualified setup",
+        )
         assert_true("EA: HOLD" in message, "private context cannot claim execution")
     finally:
         runtime.TELEGRAM_OWNER_CHAT_IDS = original_owner

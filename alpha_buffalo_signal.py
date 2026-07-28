@@ -1544,6 +1544,25 @@ def _owner_v4_context(payload: Dict) -> Dict:
     if h1_ok and h1_label not in locations:
         locations.append(h1_label)
 
+    plan = ea.get("plan_lifecycle", {}) or {}
+    ready_checks = plan.get("ready_checks", {}) or {}
+    failed_ready_checks = [
+        key
+        for key, value in ready_checks.items()
+        if key != "vsa_bonus" and not bool(value)
+    ]
+    trigger_source = str(
+        diagnostic.get(
+            "buy_trigger_source"
+            if direction == "BUY"
+            else "sell_trigger_source"
+            if direction == "SELL"
+            else "",
+            "NONE",
+        )
+        or "NONE"
+    ).upper()
+
     return {
         "eligible": eligible,
         "direction": direction,
@@ -1557,6 +1576,15 @@ def _owner_v4_context(payload: Dict) -> Dict:
         "h1_zone_high": h1_high,
         "v4_status": str(diagnostic.get("status") or "WAIT").upper(),
         "v4_selected": bool(diagnostic.get("v4_selected")),
+        "buy_prz_layer_count": int(
+            _safe_float(diagnostic.get("buy_prz_layer_count"))
+        ),
+        "sell_prz_layer_count": int(
+            _safe_float(diagnostic.get("sell_prz_layer_count"))
+        ),
+        "buy_armed": bool(diagnostic.get("buy_armed")),
+        "sell_armed": bool(diagnostic.get("sell_armed")),
+        "trigger_source": trigger_source,
         "buy_evidence_score": int(
             _safe_float(diagnostic.get("buy_evidence_score"))
         ),
@@ -1618,6 +1646,11 @@ def _owner_v4_context(payload: Dict) -> Dict:
         "harmonic_tf": pattern_tf,
         "candidate_names": candidate_names,
         "ea_action": str(ea.get("action") or "WAIT").upper(),
+        "ea_execution_state": str(
+            ea.get("execution_state") or "WATCH"
+        ).upper(),
+        "ea_reason": str(ea.get("reason") or signal.get("reason") or ""),
+        "failed_ready_checks": failed_ready_checks,
     }
 
 
@@ -1677,13 +1710,43 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
             f" {_safe_float(context.get('sniper_bb')):,.2f}"
         )
 
+    ea_action = str(context.get("ea_action") or "WAIT").upper()
+    execution_state = str(
+        context.get("ea_execution_state") or "WATCH"
+    ).upper()
+    failed_checks = context.get("failed_ready_checks") or []
+    if ea_action == "OPEN" and execution_state == "READY":
+        ea_text = "OPEN — Levels / RR / Risk ผ่านครบ"
+    elif context.get("v4_selected"):
+        detail = (
+            ", ".join(failed_checks)
+            or context.get("ea_reason")
+            or "ADAPTER WATCH"
+        )
+        ea_text = f"WAIT — V4 selected; {_clean_text(detail)}"
+    elif context.get("buy_armed") or context.get("sell_armed"):
+        ea_text = "HOLD — ARMED; รอ HA / Pinbar break / M5 Sniper"
+    else:
+        ea_text = (
+            "HOLD — "
+            + _clean_text(
+                context.get("ea_reason")
+                or "รอ PRZ Layers + Evidence"
+            )
+        )
+    layer_text = (
+        f"{int(context.get('buy_prz_layer_count') or 0)} / "
+        f"{int(context.get('sell_prz_layer_count') or 0)}"
+    )
+
     return "\n".join([
         "🔎 <b>V4 OWNER CONTEXT</b>",
         "━━━━━━━━━━━━━━━━━",
         f"📌 {_clean_text(payload.get('symbol') or PUBLIC_SYMBOL_DEFAULT)} | {icon} {_clean_text(side)}",
         f"💰 Price: {_safe_float(context.get('price')):,.2f}",
         f"📍 PRZ: {_clean_text(' + '.join(locations))}",
-        f"🧩 V4: {_clean_text(context.get('v4_status'))}",
+        f"🧩 V4: {_clean_text(context.get('v4_status'))}"
+        f" | Layers B/S {layer_text}",
         f"📊 Evidence B/S: {int(context.get('buy_evidence_score') or 0)}"
         f" / {int(context.get('sell_evidence_score') or 0)}"
         f" (need {int(context.get('evidence_min') or 3)})",
@@ -1693,8 +1756,9 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
         f"🟡 Kivanc: {_clean_text(context.get('kivanc_state'))} | {kivanc_level_text}",
         f"🔷 Harmonic: {_clean_text(harmonic_text)}",
         f"📐 Pattern compare: {_clean_text(candidate_text)}",
+        f"⚡ Trigger: {_clean_text(context.get('trigger_source') or 'NONE')}",
         f"⛔ Missing: {_clean_text(', '.join(missing) if missing else 'NONE')}",
-        "🤖 EA: HOLD — รอ V4 trigger; ยังไม่มีคำสั่งเปิดออเดอร์",
+        f"🤖 EA: {ea_text}",
         TELEGRAM_DISCLAIMER,
     ])
 
@@ -1964,9 +2028,6 @@ def maybe_broadcast_signal(payload: Dict) -> bool:
         return False
     if not bool(ea.get("zone_ok", True)):
         return False
-    if not bool(ea.get("vsa_gate_ok", True)):
-        return False
-
     signal_key = _telegram_signal_key(payload)
     with LAST_TELEGRAM_LOCK:
         if signal_key and signal_key == LAST_TELEGRAM_SIGNAL_KEY:
@@ -2035,6 +2096,7 @@ def _run_engine_v4_baseline(
         "In_PRZ_B_Support", "In_PRZ_B_Resistance",
         "V4_Demand_PRZ_Touch", "V4_Supply_PRZ_Touch",
         "V4_Demand_PRZ_Layer_Count", "V4_Supply_PRZ_Layer_Count",
+        "V4_Demand_PRZ_Qualified", "V4_Supply_PRZ_Qualified",
         "V4_Buy_M5_Sniper_Evidence", "V4_Sell_M5_Sniper_Evidence",
         "V4_Buy_M5_Sniper_Move", "V4_Sell_M5_Sniper_Move",
         "V4_Buy_M5_Sniper_Kivanc", "V4_Sell_M5_Sniper_Kivanc",
@@ -2042,6 +2104,12 @@ def _run_engine_v4_baseline(
         "V4_Buy_M5_Sniper_BB_TF", "V4_Sell_M5_Sniper_BB_TF",
         "V4_Buy_Location_Memory", "V4_Sell_Location_Memory",
         "V4_Buy_Evidence_Score", "V4_Sell_Evidence_Score",
+        "V4_Buy_Armed", "V4_Sell_Armed",
+        "V4_M15_Bar_Closed",
+        "V4_Buy_HA_Trigger", "V4_Sell_HA_Trigger",
+        "V4_Buy_Pinbar_Trigger", "V4_Sell_Pinbar_Trigger",
+        "V4_Buy_Sniper_Trigger", "V4_Sell_Sniper_Trigger",
+        "V4_Buy_Trigger_Source", "V4_Sell_Trigger_Source",
         "V4_Buy_Memory_Trigger", "V4_Sell_Memory_Trigger",
         "V4_Buy_Entry_Zone", "V4_Sell_Entry_Zone", "V4_Buy_Setup", "V4_Sell_Setup",
         "V4_Block_Sell_At_Lower", "V4_Block_Buy_At_Upper", "CHoCH_Bull", "CHoCH_Bear",
@@ -2133,7 +2201,7 @@ def _run_engine_v4_baseline(
                 str(signal.get("direction") or "").upper() if signal else None
             )
             if signal:
-                diagnostics_out["status"] = "V4_READY"
+                diagnostics_out["status"] = "V4_SELECTED"
 
         tail = df.tail(int(os.getenv("ENGINE_V4_LOOKBACK_BARS", "6")))
         last = tail.iloc[-1]

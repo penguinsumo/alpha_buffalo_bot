@@ -3,8 +3,9 @@
 SignalRouter — V4 location-first router.
 
 Core rule:
-- PRZ Support + BB Lower + HA/Pinbar Bullish + VSA_BUY wins + RR >= min = BUY V4 entry
-- PRZ Resistance + BB Upper + HA/Pinbar Bearish + VSA_SELL wins + RR >= min = SELL V4 entry
+- PRZ layers >= 2 + evidence >= 3 arms the directional V4 setup.
+- Closed M15 HA flip, pinbar break, or closed M5 sniper reclaim triggers it.
+- The EA adapter validates levels/RR once; VSA is evidence, not a second gate.
 - CHoCH/BOS promotes V4 scalp to V5 journey; it is not required for V4 entry.
 """
 from __future__ import annotations
