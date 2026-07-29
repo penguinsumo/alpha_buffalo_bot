@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 import time
 import threading
 from datetime import datetime, timezone, timedelta
@@ -1839,8 +1840,6 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
     icon, side = _public_side(direction)
     locations = context.get("locations") or ["WAIT LOCATION"]
     missing = context.get("missing") or []
-    levels = context.get("kivanc_levels") or []
-    points = context.get("kivanc_points") or []
     tunnel_flags = []
     if context.get("buy_tunnel_sweep"):
         tunnel_flags.append("BUY SWEEP")
@@ -1868,29 +1867,27 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
         ", ".join(context.get("candidate_names") or [])
         or "NO MATCHING PATTERN"
     )
-    kivanc_level_text = (
-        " / ".join(
-            f"{_clean_text(point.get('label'))} "
-            f"{_safe_float(point.get('value')):,.2f}"
-            for point in points
-        )
-        if points
-        else " / ".join(f"{value:,.2f}" for value in levels)
-        if levels
-        else "NO NEWDAY LEVEL"
+    raw_level_state = str(context.get("kivanc_state") or "").upper()
+    level_state = (
+        "BUY ARMED"
+        if "BUY" in raw_level_state
+        else "SELL ARMED"
+        if "SELL" in raw_level_state
+        else "ACTIVE"
+        if raw_level_state not in {"", "NONE", "OUTSIDE", "WAIT"}
+        else "WAIT"
     )
     entry_watch_level = _safe_float(context.get("entry_watch_level"))
     entry_zone_low = _safe_float(context.get("entry_zone_low"))
     entry_zone_high = _safe_float(context.get("entry_zone_high"))
     if entry_watch_level > 0:
         entry_watch_text = (
-            f"{entry_watch_level:,.2f}"
-            f" | K {_clean_text(context.get('entry_watch_ratio'))}"
+            f"Level {entry_watch_level:,.2f}"
             f" | PRZ {entry_zone_low:,.2f}-{entry_zone_high:,.2f}"
             " | WAIT CF"
         )
     else:
-        entry_watch_text = "NO KIVANC / PRZ OVERLAP"
+        entry_watch_text = "NO LEVEL / PRZ OVERLAP"
     sniper_side = (
         "BUY ARMED"
         if context.get("buy_sniper_armed")
@@ -1902,7 +1899,7 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
     if sniper_side != "WAIT":
         sniper_text += (
             f" | M5 ${_safe_float(context.get('sniper_move')):,.2f}"
-            f" | K {_safe_float(context.get('sniper_kivanc')):,.2f}"
+            f" | Level {_safe_float(context.get('sniper_kivanc')):,.2f}"
             f" | BB-{_clean_text(context.get('sniper_bb_tf') or 'NONE')}"
             f" {_safe_float(context.get('sniper_bb')):,.2f}"
         )
@@ -1936,7 +1933,7 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
         f"{int(context.get('sell_prz_layer_count') or 0)}"
     )
 
-    return "\n".join([
+    message = "\n".join([
         "🔎 <b>V4 OWNER CONTEXT</b>",
         "━━━━━━━━━━━━━━━━━",
         f"📌 {_clean_text(payload.get('symbol') or PUBLIC_SYMBOL_DEFAULT)} | {icon} {_clean_text(side)}",
@@ -1950,8 +1947,8 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
         f"🎯 M5 Sniper: {_clean_text(sniper_text)}",
         f"🚇 Tunnel: {_clean_text(context.get('tunnel_state'))}"
         + (f" | {_clean_text(', '.join(tunnel_flags))}" if tunnel_flags else ""),
-        f"🟡 Kivanc: {_clean_text(context.get('kivanc_state'))} | {kivanc_level_text}",
-        f"🎯 Entry watch: {_clean_text(entry_watch_text)}",
+        f"🟡 Level state: {_clean_text(level_state)}",
+        f"🎯 Entry cluster: {_clean_text(entry_watch_text)}",
         f"🔷 Harmonic: {_clean_text(harmonic_text)}",
         f"📐 Pattern compare: {_clean_text(candidate_text)}",
         f"⚡ Trigger: {_clean_text(context.get('trigger_source') or 'NONE')}",
@@ -1959,6 +1956,9 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
         f"🤖 EA: {ea_text}",
         TELEGRAM_DISCLAIMER,
     ])
+    # Owner messages must not disclose the proprietary level model even when
+    # an upstream diagnostic/reason contains its internal name.
+    return re.sub(r"kivanc", "LEVEL", message, flags=re.IGNORECASE)
 
 
 def maybe_broadcast_owner_v4_context(payload: Dict) -> bool:
