@@ -48,6 +48,8 @@ TESTS = [
     test_telegram_public_output_hides_engine_internals,
     test_pine_monitor_does_not_promote_blocked_buy_inside_sell_ha_context,
     test_confirmed_open_is_the_only_public_directional_setup,
+    test_incomplete_pipeline_payload_never_sends_zero_price_trend,
+    test_trend_formatter_reads_canonical_fallback_fields,
     test_pine_payload_is_silent_on_every_telegram_destination,
     test_closed_market_suppresses_all_telegram,
     test_h1_prz_wait_confirmation_does_not_require_harmonic,

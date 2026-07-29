@@ -154,6 +154,100 @@ def test_confirmed_open_is_the_only_public_directional_setup() -> None:
     assert_true("Watch for 🟢 B Setup..." in text, "confirmed OPEN may publish BUY setup")
 
 
+def test_incomplete_pipeline_payload_never_sends_zero_price_trend() -> None:
+    payload = {
+        "status": "ERROR",
+        "symbol": "XAUUSD",
+        "signal": {
+            "status": "ERROR",
+            "reason": "HTTPException: market data temporarily unavailable",
+            "gates": {"session": ""},
+            "blueprint": {
+                "is_valid": False,
+                "validation_errors": ["PIPELINE_ERROR"],
+            },
+        },
+        "ea": {
+            "action": "WAIT",
+            "execution_state": "BLOCKED",
+            "entry": 0.0,
+            "session": "",
+        },
+    }
+    sent = []
+    original_market = runtime._telegram_market_is_open
+    original_enabled = runtime._telegram_enabled
+    original_send = runtime.send_telegram_message
+    original_notify = runtime.TELEGRAM_NOTIFY_TREND_UPDATE
+    original_key = runtime.LAST_TELEGRAM_TREND_UPDATE_KEY
+    original_at = runtime.LAST_TELEGRAM_TREND_UPDATE_AT
+    try:
+        runtime._telegram_market_is_open = lambda payload=None, now=None: True
+        runtime._telegram_enabled = lambda audience="GROUP": True
+        runtime.send_telegram_message = (
+            lambda text, **kwargs: sent.append(text) or True
+        )
+        runtime.TELEGRAM_NOTIFY_TREND_UPDATE = True
+        runtime.LAST_TELEGRAM_TREND_UPDATE_KEY = ""
+        runtime.LAST_TELEGRAM_TREND_UPDATE_AT = None
+
+        ready, reason = runtime._trend_payload_ready(payload)
+        assert_true(not ready, "pipeline error must not be trend-ready")
+        assert_true(
+            reason.startswith("PIPELINE_ERROR"),
+            "the rejected snapshot must preserve the failure reason",
+        )
+        assert_true(
+            not runtime.maybe_broadcast_trend_update(payload),
+            "incomplete payload must not reach Telegram",
+        )
+        assert_equal(sent, [], "no zero-price trend message is delivered")
+        assert_equal(
+            runtime.LAST_TELEGRAM_TREND_UPDATE_KEY,
+            "",
+            "invalid snapshot must not reserve the hourly throttle",
+        )
+        assert_equal(
+            runtime.LAST_TELEGRAM_TREND_UPDATE_AT,
+            None,
+            "next valid snapshot must remain immediately deliverable",
+        )
+    finally:
+        runtime._telegram_market_is_open = original_market
+        runtime._telegram_enabled = original_enabled
+        runtime.send_telegram_message = original_send
+        runtime.TELEGRAM_NOTIFY_TREND_UPDATE = original_notify
+        runtime.LAST_TELEGRAM_TREND_UPDATE_KEY = original_key
+        runtime.LAST_TELEGRAM_TREND_UPDATE_AT = original_at
+
+
+def test_trend_formatter_reads_canonical_fallback_fields() -> None:
+    payload = {
+        "status": "NO_SIGNAL",
+        "symbol": "XAUUSD",
+        "entry_price": 4048.57,
+        "signal": {
+            "status": "NO_SIGNAL",
+            "gates": {"session": "LONDON"},
+            "blueprint": {
+                "is_valid": True,
+                "trend_h1": "DOWN",
+                "trend_h4": "DOWN",
+                "price_action": {"m15_phase": "PULLBACK_UP"},
+            },
+        },
+        "ea": {"action": "WAIT"},
+    }
+    ready, reason = runtime._trend_payload_ready(payload)
+    assert_true(ready, f"canonical fallback snapshot must be ready: {reason}")
+    text = format_telegram_trend_update(payload)
+    assert_true("Session : LONDON" in text, "session comes from signal gates")
+    assert_true("Price   : 4,048.57" in text, "price comes from canonical field")
+    assert_true("M15  : Pullback 🟢" in text, "M15 phase is retained")
+    assert_true("H1   : Impulse 🔴" in text, "H1 trend fallback is retained")
+    assert_true("H4   : Impulse 🔴" in text, "H4 trend fallback is retained")
+
+
 def test_pine_payload_is_silent_on_every_telegram_destination() -> None:
     payload = {
         "source": "PINE",

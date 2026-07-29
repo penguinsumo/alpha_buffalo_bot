@@ -933,27 +933,104 @@ def _deep_get(data: Dict, path: list[str], default=None):
     return default if cur in (None, "") else cur
 
 
-def _trend_update_key(payload: Dict) -> str:
-    """Build the public trend signature used by hourly/crossover throttling."""
+def _trend_payload_context(payload: Dict) -> Dict:
+    """Resolve one complete trend snapshot from the canonical API payload."""
+    payload = payload or {}
     signal = payload.get("signal", {}) or {}
     ea = payload.get("ea", {}) or {}
     blueprint = signal.get("blueprint", {}) or {}
     price_action = blueprint.get("price_action", {}) or {}
+
+    price = _first_float(
+        blueprint.get("current_price"),
+        price_action.get("current_price"),
+        payload.get("current_price"),
+        payload.get("entry_price"),
+        ea.get("entry"),
+    )
     session = str(
         ea.get("session")
         or _deep_get(signal, ["gates", "session"], "")
-        or SessionClock().get().session
+        or blueprint.get("session")
+        or ""
     ).strip().upper()
+    phases = {
+        "m15": (
+            price_action.get("m15_phase")
+            or blueprint.get("m15_phase")
+            or ""
+        ),
+        "h1": (
+            price_action.get("h1_phase")
+            or blueprint.get("h1_phase")
+            or blueprint.get("trend_h1")
+            or ""
+        ),
+        "h4": (
+            price_action.get("h4_phase")
+            or blueprint.get("h4_phase")
+            or blueprint.get("trend_h4")
+            or ""
+        ),
+    }
+    return {
+        "payload": payload,
+        "signal": signal,
+        "ea": ea,
+        "blueprint": blueprint,
+        "price_action": price_action,
+        "price": price,
+        "session": session,
+        "phases": phases,
+    }
+
+
+def _trend_payload_ready(payload: Dict) -> tuple[bool, str]:
+    """Fail closed so an error/fallback payload can never become a trend alert."""
+    context = _trend_payload_context(payload)
+    signal = context["signal"]
+    blueprint = context["blueprint"]
+    status = str(
+        context["payload"].get("status")
+        or signal.get("status")
+        or ""
+    ).upper()
+
+    if status == ERROR:
+        return False, "PIPELINE_ERROR"
+    if blueprint.get("is_valid") is False:
+        errors = blueprint.get("validation_errors") or []
+        return False, "INVALID_BLUEPRINT" + (
+            ":" + ",".join(str(value) for value in errors)
+            if errors
+            else ""
+        )
+    if context["price"] <= 0:
+        return False, "MISSING_PRICE"
+    if context["session"] in {"", "-", "UNKNOWN", "CLOSED"}:
+        return False, "MISSING_SESSION"
+
+    missing = [
+        timeframe.upper()
+        for timeframe, value in context["phases"].items()
+        if str(value or "").strip().upper() in {"", "-", "NONE", "UNKNOWN"}
+    ]
+    if missing:
+        return False, "MISSING_PHASES:" + ",".join(missing)
+    return True, "OK"
+
+
+def _trend_update_key(payload: Dict) -> str:
+    """Build the public trend signature used by hourly/crossover throttling."""
+    context = _trend_payload_context(payload)
+    signal = context["signal"]
+    session = context["session"]
     symbol = payload.get("symbol", SYMBOL_DEFAULT.replace("/", ""))
     bias = _trend_bias_label(signal)
-    states = []
-    for key, fallback in (
-        ("m15_phase", ""),
-        ("h1_phase", blueprint.get("trend_h1", "")),
-        ("h4_phase", blueprint.get("trend_h4", "")),
-    ):
-        raw = price_action.get(key) or fallback
-        states.append(_public_trend_state(raw, bias))
+    states = [
+        _public_trend_state(context["phases"][timeframe], bias)
+        for timeframe in ("m15", "h1", "h4")
+    ]
     return "|".join([
         _telegram_payload_source(payload),
         str(symbol).upper(),
@@ -1265,27 +1342,17 @@ def _public_trend_state(value, fallback_direction: str = "NONE") -> str:
 
 
 def format_telegram_trend_update(payload: Dict) -> str:
-    signal = payload.get("signal", {}) or {}
-    ea = payload.get("ea", {}) or {}
+    context = _trend_payload_context(payload)
+    signal = context["signal"]
     symbol = payload.get("symbol", SYMBOL_DEFAULT.replace("/", ""))
-    blueprint = signal.get("blueprint", {}) or {}
-
-    price = _safe_float(
-        blueprint.get("current_price")
-        or _deep_get(blueprint, ["price_action", "current_price"])
-        or ea.get("entry")
-    )
-    session = ea.get("session") or _deep_get(signal, ["gates", "session"], "-")
+    price = context["price"]
+    session = context["session"] or "-"
     bias = _trend_bias_label(signal)
     watch_icon = "🟢" if bias == "BUY" else "🔴" if bias == "SELL" else "⚪"
     watch_side = "B" if bias == "BUY" else "S" if bias == "SELL" else "WAIT"
-    m15 = _public_trend_state(_trend_line(signal, "m15_phase", ""), bias)
-    h1 = _public_trend_state(
-        _trend_line(signal, "h1_phase", blueprint.get("trend_h1", "")), bias
-    )
-    h4 = _public_trend_state(
-        _trend_line(signal, "h4_phase", blueprint.get("trend_h4", "")), bias
-    )
+    m15 = _public_trend_state(context["phases"]["m15"], bias)
+    h1 = _public_trend_state(context["phases"]["h1"], bias)
+    h4 = _public_trend_state(context["phases"]["h4"], bias)
 
     return "\n".join([
         f"📊 <b>{_clean_text(symbol)} TREND UPDATE</b>",
@@ -1960,6 +2027,10 @@ def maybe_broadcast_trend_update(payload: Dict) -> bool:
         not _telegram_payload_notifications_enabled(payload)
         or not _telegram_market_is_open(payload)
     ):
+        return False
+
+    payload_ready, _ = _trend_payload_ready(payload)
+    if not payload_ready:
         return False
 
     audience = _telegram_payload_audience(payload)
