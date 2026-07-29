@@ -44,7 +44,7 @@ else:
 
 from core.models.newday_market_map import HarmonicContext, LiquidityZone, NewdayMarketMap
 
-API_KEY = os.getenv("TWELVEDATA_API_KEY") or os.getenv("TWELVE_API_KEY") or os.getenv("TWELVE_DATA_API_KEY")
+API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
 SYMBOL = os.getenv("ALPHA_SYMBOL", "XAU/USD")
 PUBLIC_SYMBOL = os.getenv("ALPHA_PUBLIC_SYMBOL", SYMBOL.replace("/", ""))
 OUTPUT_DIR = Path(os.getenv("ALPHA_MARKET_MAP_DIR", "data/market_maps"))
