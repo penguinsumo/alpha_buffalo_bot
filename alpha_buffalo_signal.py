@@ -80,10 +80,29 @@ LATEST_SIGNAL_CACHE: dict = {}
 LATEST_SIGNAL_LOCK = threading.Lock()
 
 TF_FETCH_TTL_SECONDS = {
-    "5min": int(os.getenv("TF_5M_TTL_SECONDS", "45")),
-    "15min": int(os.getenv("TF_15M_TTL_SECONDS", "180")),
-    "1h": int(os.getenv("TF_1H_TTL_SECONDS", "900")),
-    "4h": int(os.getenv("TF_4H_TTL_SECONDS", "1800")),
+    # The strategy only acts on confirmed candles. Fetching faster than the
+    # candle cadence spends provider quota without creating fresher evidence.
+    "5min": int(os.getenv("TF_5M_TTL_SECONDS", "300")),
+    "15min": int(os.getenv("TF_15M_TTL_SECONDS", "900")),
+    "1h": int(os.getenv("TF_1H_TTL_SECONDS", "3600")),
+    "4h": int(os.getenv("TF_4H_TTL_SECONDS", "14400")),
+}
+TF_MAX_STALE_SECONDS = {
+    # Provider interruptions may use the last closed bars for context, but
+    # never indefinitely. These limits are deliberately wider than the normal
+    # fetch cadence and narrower than a trading day.
+    "5min": int(os.getenv("TF_5M_MAX_STALE_SECONDS", "900")),
+    "15min": int(os.getenv("TF_15M_MAX_STALE_SECONDS", "3600")),
+    "1h": int(os.getenv("TF_1H_MAX_STALE_SECONDS", "10800")),
+    "4h": int(os.getenv("TF_4H_MAX_STALE_SECONDS", "43200")),
+}
+TF_ENTRY_MAX_AGE_SECONDS = {
+    # A confirmed OPEN is stricter than read-only context. M5 is required only
+    # when the selected entry mode is an M5 sniper trigger.
+    "5min": int(os.getenv("TF_5M_ENTRY_MAX_AGE_SECONDS", "600")),
+    "15min": int(os.getenv("TF_15M_ENTRY_MAX_AGE_SECONDS", "1200")),
+    "1h": int(os.getenv("TF_1H_ENTRY_MAX_AGE_SECONDS", "7200")),
+    "4h": int(os.getenv("TF_4H_ENTRY_MAX_AGE_SECONDS", "28800")),
 }
 TF_DATA_CACHE: dict = {}
 TF_CACHE_LOCK = threading.Lock()
@@ -379,13 +398,140 @@ def fetch_twelvedata(symbol: str, interval: str, outputsize: int = 200) -> pd.Da
     return df
 
 
+def _tf_cache_directory() -> Path:
+    """Use the Railway volume when mounted, otherwise a local temp cache."""
+    configured = os.getenv("ALPHA_TF_CACHE_DIR", "").strip()
+    if configured:
+        return Path(configured)
+    volume_root = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if volume_root:
+        return Path(volume_root) / "alpha_buffalo_tf_cache"
+    return Path("/tmp/alpha_buffalo_tf_cache")
+
+
+def _tf_cache_path(symbol: str, interval: str) -> Path:
+    safe_symbol = re.sub(r"[^A-Za-z0-9]+", "_", str(symbol or "UNKNOWN")).strip("_")
+    safe_interval = re.sub(r"[^A-Za-z0-9]+", "_", str(interval or "UNKNOWN")).strip("_")
+    return _tf_cache_directory() / f"{safe_symbol}_{safe_interval}.json"
+
+
+def _tag_market_frame(
+    frame: pd.DataFrame,
+    *,
+    source: str,
+    age_seconds: float,
+    fetched_at: float,
+) -> pd.DataFrame:
+    tagged = frame.copy()
+    tagged.attrs["alpha_data_source"] = str(source)
+    tagged.attrs["alpha_data_age_seconds"] = max(0.0, float(age_seconds))
+    tagged.attrs["alpha_data_fetched_at"] = float(fetched_at)
+    return tagged
+
+
+def _persist_tf_cache(
+    symbol: str,
+    interval: str,
+    frame: pd.DataFrame,
+    fetched_at: float,
+) -> None:
+    """Best-effort durable candle cache; cache I/O can never break a scan."""
+    try:
+        path = _tf_cache_path(symbol, interval)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "symbol": str(symbol),
+            "interval": str(interval),
+            "fetched_at": float(fetched_at),
+            "records": frame.to_dict(orient="records"),
+        }
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    except Exception as exc:
+        print(
+            "AlphaBuffalo TF cache persist skipped | "
+            f"interval={interval} error={type(exc).__name__}",
+            flush=True,
+        )
+
+
+def _load_persisted_tf_cache(
+    symbol: str,
+    interval: str,
+) -> tuple[pd.DataFrame | None, float | None]:
+    """Load validated cached candles without allowing malformed files through."""
+    try:
+        path = _tf_cache_path(symbol, interval)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        fetched_at = float(payload.get("fetched_at", 0.0))
+        records = payload.get("records")
+        if fetched_at <= 0 or not isinstance(records, list) or not records:
+            return None, None
+        frame = pd.DataFrame(records)
+        required = ["open", "high", "low", "close"]
+        if any(column not in frame.columns for column in required):
+            return None, None
+        for column in required:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame.dropna(subset=required)
+        if "datetime" in frame.columns:
+            frame["datetime"] = pd.to_datetime(frame["datetime"], errors="coerce")
+            frame = frame.sort_values("datetime")
+        frame = frame.reset_index(drop=True)
+        if len(frame) < 50:
+            return None, None
+        return frame, fetched_at
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+        return None, None
+    except Exception as exc:
+        print(
+            "AlphaBuffalo TF cache load skipped | "
+            f"interval={interval} error={type(exc).__name__}",
+            flush=True,
+        )
+        return None, None
+
+
+def _safe_pipeline_error_code(exc: Exception) -> str:
+    """Return a useful error code without ever logging credentials or URLs."""
+    def _redact(value: object) -> str:
+        message = str(value or "").strip()
+        if TWELVEDATA_API_KEY:
+            message = message.replace(TWELVEDATA_API_KEY, "[REDACTED]")
+        message = re.sub(r"apikey=[^&\s]+", "apikey=[REDACTED]", message, flags=re.I)
+        message = re.sub(r"https?://\S+", "[URL_REDACTED]", message)
+        return message
+
+    if isinstance(exc, HTTPException):
+        detail = _redact(exc.detail)
+        if detail:
+            return re.sub(r"[^A-Za-z0-9_:.\-]+", "_", detail)[:180]
+        return f"HTTP_{exc.status_code}"
+    if isinstance(exc, requests.RequestException):
+        return f"MARKET_DATA_NETWORK_{type(exc).__name__.upper()}"
+    message = _redact(exc)
+    clean = re.sub(r"[^A-Za-z0-9_:.\-]+", "_", message).strip("_")
+    return f"{type(exc).__name__.upper()}:{clean[:140]}" if clean else type(exc).__name__.upper()
+
+
+def _tf_epoch_bucket(interval: str, timestamp: float) -> int:
+    cadence = max(1, int(TF_FETCH_TTL_SECONDS.get(interval, 180)))
+    return int(float(timestamp) // cadence)
+
+
 def _fetch_cached_tf(symbol: str, interval: str, outputsize: int = 200) -> pd.DataFrame:
     ttl = TF_FETCH_TTL_SECONDS.get(interval, 180)
+    max_stale = TF_MAX_STALE_SECONDS.get(interval, max(ttl * 3, ttl))
     key = f"{symbol}:{interval}"
     now = time.time()
 
     stale_df = None
     stale_age = None
+    stale_ts = None
 
     with TF_CACHE_LOCK:
         cached = TF_DATA_CACHE.get(key)
@@ -393,25 +539,130 @@ def _fetch_cached_tf(symbol: str, interval: str, outputsize: int = 200) -> pd.Da
             stale_df = cached.get("df")
             cached_ts = float(cached.get("ts", 0))
             stale_age = now - cached_ts
-            if stale_df is not None and stale_age < ttl:
-                return stale_df.copy()
+            stale_ts = cached_ts
+            cached_bucket = int(
+                cached.get("bucket", _tf_epoch_bucket(interval, cached_ts))
+            )
+            current_bucket = _tf_epoch_bucket(interval, now)
+            if (
+                stale_df is not None
+                and stale_age < ttl
+                and cached_bucket == current_bucket
+            ):
+                return _tag_market_frame(
+                    stale_df,
+                    source="MEMORY_CACHE",
+                    age_seconds=stale_age,
+                    fetched_at=cached_ts,
+                )
 
     try:
         df = fetch_twelvedata(symbol, interval, outputsize=outputsize)
     except Exception as exc:
-        if stale_df is not None:
+        error_code = _safe_pipeline_error_code(exc)
+        if stale_df is not None and stale_age is not None and stale_age <= max_stale:
             print(
-                f"AlphaBuffalo TF cache fallback | interval={interval} age={int(stale_age or 0)}s error={type(exc).__name__}: {exc}",
+                "AlphaBuffalo TF cache fallback | "
+                f"interval={interval} source=MEMORY age={int(stale_age)}s "
+                f"error={error_code}",
                 flush=True,
             )
-            return stale_df.copy()
+            return _tag_market_frame(
+                stale_df,
+                source="MEMORY_FALLBACK",
+                age_seconds=stale_age,
+                fetched_at=float(stale_ts or 0.0),
+            )
+
+        persisted, persisted_ts = _load_persisted_tf_cache(symbol, interval)
+        persisted_age = now - float(persisted_ts or 0.0)
+        if persisted is not None and persisted_ts and persisted_age <= max_stale:
+            with TF_CACHE_LOCK:
+                TF_DATA_CACHE[key] = {
+                    "df": persisted.copy(),
+                    "ts": float(persisted_ts),
+                    "bucket": _tf_epoch_bucket(interval, float(persisted_ts)),
+                }
+            print(
+                "AlphaBuffalo TF cache fallback | "
+                f"interval={interval} source=PERSISTED age={int(persisted_age)}s "
+                f"error={error_code}",
+                flush=True,
+            )
+            return _tag_market_frame(
+                persisted,
+                source="PERSISTED_FALLBACK",
+                age_seconds=persisted_age,
+                fetched_at=float(persisted_ts),
+            )
         raise
 
+    fetched_at = time.time()
     with TF_CACHE_LOCK:
-        TF_DATA_CACHE[key] = {"df": df.copy(), "ts": time.time()}
+        TF_DATA_CACHE[key] = {
+            "df": df.copy(),
+            "ts": fetched_at,
+            "bucket": _tf_epoch_bucket(interval, fetched_at),
+        }
+    _persist_tf_cache(symbol, interval, df, fetched_at)
 
     print(f"AlphaBuffalo TF fetch | interval={interval} ttl={ttl}s rows={len(df)}", flush=True)
-    return df
+    return _tag_market_frame(
+        df,
+        source="LIVE",
+        age_seconds=0.0,
+        fetched_at=fetched_at,
+    )
+
+
+def _market_data_quality(frames: Dict[str, pd.DataFrame | None]) -> Dict:
+    intervals: Dict[str, Dict] = {}
+    degraded = False
+    for interval, frame in frames.items():
+        if frame is None or getattr(frame, "empty", True):
+            intervals[interval] = {
+                "source": "UNAVAILABLE",
+                "age_seconds": None,
+                "entry_fresh": False,
+            }
+            degraded = True
+            continue
+        source = str(frame.attrs.get("alpha_data_source", "UNKNOWN"))
+        age = max(0.0, float(frame.attrs.get("alpha_data_age_seconds", 0.0)))
+        fresh_limit = TF_ENTRY_MAX_AGE_SECONDS.get(interval, 0)
+        entry_fresh = bool(fresh_limit > 0 and age <= fresh_limit)
+        intervals[interval] = {
+            "source": source,
+            "age_seconds": round(age, 1),
+            "entry_fresh": entry_fresh,
+        }
+        degraded = degraded or source.endswith("_FALLBACK")
+    return {
+        "status": "DEGRADED" if degraded else "LIVE",
+        "degraded": degraded,
+        "intervals": intervals,
+    }
+
+
+def _entry_data_fresh(
+    engine_signal: Dict | None,
+    data_quality: Dict,
+) -> tuple[bool, str]:
+    """Require fresh entry candles once, after a V4 candidate is selected."""
+    intervals = dict(data_quality.get("intervals") or {})
+    required = ["15min", "1h", "4h"]
+    entry_mode = str((engine_signal or {}).get("entry_mode", "")).upper()
+    if "M5" in entry_mode:
+        required.append("5min")
+
+    stale = [
+        interval
+        for interval in required
+        if not bool((intervals.get(interval) or {}).get("entry_fresh"))
+    ]
+    if stale:
+        return False, "STALE_ENTRY_DATA:" + ",".join(stale)
+    return True, "ENTRY_DATA_FRESH"
 
 
 def fetch_multi_tf(symbol: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -2525,6 +2776,15 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
             )
 
         df_4h, df_1h, df_15m = fetch_multi_tf(symbol)
+        df_5m = fetch_management_m5(symbol)
+        data_quality = _market_data_quality(
+            {
+                "4h": df_4h,
+                "1h": df_1h,
+                "15min": df_15m,
+                "5min": df_5m,
+            }
+        )
 
         scanner = ScenarioScanner()
         blueprint = scanner.scan(df_4h, df_1h, df_15m, symbol=public_symbol)
@@ -2552,7 +2812,6 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
         # v12 scanner/blueprint stays intact, but proven engine_v4 BUY/SELL baseline
         # becomes the actual trade source when it produces confirmed levels.
         engine_v4_diagnostics: Dict = {}
-        df_5m = fetch_management_m5(symbol)
         engine_v4_signal = _run_engine_v4_baseline(
             df_15m,
             public_symbol,
@@ -2561,10 +2820,26 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
             df_5m=df_5m,
             df_1h=df_1h,
         )
+        if (
+            engine_v4_signal
+            and str(engine_v4_signal.get("status", "")).upper() == SIGNAL
+        ):
+            entry_fresh, freshness_reason = _entry_data_fresh(
+                engine_v4_signal,
+                data_quality,
+            )
+            if not entry_fresh:
+                engine_v4_signal = {
+                    **engine_v4_signal,
+                    "status": BLOCKED,
+                    "reason": freshness_reason,
+                }
+                engine_v4_diagnostics["data_freshness_block"] = freshness_reason
         signal = _apply_engine_v4_signal(signal, engine_v4_signal)
         # Read-only owner observability. This snapshot can explain a PRZ touch
         # that is still waiting for HA/PA/VSA, but can never create an EA OPEN.
         signal["engine_v4_diagnostics"] = engine_v4_diagnostics
+        signal["market_data_quality"] = data_quality
         ea = build_ea_payload(public_symbol, signal)
         ea = _attach_execution_lifecycle(
             data_symbol=symbol,
@@ -2574,19 +2849,32 @@ def run_pipeline(symbol: str = SYMBOL_DEFAULT, public_symbol: str = PUBLIC_SYMBO
         )
         return build_api_signal_response(public_symbol, signal, ea)
     except Exception as exc:
+        error_code = _safe_pipeline_error_code(exc)
+        print(
+            "AlphaBuffalo pipeline error | "
+            f"symbol={public_symbol} code={error_code}",
+            flush=True,
+        )
         error_signal = {
             "status": ERROR,
             "direction": None,
-            "reason": f"{type(exc).__name__}: {exc}",
+            "reason": error_code,
             "decision": {
                 "action": "NONE",
                 "confidence": 0.0,
                 "score": 0,
-                "reason": f"PIPELINE_ERROR:{type(exc).__name__}",
+                "reason": f"PIPELINE_ERROR:{error_code}",
                 "grade": "ERROR",
+                "error_code": error_code,
             },
             "gates": {"blueprint_valid": False, "session": ""},
             "blueprint": {"is_valid": False},
+            "market_data_quality": {
+                "status": "ERROR",
+                "degraded": True,
+                "error_code": error_code,
+                "intervals": {},
+            },
         }
         ea = build_ea_payload(public_symbol, error_signal)
         return build_api_signal_response(public_symbol, error_signal, ea)
@@ -2610,6 +2898,21 @@ def _publish_python_entry_command(payload: Dict) -> Dict:
 
     ea = dict(payload.get("ea") or {})
     if ea.get("action") != "OPEN" or ea.get("execution_state") != "READY":
+        signal = dict(payload.get("signal") or {})
+        decision = dict(signal.get("decision") or {})
+        if str(decision.get("grade", "")).upper() == "ERROR":
+            error_code = (
+                decision.get("error_code")
+                or signal.get("reason")
+                or "UNKNOWN_PIPELINE_ERROR"
+            )
+            return {
+                "action": "HOLD",
+                "reason": f"PIPELINE_ERROR:{error_code}",
+            }
+        signal_reason = str(signal.get("reason") or "")
+        if signal_reason.startswith("STALE_ENTRY_DATA:"):
+            return {"action": "HOLD", "reason": signal_reason}
         return {"action": "HOLD", "reason": "NO_READY_PYTHON_SIGNAL"}
 
     command_payload = {
@@ -2757,10 +3060,21 @@ def root():
 
 @app.get("/health")
 def health():
+    latest = _get_latest_signal()
+    signal = dict(latest.get("signal") or {})
+    decision = dict(signal.get("decision") or {})
+    grade = str(decision.get("grade") or "STARTING")
+    error_code = (
+        decision.get("error_code")
+        if grade.upper() == "ERROR"
+        else None
+    )
     return {
         "status": "alive",
         "version": "v12-core",
         "signal_source": SIGNAL_SOURCE,
+        "pipeline_grade": grade,
+        "pipeline_error": error_code,
         "timestamp": time.time(),
     }
 
