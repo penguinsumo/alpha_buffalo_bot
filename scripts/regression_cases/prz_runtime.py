@@ -623,9 +623,13 @@ def test_v4_pattern_comparison_routes_only_to_owner() -> None:
                     "recent_kivanc_state": "BUY_ZONE_ARMED",
                     "missing_buy": ["WAIT_HA_OR_PINBAR_OR_M5_SNIPER"],
                     "latest": {
+                        "Pine_PRZ_Support_Low": 4025.0,
+                        "Pine_PRZ_Support_High": 4045.0,
                         "Fib_0618": 4048.0,
+                        "Fib_072": 4042.0,
                         "Fib_0786": 4038.0,
                         "Fib_0886": 4029.0,
+                        "Fib_100": 4018.0,
                     },
                 },
                 "blueprint": {
@@ -669,6 +673,15 @@ def test_v4_pattern_comparison_routes_only_to_owner() -> None:
         assert_true(
             "ARMED; รอ HA / Pinbar break / M5 Sniper" in message,
             "armed context cannot be mistaken for an unqualified setup",
+        )
+        assert_true(
+            "Entry watch: 4,042.00 | K 0.720 | PRZ 4,025.00-4,045.00 | WAIT CF"
+            in message,
+            "owner sees the nearest Kivanc level inside the active PRZ",
+        )
+        assert_true(
+            "0.618 4,048.00" in message and "1.000 4,018.00" in message,
+            "owner sees labelled Kivanc levels instead of anonymous prices",
         )
         assert_true("EA: HOLD" in message, "private context cannot claim execution")
     finally:

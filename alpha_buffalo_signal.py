@@ -1601,12 +1601,98 @@ def _owner_v4_context(payload: Dict) -> Dict:
     latest = diagnostic.get("latest", {}) or {}
     market_map = blueprint.get("market_close_map", {}) or {}
     map_kivanc = market_map.get("kivanc", {}) or {}
-    kivanc_levels = [
-        _safe_float(map_kivanc.get("fibo_0618") or latest.get("Fib_0618")),
-        _safe_float(map_kivanc.get("fibo_0786") or latest.get("Fib_0786")),
-        _safe_float(map_kivanc.get("fibo_0886") or latest.get("Fib_0886")),
+    raw_kivanc_points = [
+        (
+            "0.618",
+            _safe_float(
+                map_kivanc.get("fibo_0618") or latest.get("Fib_0618")
+            ),
+        ),
+        (
+            "0.720",
+            _safe_float(
+                map_kivanc.get("fibo_072") or latest.get("Fib_072")
+            ),
+        ),
+        (
+            "0.786",
+            _safe_float(
+                map_kivanc.get("fibo_0786") or latest.get("Fib_0786")
+            ),
+        ),
+        (
+            "0.886",
+            _safe_float(
+                map_kivanc.get("fibo_0886") or latest.get("Fib_0886")
+            ),
+        ),
+        (
+            "1.000",
+            _safe_float(
+                map_kivanc.get("fibo_100") or latest.get("Fib_100")
+            ),
+        ),
     ]
-    kivanc_levels = [value for value in kivanc_levels if value > 0]
+    kivanc_points = []
+    seen_kivanc_values = set()
+    for label, value in raw_kivanc_points:
+        rounded_value = round(value, 6)
+        if value <= 0 or rounded_value in seen_kivanc_values:
+            continue
+        seen_kivanc_values.add(rounded_value)
+        kivanc_points.append({"label": label, "value": value})
+    kivanc_levels = [point["value"] for point in kivanc_points]
+
+    if direction == "BUY":
+        entry_zone_low = _safe_float(
+            latest.get("Pine_PRZ_Support_Low") or h1_low
+        )
+        entry_zone_high = _safe_float(
+            latest.get("Pine_PRZ_Support_High") or h1_high
+        )
+    elif direction == "SELL":
+        entry_zone_low = _safe_float(
+            latest.get("Pine_PRZ_Resistance_Low") or h1_low
+        )
+        entry_zone_high = _safe_float(
+            latest.get("Pine_PRZ_Resistance_High") or h1_high
+        )
+    else:
+        entry_zone_low = 0.0
+        entry_zone_high = 0.0
+
+    if entry_zone_low > 0 and entry_zone_high > 0:
+        entry_zone_low, entry_zone_high = sorted(
+            (entry_zone_low, entry_zone_high)
+        )
+    else:
+        entry_zone_low = 0.0
+        entry_zone_high = 0.0
+
+    current_price = _safe_float(
+        diagnostic.get("current_price")
+        or h1_price
+        or blueprint.get("current_price")
+    )
+    entry_watch_candidates = [
+        point
+        for point in kivanc_points
+        if (
+            entry_zone_low > 0
+            and entry_zone_high > 0
+            and entry_zone_low <= point["value"] <= entry_zone_high
+        )
+    ]
+    entry_watch = (
+        min(
+            entry_watch_candidates,
+            key=lambda point: abs(point["value"] - current_price),
+        )
+        if entry_watch_candidates and current_price > 0
+        else entry_watch_candidates[0]
+        if entry_watch_candidates
+        else None
+    )
 
     pattern = str(
         harmonic.get("selected_pattern")
@@ -1650,11 +1736,7 @@ def _owner_v4_context(payload: Dict) -> Dict:
     return {
         "eligible": eligible,
         "direction": direction,
-        "price": _safe_float(
-            diagnostic.get("current_price")
-            or h1_price
-            or blueprint.get("current_price")
-        ),
+        "price": current_price,
         "locations": locations,
         "h1_zone_low": h1_low,
         "h1_zone_high": h1_high,
@@ -1689,6 +1771,18 @@ def _owner_v4_context(payload: Dict) -> Dict:
         ),
         "kivanc_state": kivanc_state,
         "kivanc_levels": kivanc_levels,
+        "kivanc_points": kivanc_points,
+        "entry_zone_low": entry_zone_low,
+        "entry_zone_high": entry_zone_high,
+        "entry_watch_level": (
+            _safe_float(entry_watch.get("value")) if entry_watch else 0.0
+        ),
+        "entry_watch_ratio": (
+            str(entry_watch.get("label") or "") if entry_watch else ""
+        ),
+        "entry_watch_status": (
+            "WAIT_CF" if entry_watch else "NO_KIVANC_PRZ_OVERLAP"
+        ),
         "buy_sniper_armed": buy_sniper_armed,
         "sell_sniper_armed": sell_sniper_armed,
         "sniper_move": _safe_float(
@@ -1746,6 +1840,7 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
     locations = context.get("locations") or ["WAIT LOCATION"]
     missing = context.get("missing") or []
     levels = context.get("kivanc_levels") or []
+    points = context.get("kivanc_points") or []
     tunnel_flags = []
     if context.get("buy_tunnel_sweep"):
         tunnel_flags.append("BUY SWEEP")
@@ -1774,10 +1869,28 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
         or "NO MATCHING PATTERN"
     )
     kivanc_level_text = (
-        " / ".join(f"{value:,.2f}" for value in levels)
+        " / ".join(
+            f"{_clean_text(point.get('label'))} "
+            f"{_safe_float(point.get('value')):,.2f}"
+            for point in points
+        )
+        if points
+        else " / ".join(f"{value:,.2f}" for value in levels)
         if levels
         else "NO NEWDAY LEVEL"
     )
+    entry_watch_level = _safe_float(context.get("entry_watch_level"))
+    entry_zone_low = _safe_float(context.get("entry_zone_low"))
+    entry_zone_high = _safe_float(context.get("entry_zone_high"))
+    if entry_watch_level > 0:
+        entry_watch_text = (
+            f"{entry_watch_level:,.2f}"
+            f" | K {_clean_text(context.get('entry_watch_ratio'))}"
+            f" | PRZ {entry_zone_low:,.2f}-{entry_zone_high:,.2f}"
+            " | WAIT CF"
+        )
+    else:
+        entry_watch_text = "NO KIVANC / PRZ OVERLAP"
     sniper_side = (
         "BUY ARMED"
         if context.get("buy_sniper_armed")
@@ -1838,6 +1951,7 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
         f"🚇 Tunnel: {_clean_text(context.get('tunnel_state'))}"
         + (f" | {_clean_text(', '.join(tunnel_flags))}" if tunnel_flags else ""),
         f"🟡 Kivanc: {_clean_text(context.get('kivanc_state'))} | {kivanc_level_text}",
+        f"🎯 Entry watch: {_clean_text(entry_watch_text)}",
         f"🔷 Harmonic: {_clean_text(harmonic_text)}",
         f"📐 Pattern compare: {_clean_text(candidate_text)}",
         f"⚡ Trigger: {_clean_text(context.get('trigger_source') or 'NONE')}",
