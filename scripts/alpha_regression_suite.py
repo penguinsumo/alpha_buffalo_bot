@@ -76,6 +76,8 @@ TESTS = [
     test_expired_persisted_tf_cache_is_never_used_for_entry,
     test_entry_freshness_requires_m5_only_for_sniper_mode,
     test_python_queue_reports_pipeline_error_instead_of_generic_hold,
+    test_daily_limit_cooldown_ends_at_next_utc_midnight,
+    test_daily_limit_circuit_breaker_skips_duplicate_network_calls,
 ]
 
 def main() -> int:
