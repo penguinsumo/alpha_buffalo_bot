@@ -114,13 +114,7 @@ _SIGNAL_LOOP_STARTED = False
 
 SYMBOL_DEFAULT = os.getenv("ALPHA_SYMBOL", "XAU/USD")
 PUBLIC_SYMBOL_DEFAULT = os.getenv("ALPHA_PUBLIC_SYMBOL", "XAUUSD")
-TWELVEDATA_API_KEY = (
-    os.getenv("TWELVEDATA_API_KEY")
-    or os.getenv("TWELVE_API_KEY")
-    or os.getenv("TWELVE_DATA_API_KEY")
-    or os.getenv("TWELVEDATA_KEY")
-    or ""
-)
+TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
 API_LICENSE_KEY = os.getenv("ALPHA_API_KEY", os.getenv("LICENSE_KEY", "DEMO123"))
 SIGNAL_SOURCE = os.getenv("ALPHA_SIGNAL_SOURCE", "PYTHON").strip().upper()
 if SIGNAL_SOURCE not in {"PYTHON", "PINE", "HYBRID"}:
