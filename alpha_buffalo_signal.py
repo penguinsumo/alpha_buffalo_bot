@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import os
 import re
 import time
@@ -106,6 +107,9 @@ TF_ENTRY_MAX_AGE_SECONDS = {
 }
 TF_DATA_CACHE: dict = {}
 TF_CACHE_LOCK = threading.Lock()
+MARKET_DATA_COOLDOWN_LOCK = threading.Lock()
+MARKET_DATA_COOLDOWN_UNTIL = 0.0
+MARKET_DATA_COOLDOWN_REASON = ""
 _SIGNAL_LOOP_STARTED = False
 
 SYMBOL_DEFAULT = os.getenv("ALPHA_SYMBOL", "XAU/USD")
@@ -363,7 +367,17 @@ def fetch_twelvedata(symbol: str, interval: str, outputsize: int = 200) -> pd.Da
     response = requests.get(url, params=params, timeout=15)
 
     if response.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"DATA_FETCH_HTTP_{response.status_code}")
+        detail = f"DATA_FETCH_HTTP_{response.status_code}"
+        if response.status_code == 429:
+            try:
+                provider_message = str(response.json().get("message", "")).lower()
+            except (TypeError, ValueError):
+                provider_message = ""
+            if "for the day" in provider_message or "daily" in provider_message:
+                detail = "DATA_FETCH_DAILY_LIMIT"
+            elif "minute" in provider_message:
+                detail = "DATA_FETCH_MINUTE_LIMIT"
+        raise HTTPException(status_code=502, detail=detail)
 
     data = response.json()
 
@@ -523,6 +537,42 @@ def _tf_epoch_bucket(interval: str, timestamp: float) -> int:
     return int(float(timestamp) // cadence)
 
 
+def _register_market_data_cooldown(error_code: str, now: float | None = None) -> None:
+    """Back off provider requests without delaying recovery after quota reset."""
+    global MARKET_DATA_COOLDOWN_UNTIL, MARKET_DATA_COOLDOWN_REASON
+    observed_at = float(now if now is not None else time.time())
+    code = str(error_code or "").upper()
+    if code == "DATA_FETCH_DAILY_LIMIT":
+        utc_now = datetime.fromtimestamp(observed_at, tz=timezone.utc)
+        next_day = (utc_now + timedelta(days=1)).date()
+        retry_at = datetime.combine(
+            next_day,
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ).timestamp() + 5.0
+    elif code in {"DATA_FETCH_MINUTE_LIMIT", "DATA_FETCH_HTTP_429"}:
+        retry_at = (math.floor(observed_at / 60.0) + 1.0) * 60.0 + 2.0
+    else:
+        return
+
+    with MARKET_DATA_COOLDOWN_LOCK:
+        if retry_at >= MARKET_DATA_COOLDOWN_UNTIL:
+            MARKET_DATA_COOLDOWN_UNTIL = retry_at
+            MARKET_DATA_COOLDOWN_REASON = code
+
+
+def _active_market_data_cooldown(now: float | None = None) -> tuple[str, float]:
+    """Return the active provider backoff reason and retry timestamp."""
+    global MARKET_DATA_COOLDOWN_UNTIL, MARKET_DATA_COOLDOWN_REASON
+    observed_at = float(now if now is not None else time.time())
+    with MARKET_DATA_COOLDOWN_LOCK:
+        if MARKET_DATA_COOLDOWN_UNTIL > observed_at:
+            return MARKET_DATA_COOLDOWN_REASON, MARKET_DATA_COOLDOWN_UNTIL
+        MARKET_DATA_COOLDOWN_UNTIL = 0.0
+        MARKET_DATA_COOLDOWN_REASON = ""
+    return "", 0.0
+
+
 def _fetch_cached_tf(symbol: str, interval: str, outputsize: int = 200) -> pd.DataFrame:
     ttl = TF_FETCH_TTL_SECONDS.get(interval, 180)
     max_stale = TF_MAX_STALE_SECONDS.get(interval, max(ttl * 3, ttl))
@@ -557,9 +607,16 @@ def _fetch_cached_tf(symbol: str, interval: str, outputsize: int = 200) -> pd.Da
                 )
 
     try:
+        cooldown_reason, cooldown_until = _active_market_data_cooldown(now)
+        if cooldown_reason:
+            raise HTTPException(
+                status_code=503,
+                detail=f"{cooldown_reason}_COOLDOWN_UNTIL_{int(cooldown_until)}",
+            )
         df = fetch_twelvedata(symbol, interval, outputsize=outputsize)
     except Exception as exc:
         error_code = _safe_pipeline_error_code(exc)
+        _register_market_data_cooldown(error_code, now=now)
         if stale_df is not None and stale_age is not None and stale_age <= max_stale:
             print(
                 "AlphaBuffalo TF cache fallback | "
@@ -3069,12 +3126,19 @@ def health():
         if grade.upper() == "ERROR"
         else None
     )
+    cooldown_reason, cooldown_until = _active_market_data_cooldown()
     return {
         "status": "alive",
         "version": "v12-core",
         "signal_source": SIGNAL_SOURCE,
         "pipeline_grade": grade,
         "pipeline_error": error_code,
+        "market_data_cooldown": cooldown_reason or None,
+        "market_data_retry_at": (
+            datetime.fromtimestamp(cooldown_until, tz=timezone.utc).isoformat()
+            if cooldown_until
+            else None
+        ),
         "timestamp": time.time(),
     }
 
