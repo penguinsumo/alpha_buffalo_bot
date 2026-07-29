@@ -675,13 +675,29 @@ def test_v4_pattern_comparison_routes_only_to_owner() -> None:
             "armed context cannot be mistaken for an unqualified setup",
         )
         assert_true(
-            "Entry watch: 4,042.00 | K 0.720 | PRZ 4,025.00-4,045.00 | WAIT CF"
+            "Entry cluster: Level 4,042.00 | PRZ 4,025.00-4,045.00 | WAIT CF"
             in message,
-            "owner sees the nearest Kivanc level inside the active PRZ",
+            "owner sees the selected entry level without exposing its formula",
         )
         assert_true(
-            "0.618 4,048.00" in message and "1.000 4,018.00" in message,
-            "owner sees labelled Kivanc levels instead of anonymous prices",
+            "Level state: BUY ARMED" in message,
+            "owner sees only a neutral level state",
+        )
+        assert_true(
+            all(
+                hidden not in message
+                for hidden in (
+                    "Kivanc",
+                    "KIVANC",
+                    "| K ",
+                    "0.618",
+                    "0.720",
+                    "0.786",
+                    "0.886",
+                    "1.000",
+                )
+            ),
+            "owner Telegram must not expose proprietary level names or ratios",
         )
         assert_true("EA: HOLD" in message, "private context cannot claim execution")
     finally:
