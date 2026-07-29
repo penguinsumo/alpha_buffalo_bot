@@ -12,6 +12,7 @@ from scripts.regression_cases.engine_core import *
 from scripts.regression_cases.lifecycle import *
 from scripts.regression_cases.telegram import *
 from scripts.regression_cases.prz_runtime import *
+from scripts.regression_cases.data_runtime import *
 
 TESTS = [
     test_upper_sell_not_blocked_by_bullish_context,
@@ -69,6 +70,12 @@ TESTS = [
     test_full_scenario_scan_populates_h1_prz_a_and_b,
     test_opposite_bos_cancels_prz_memory_before_ha_flip,
     test_v4_pattern_comparison_routes_only_to_owner,
+    test_tf_cache_defaults_follow_confirmed_candle_cadence,
+    test_tf_cache_refreshes_on_candle_boundary,
+    test_persisted_tf_cache_recovers_bounded_provider_outage,
+    test_expired_persisted_tf_cache_is_never_used_for_entry,
+    test_entry_freshness_requires_m5_only_for_sniper_mode,
+    test_python_queue_reports_pipeline_error_instead_of_generic_hold,
 ]
 
 def main() -> int:
