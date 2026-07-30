@@ -199,6 +199,123 @@ def test_armed_buy_accepts_pinbar_break_but_rejects_forming_m15_ha() -> None:
         "forming M15 HA flip cannot open",
     )
 
+def test_confirmed_h1_green_dot_opens_m15_demand_prz_without_waiting_evidence() -> None:
+    class Blueprint:
+        htf_prz_support_low = 97.5
+        htf_prz_support_high = 101.0
+        htf_prz_resistance_low = 0.0
+        htf_prz_resistance_high = 0.0
+        prz_a_support_low = 97.5
+        prz_a_support_high = 101.0
+        prz_a_resistance_low = 0.0
+        prz_a_resistance_high = 0.0
+        prz_b_support_low = 0.0
+        prz_b_support_high = 0.0
+        prz_b_resistance_low = 0.0
+        prz_b_resistance_high = 0.0
+
+    touch = base_row()
+    touch.update(
+        {
+            "open": 99.5,
+            "high": 101.0,
+            "low": 98.0,
+            "close": 100.0,
+            "Bullish_Pinbar": False,
+            "Near_BB_Lower": False,
+            "VSA_Buy_Wins": False,
+            "Bull_OB": False,
+            "In_Session_Kivanc_Buy_Zone": False,
+            "HA_Bull_Reversal": False,
+            "Zone_Buy_Pinbar_Trigger": False,
+            "V4_Buy_M5_Sniper_Evidence": False,
+            "Deep_Buy_PRZ_Context": False,
+            "Deep_Sell_PRZ_Context": False,
+            "BB_Mid": 105.0,
+            "BB_Upper": 110.0,
+        }
+    )
+    dot_bar = dict(touch)
+    dot_bar.update({"open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0})
+    m15 = frame([touch, dot_bar])
+    m15.index = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2026-07-10 14:45", tz="UTC"),
+            pd.Timestamp("2026-07-10 15:00", tz="UTC"),
+        ]
+    )
+    h1 = pd.DataFrame(
+        [
+            {"open": 98.0, "high": 102.0, "low": 97.0, "close": 101.0},
+            {"open": 101.0, "high": 102.0, "low": 99.0, "close": 100.0},
+        ],
+        index=pd.DatetimeIndex(
+            [
+                pd.Timestamp("2026-07-10 14:00", tz="UTC"),
+                pd.Timestamp("2026-07-10 15:00", tz="UTC"),
+            ]
+        ),
+    )
+
+    result = runtime._overlay_blueprint_prz_memory(
+        m15,
+        Blueprint(),
+        lock_bars=4,
+        df_1h=h1,
+    )
+    assert_equal(
+        int(result["V4_Buy_Evidence_Score"].iloc[-1]),
+        0,
+        "green-dot fast path must not manufacture evidence",
+    )
+    assert_true(
+        bool(result["V4_Buy_H1_Green_Dot"].iloc[-1]),
+        "confirmed bullish H1 candle appears on its M15 close boundary",
+    )
+    assert_true(
+        bool(result["V4_Buy_Green_Dot_Trigger"].iloc[-1]),
+        "closed M15 green dot releases remembered two-layer demand PRZ",
+    )
+    assert_equal(
+        result["V4_Buy_Trigger_Source"].iloc[-1],
+        "M15_PRZ_GREEN_DOT",
+        "green-dot source remains explicit",
+    )
+    candidate = BuySignalEngine().evaluate(result, 1, NY_SESSION, ALLOWED)
+    assert_true(candidate is not None, "green-dot fast path reaches BUY engine")
+    assert_equal(
+        candidate["entry_mode"],
+        "V4_BUY_M15_PRZ_GREEN_DOT",
+        "EA can identify the M15 green-dot entry",
+    )
+
+    forming_m15 = m15.tail(1).copy()
+    forming_time = pd.Timestamp.now(tz="UTC").floor("15min") + pd.Timedelta(hours=1)
+    forming_m15.index = pd.DatetimeIndex([forming_time])
+    forming_h1 = pd.DataFrame(
+        [
+            {"open": 98.0, "high": 102.0, "low": 97.0, "close": 101.0},
+            {"open": 101.0, "high": 102.0, "low": 99.0, "close": 100.0},
+        ],
+        index=pd.DatetimeIndex(
+            [forming_time - pd.Timedelta(hours=1), forming_time]
+        ),
+    )
+    forming_result = runtime._overlay_blueprint_prz_memory(
+        forming_m15,
+        Blueprint(),
+        lock_bars=4,
+        df_1h=forming_h1,
+    )
+    assert_true(
+        bool(forming_result["V4_Buy_H1_Green_Dot"].iloc[-1]),
+        "confirmed H1 permission may be visible while M15 is forming",
+    )
+    assert_true(
+        not bool(forming_result["V4_Buy_Green_Dot_Trigger"].iloc[-1]),
+        "forming M15 candle cannot send an order",
+    )
+
 def test_m5_sniper_sweep_requires_closed_kivanc_bb_prz_reclaim_and_mirrors() -> None:
     class BuyBlueprint:
         htf_prz_support_low = 88.0
@@ -403,6 +520,125 @@ def test_m5_sniper_sweep_requires_closed_kivanc_bb_prz_reclaim_and_mirrors() -> 
         sell_candidate["entry_mode"],
         "V4_SELL_M5_SNIPER_RECLAIM",
         "SELL order retains its sniper source",
+    )
+
+def test_m5_two_point_reclaim_confirms_multibar_kivanc_reaction() -> None:
+    class Blueprint:
+        htf_prz_support_low = 88.0
+        htf_prz_support_high = 92.0
+        htf_prz_resistance_low = 0.0
+        htf_prz_resistance_high = 0.0
+        prz_a_support_low = 88.0
+        prz_a_support_high = 92.0
+        prz_a_resistance_low = 0.0
+        prz_a_resistance_high = 0.0
+        prz_b_support_low = 0.0
+        prz_b_support_high = 0.0
+        prz_b_resistance_low = 0.0
+        prz_b_resistance_high = 0.0
+        kivanc_boundary_low = 0.0
+        kivanc_boundary_high = 0.0
+        kivanc_fibo_0618 = 0.0
+        kivanc_fibo_0786 = 0.0
+        kivanc_fibo_0886 = 0.0
+
+    rows = []
+    for _ in range(3):
+        row = base_row()
+        row.update(
+            {
+                "open": 99.0,
+                "high": 101.0,
+                "low": 89.0,
+                "close": 96.0,
+                "BB_Lower": 91.0,
+                "BB_Upper": 110.0,
+                "Fib_0786": 90.0,
+                "Fib_0618": 93.0,
+                "Deep_Buy_PRZ_Context": False,
+                "Deep_Sell_PRZ_Context": False,
+                "Bull_Sweep": False,
+                "Bear_Sweep": False,
+                "Bullish_Pinbar": False,
+                "Bearish_Pinbar": False,
+                "Deep_Buy_Reclaim_Trigger": False,
+                "Deep_Sell_Reclaim_Trigger": False,
+                "Zone_Buy_Pinbar_Trigger": False,
+                "Zone_Sell_Pinbar_Trigger": False,
+                "In_Session_Kivanc_Buy_Zone": False,
+                "In_Session_Kivanc_Sell_Zone": False,
+                "Near_BB_Lower": False,
+                "Near_BB_Upper": False,
+                "Micro_BOS_Down": False,
+                "V4_Buy_Setup": False,
+                "V4_Sell_Setup": False,
+                "HA_Bull_Reversal": False,
+                "HA_Bear_Reversal": False,
+            }
+        )
+        rows.append(row)
+    m15 = frame(rows)
+
+    m5 = pd.DataFrame(
+        [
+            {"open": 100.0, "high": 101.0, "low": 98.0, "close": 99.0},
+            {"open": 97.0, "high": 99.0, "low": 95.0, "close": 96.0},
+            {"open": 92.0, "high": 96.0, "low": 91.5, "close": 93.0},
+            # First closed green reaction at Kivanc/BB. Range is below $10.
+            {"open": 91.0, "high": 95.0, "low": 89.8, "close": 93.5},
+            # Second closed green reaction confirms the same level. Its own
+            # range is below $10, but the bounded M5 excursion is $11.6.
+            {"open": 91.5, "high": 96.0, "low": 89.4, "close": 94.0},
+            # Provider-forming row is ignored.
+            {"open": 94.0, "high": 95.0, "low": 93.0, "close": 94.5},
+        ],
+        index=pd.date_range("2026-07-10 15:15", periods=6, freq="5min", tz="UTC"),
+    )
+
+    result = runtime._overlay_blueprint_prz_memory(
+        m15,
+        Blueprint(),
+        lock_bars=4,
+        df_5m=m5,
+        df_1h=None,
+    )
+    assert_true(
+        bool(result["V4_Buy_M5_Sniper_Evidence"].iloc[-1]),
+        "two closed M5 reactions may confirm a distributed decline",
+    )
+    assert_equal(
+        result["V4_Buy_M5_Sniper_Mode"].iloc[-1],
+        "TWO_POINT_RECLAIM",
+        "owner trace identifies the two-point path",
+    )
+    assert_equal(
+        int(result["V4_Buy_M5_Sniper_Point_Count"].iloc[-1]),
+        2,
+        "second green reaction is the executable confirmation",
+    )
+    assert_equal(
+        result["V4_Buy_Trigger_Source"].iloc[-1],
+        "M5_TWO_POINT_RECLAIM",
+        "entry source must not be confused with a one-candle spike",
+    )
+    candidate = BuySignalEngine().evaluate(result, 2, NY_SESSION, ALLOWED)
+    assert_true(candidate is not None, "two-point BUY reaches the engine")
+    assert_equal(
+        candidate["entry_mode"],
+        "V4_BUY_M5_TWO_POINT_RECLAIM",
+        "EA payload keeps the two-point M5 source",
+    )
+
+    forming_result = runtime._overlay_blueprint_prz_memory(
+        m15,
+        Blueprint(),
+        lock_bars=4,
+        df_5m=m5.iloc[:5].copy(),
+        df_1h=None,
+    )
+    assert_true(
+        not bool(forming_result["V4_Buy_M5_Sniper_Evidence"].any()),
+        "a forming second point cannot release the BUY",
     )
 
 def test_m5_sniper_ignores_forming_provider_candle() -> None:

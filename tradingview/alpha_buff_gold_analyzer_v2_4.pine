@@ -1,7 +1,7 @@
 //@version=6
 indicator("AlphaBuff Gold Analyzer v2.4.4 - Decision Stack", overlay=true, max_labels_count=300, max_boxes_count=30, max_lines_count=50)
 
-// Execution is designed to run on a 5-minute chart. H4 supplies PRZ/context,
+// Execution is designed to run on a 5- or 15-minute chart. H4 supplies PRZ/context,
 // H1 supplies the frozen tunnel geometry, and closed M15 supplies the sweep and
 // HA trigger. Every higher-timeframe decision uses the last confirmed source
 // bar (offset [1] + lookahead_on).
@@ -62,6 +62,8 @@ entryMaxDistanceAtr = input.float(0.75, "Maximum HA confirmation distance from P
      tooltip="Cancels an armed setup when the second HA candle forms in the middle between demand and supply.")
 entryArmTtl    = input.int(8, "PRZ state TTL (15m bars)", minval=2, maxval=12, group=groupTrigger,
      tooltip="Keeps GC-RVOL wall evidence and confirmed PA alive while price remains in the PRZ, unless an opposite BOS invalidates the wall.")
+enableM15GreenDotFastEntry = input.bool(true, "Allow confirmed H1 green dot BUY from M15 demand PRZ", group=groupTrigger,
+     tooltip="A confirmed regular H1 bullish candle printed as the green M15 dot may open BUY from a two-level demand PRZ without waiting for HA #2. SL/targets and market/risk checks still apply.")
 tunnelTf = input.timeframe("60", "Parallel-channel anchor TF", group=groupTrigger,
      tooltip="Default H1. H4 remains PRZ/context; the channel is frozen between confirmed three-bar pivots, while only closed M15 bars may sweep or trigger it.")
 tunnelSweepToleranceAtr = input.float(0.10, "Tunnel touch/sweep tolerance (ATR)", minval=0.0, step=0.05, group=groupTrigger)
@@ -691,6 +693,8 @@ var int buyTunnelAnchorVersion = na
 var int sellTunnelAnchorVersion = na
 var bool buyEntryFromTunnel = false
 var bool sellEntryFromTunnel = false
+var bool buyGreenDotLocationArmed = false
+var int buyGreenDotLocationAge = 0
 var bool previousAsia = isAsia
 
 var int tradeDirection = 0
@@ -718,6 +722,8 @@ if isAsia != previousAsia
     sellEntryArmed := false
     buyEntryArmAge := 0
     sellEntryArmAge := 0
+    buyGreenDotLocationArmed := false
+    buyGreenDotLocationAge := 0
     buyTunnelSweepArmed := false
     sellTunnelSweepArmed := false
     buyTunnelSweepAge := 0
@@ -877,7 +883,17 @@ ha15TwoBearLower = ha15Close < ha15Open and ha15PrevClose < ha15PrevOpen and ha1
 
 bool buyEntryConfirmed = false
 bool sellEntryConfirmed = false
+bool buyGreenDotEntryTrigger = false
 if barstate.isconfirmed and newTriggerBar
+    if buyGreenDotLocationArmed
+        buyGreenDotLocationAge += 1
+        if buyGreenDotLocationAge > entryArmTtl
+            buyGreenDotLocationArmed := false
+            buyGreenDotLocationAge := 0
+    if buyClusterOk and buyClusterTouch and buyDirectionalZone
+        buyGreenDotLocationArmed := true
+        buyGreenDotLocationAge := 0
+
     if buyGcRvolWallArmed
         buyGcRvolWallAge += 1
         if buyGcRvolWallAge > entryArmTtl or not buyEvidenceLocationOk
@@ -900,6 +916,8 @@ if barstate.isconfirmed and newTriggerBar
             sellPaZoneAge := 0
 
     if buyPrzBosThrough
+        buyGreenDotLocationArmed := false
+        buyGreenDotLocationAge := 0
         buyGcRvolWallArmed := false
         buyGcRvolWallAge := 0
         buyPaZoneArmed := false
@@ -925,6 +943,9 @@ if barstate.isconfirmed and newTriggerBar
         sellTunnelSweepLevel := na
         sellTunnelSweepHigh := na
         sellTunnelAnchorVersion := na
+
+    buyGreenDotDistanceOk = buyGreenDotLocationArmed and triggerClose >= buyClusterLo - triggerAtr * reclaimAtr and triggerClose <= buyClusterHi + triggerAtr * tunnelEntryMaxDistanceAtr
+    buyGreenDotEntryTrigger := enableM15GreenDotFastEntry and newEntryConfirmBar and buyH1NormalCandle and buyGreenDotDistanceOk and marketOpen and timeframeGate and not buyPrzBosThrough
 
     if buyGcRvolWallSetup
         buyGcRvolWallArmed := true
@@ -953,12 +974,14 @@ if barstate.isconfirmed and newTriggerBar
             sellEntryFromTunnel := false
 
     // Confirmation uses a location that was armed on an earlier confirmed bar.
-    buyEntryConfirmed := buyEntryArmed and ha15TwoBullHigher and buyConfirmationPermission
+    buyEntryConfirmed := buyGreenDotEntryTrigger or (buyEntryArmed and ha15TwoBullHigher and buyConfirmationPermission)
     sellEntryConfirmed := sellEntryArmed and ha15TwoBearLower and sellConfirmationPermission
 
     if buyEntryConfirmed
         buyEntryArmed := false
         buyEntryArmAge := 0
+        buyGreenDotLocationArmed := false
+        buyGreenDotLocationAge := 0
     else if buyArmSetup
         buyEntryArmed := true
         buyEntryArmAge := 0
@@ -1031,7 +1054,7 @@ if barstate.isconfirmed and newTriggerBar and tradeDirection == 0 and cooldown =
         runnerActive := false
         entryBar := bar_index
         if marketOpen
-            buyEntryReason = buyEntryFromTunnel ? "TUNNEL_SWEEP_GC_RVOL_WALL_PA_HA15_BUY" : "PRZ_GC_RVOL_WALL_PA_HA15_BUY"
+            buyEntryReason = buyGreenDotEntryTrigger ? "PRZ_H1_GREEN_DOT_M15_BUY" : buyEntryFromTunnel ? "TUNNEL_SWEEP_GC_RVOL_WALL_PA_HA15_BUY" : "PRZ_GC_RVOL_WALL_PA_HA15_BUY"
             buyTunnelContext = f_tunnel_context_json(tunnelDirectionText, tunnelTf, buyEntryFromTunnel ? "LOWER" : "NONE", tunnelUpper, tunnelLower, triggerAtr * tunnelSweepToleranceAtr, tunnelMainTime1, tunnelMainPrice1, tunnelMainTime2, tunnelMainPrice2, tunnelParallelTime, tunnelParallelPrice, tunnelAnchorVersion)
             f_send_signal("OPEN", "BUY", buyEntryReason, tradeEntry, noExitPrice, tradeInitialStop, tradeBeTrigger, tradeTp2, tradeScore, tradeSignalId, tradeTargetSource, buyTunnelContext)
     else if sellEntryConfirmed and not buyEntryConfirmed
@@ -1455,7 +1478,7 @@ plotshape(recentEvidenceWindow and showH1SourceDots and newEntryConfirmBar and s
 var table dashboard = table.new(position.bottom_left, 2, 16, bgcolor=color.new(color.rgb(25, 25, 25), 5), border_width=1)
 if showDashboard and barstate.islast
     contextBias = buyContextOk and not sellContextOk ? "BUY" : sellContextOk and not buyContextOk ? "SELL" : "NEUTRAL"
-    triggerText = buyEntryConfirmed ? "BUY HA15 #2" : sellEntryConfirmed ? "SELL HA15 #2" : buyEntryArmed ? "BUY WAIT #2" : sellEntryArmed ? "SELL WAIT #2" : buyTunnelSweepArmed ? "BUY TUNNEL ARMED" : sellTunnelSweepArmed ? "SELL TUNNEL ARMED" : "WAIT LOCATION"
+    triggerText = buyGreenDotEntryTrigger ? "BUY GREEN DOT" : buyEntryConfirmed ? "BUY HA15 #2" : sellEntryConfirmed ? "SELL HA15 #2" : buyEntryArmed ? "BUY WAIT #2" : sellEntryArmed ? "SELL WAIT #2" : buyTunnelSweepArmed ? "BUY TUNNEL ARMED" : sellTunnelSweepArmed ? "SELL TUNNEL ARMED" : "WAIT LOCATION"
     h1EntryText = buyH1NormalCandle and sellH1HeikinAshi ? "BUY CANDLE + SELL HA" : buyH1NormalCandle ? "BUY CANDLE" : sellH1HeikinAshi ? "SELL HA" : "WAIT"
     gcPermissionText = gcBuyRvolWall ? "BUY SUPPORT" : gcSellRvolWall ? "SELL RESIST" : gcHasData ? "NO LEVEL" : "NO DATA"
     // Location is not direction. Demand/Supply may be a target or a blocked

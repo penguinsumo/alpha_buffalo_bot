@@ -6,6 +6,9 @@ Entry confirmation belongs to the V4 setup:
     PRZ layers >= 2 + evidence >= 3
         -> closed M15 HA flip OR pinbar break OR closed M5 sniper reclaim
 
+    A confirmed H1 regular-candle green dot projected onto a closed M15 bar may
+    use the two-layer demand-PRZ fast path without waiting for evidence >= 3.
+
 This gate therefore owns only market/risk permission and an optional research
 harmonic restriction.  It must not repeat an HA check or restrict BUY to a
 small list of historical "profit hours" after a valid closed-bar trigger has

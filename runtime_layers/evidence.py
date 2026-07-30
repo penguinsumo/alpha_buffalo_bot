@@ -28,11 +28,13 @@ def _m5_sniper_sweep_overlay(
     Add confirmed M5 wick-sweep evidence to the matching M15 setup bar.
 
     A sniper event is a confirmed entry trigger once the PRZ setup is ARMED:
-    - completed M5 range >= configured XAU dollar threshold;
-    - prior three-bar extreme is swept and reclaimed;
-    - the wick overlaps a confirmed Kivanc level;
-    - the same wick touches/reclaims M15 or H1 Bollinger edge;
-    - the wick overlaps a confirmed M15/H1/PRZ-A/PRZ-B location.
+    - single-sweep path: one completed M5 range reaches the configured XAU
+      threshold and sweeps/reclaims the prior three-bar extreme; or
+    - two-point path: two completed M5 bullish reactions confirm the same
+      important level while the multi-bar excursion reaches the threshold;
+    - the reaction overlaps a confirmed Kivanc level;
+    - M15 or H1 Bollinger lower confluence is present;
+    - the reaction overlaps a confirmed M15/H1/PRZ-A/PRZ-B location.
 
     The final M5 and H1 provider rows are excluded because they may still be
     forming. M15/H1 reference values are shifted so the sweep cannot read a
@@ -50,6 +52,10 @@ def _m5_sniper_sweep_overlay(
         "V4_Sell_M5_Sniper_BB": 0.0,
         "V4_Buy_M5_Sniper_BB_TF": "NONE",
         "V4_Sell_M5_Sniper_BB_TF": "NONE",
+        "V4_Buy_M5_Sniper_Mode": "NONE",
+        "V4_Sell_M5_Sniper_Mode": "NONE",
+        "V4_Buy_M5_Sniper_Point_Count": 0,
+        "V4_Sell_M5_Sniper_Point_Count": 0,
         "V4_Buy_M5_Sniper_Time": "",
         "V4_Sell_M5_Sniper_Time": "",
     }
@@ -75,6 +81,10 @@ def _m5_sniper_sweep_overlay(
     sweep_lookback = max(
         1,
         int(os.getenv("ENGINE_V4_SNIPER_SWEEP_LOOKBACK", "3")),
+    )
+    two_point_window = max(
+        2,
+        int(os.getenv("ENGINE_V4_SNIPER_TWO_POINT_WINDOW", "6")),
     )
 
     m15_index = out.index
@@ -149,6 +159,10 @@ def _m5_sniper_sweep_overlay(
         )
     ]
 
+    # A two-point confirmation may span M15 boundaries, so keep the recent
+    # qualifying reactions while walking the completed M5 bars.
+    recent_buy_points: list[dict] = []
+
     # Only recent completed M5 bars can affect the live four-M15-bar memory.
     for m5_position in range(max(sweep_lookback, len(m5) - 24), len(m5)):
         timestamp = pd.Timestamp(m5.index[m5_position])
@@ -163,7 +177,7 @@ def _m5_sniper_sweep_overlay(
         open_price = _safe_float(bar["open"])
         close = _safe_float(bar["close"])
         move = _safe_float(candle_range.iloc[m5_position])
-        if move < minimum_move or low <= 0 or high <= 0:
+        if low <= 0 or high <= 0:
             continue
 
         m15_buy_zones = blueprint_buy_zones + [
@@ -258,7 +272,8 @@ def _m5_sniper_sweep_overlay(
             else 0.0
         )
         buy_sweep = bool(
-            buy_location
+            move >= minimum_move
+            and buy_location
             and prior_low_value > 0
             and low < prior_low_value
             and close > prior_low_value
@@ -267,7 +282,8 @@ def _m5_sniper_sweep_overlay(
             and close > buy_kivanc_level
         )
         sell_sweep = bool(
-            sell_location
+            move >= minimum_move
+            and sell_location
             and prior_high_value > 0
             and high > prior_high_value
             and close < prior_high_value
@@ -275,6 +291,71 @@ def _m5_sniper_sweep_overlay(
             and touched_sell_bb
             and close < sell_kivanc_level
         )
+
+        # The chart can print two green BUY reactions while the decline is
+        # distributed over several M5 candles.  Do not require either reaction
+        # candle to be a $10 spike.  Instead, confirm two closed bullish
+        # reactions at the same important level, require BB confluence on at
+        # least one of them, and retain the original $10 threshold across the
+        # bounded multi-bar excursion.
+        buy_point = bool(
+            buy_location
+            and touched_buy_levels
+            and close > open_price
+            and close > buy_kivanc_level
+        )
+        buy_two_point = False
+        buy_pair_move = 0.0
+        buy_pair_bb: tuple[str, float] | None = None
+        if buy_point:
+            recent_start = max(0, m5_position - two_point_window + 1)
+            recent_window = m5.iloc[recent_start : m5_position + 1]
+            buy_pair_move = max(
+                0.0,
+                _safe_float(recent_window["high"].max())
+                - _safe_float(recent_window["low"].min()),
+            )
+            recent_buy_points = [
+                point
+                for point in recent_buy_points
+                if m5_position - int(point["position"]) < two_point_window
+            ]
+            previous_point = next(
+                (
+                    point
+                    for point in reversed(recent_buy_points)
+                    if abs(_safe_float(point["level"]) - buy_kivanc_level)
+                    <= level_tolerance
+                    and close >= _safe_float(point["close"]) - level_tolerance
+                    and (
+                        bool(point["bb"])
+                        or bool(touched_buy_bb)
+                    )
+                ),
+                None,
+            )
+            buy_two_point = bool(
+                previous_point is not None
+                and buy_pair_move >= minimum_move
+            )
+            if buy_two_point:
+                pair_bb_candidates = list(touched_buy_bb)
+                pair_bb_candidates.extend(
+                    previous_point["bb"] if previous_point is not None else []
+                )
+                if pair_bb_candidates:
+                    buy_pair_bb = min(
+                        pair_bb_candidates,
+                        key=lambda item: abs(low - item[1]),
+                    )
+            recent_buy_points.append(
+                {
+                    "position": m5_position,
+                    "level": buy_kivanc_level,
+                    "close": close,
+                    "bb": list(touched_buy_bb),
+                }
+            )
 
         row_index = out.index[m15_position]
         if buy_sweep:
@@ -290,6 +371,21 @@ def _m5_sniper_sweep_overlay(
             out.at[row_index, "V4_Buy_M5_Sniper_Kivanc"] = buy_kivanc_level
             out.at[row_index, "V4_Buy_M5_Sniper_BB"] = bb_level
             out.at[row_index, "V4_Buy_M5_Sniper_BB_TF"] = bb_tf
+            out.at[row_index, "V4_Buy_M5_Sniper_Mode"] = "SINGLE_SWEEP"
+            out.at[row_index, "V4_Buy_M5_Sniper_Point_Count"] = 1
+            out.at[row_index, "V4_Buy_M5_Sniper_Time"] = timestamp.isoformat()
+        elif buy_two_point and buy_pair_bb is not None:
+            bb_tf, bb_level = buy_pair_bb
+            out.at[row_index, "V4_Buy_M5_Sniper_Evidence"] = True
+            out.at[row_index, "V4_Buy_M5_Sniper_Move"] = max(
+                _safe_float(out.at[row_index, "V4_Buy_M5_Sniper_Move"]),
+                buy_pair_move,
+            )
+            out.at[row_index, "V4_Buy_M5_Sniper_Kivanc"] = buy_kivanc_level
+            out.at[row_index, "V4_Buy_M5_Sniper_BB"] = bb_level
+            out.at[row_index, "V4_Buy_M5_Sniper_BB_TF"] = bb_tf
+            out.at[row_index, "V4_Buy_M5_Sniper_Mode"] = "TWO_POINT_RECLAIM"
+            out.at[row_index, "V4_Buy_M5_Sniper_Point_Count"] = 2
             out.at[row_index, "V4_Buy_M5_Sniper_Time"] = timestamp.isoformat()
         if sell_sweep:
             bb_tf, bb_level = min(
@@ -304,8 +400,50 @@ def _m5_sniper_sweep_overlay(
             out.at[row_index, "V4_Sell_M5_Sniper_Kivanc"] = sell_kivanc_level
             out.at[row_index, "V4_Sell_M5_Sniper_BB"] = bb_level
             out.at[row_index, "V4_Sell_M5_Sniper_BB_TF"] = bb_tf
+            out.at[row_index, "V4_Sell_M5_Sniper_Mode"] = "SINGLE_SWEEP"
+            out.at[row_index, "V4_Sell_M5_Sniper_Point_Count"] = 1
             out.at[row_index, "V4_Sell_M5_Sniper_Time"] = timestamp.isoformat()
 
+    return out
+
+def _h1_green_permission_overlay(
+    df_15m: pd.DataFrame,
+    df_1h: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """
+    Project Pine's confirmed H1 regular-candle green dot onto M15.
+
+    An H1 candle stamped 14:00 becomes usable at its 15:00 close.  The last
+    provider row is excluded because TwelveData normally returns the forming
+    H1 candle as its final row.  The dot is emitted only on the first M15 bar
+    after that confirmed H1 close and is never forward-filled.
+    """
+    out = df_15m.copy()
+    out["V4_Buy_H1_Green_Dot"] = False
+
+    h1 = _timed_ohlc_frame(df_1h)
+    if len(h1) < 2 or not isinstance(out.index, pd.DatetimeIndex):
+        return out
+
+    h1 = h1.iloc[:-1].copy()
+    if h1.empty:
+        return out
+
+    confirmed_green_times = pd.DatetimeIndex(
+        h1.index[h1["close"] > h1["open"]]
+    ) + pd.Timedelta(hours=1)
+
+    m15_index = out.index
+    if m15_index.tz is None:
+        m15_index = m15_index.tz_localize("UTC")
+    else:
+        m15_index = m15_index.tz_convert("UTC")
+
+    out["V4_Buy_H1_Green_Dot"] = pd.Series(
+        m15_index.isin(confirmed_green_times),
+        index=out.index,
+        dtype=bool,
+    )
     return out
 
 def _v4_location_evidence_memory(
@@ -469,6 +607,7 @@ def _overlay_blueprint_prz_memory(
     out["V4_Supply_PRZ_Layer_Count"] = sell_layers
     out["V4_Demand_PRZ_Touch"] = buy_layers > 0
     out["V4_Supply_PRZ_Touch"] = sell_layers > 0
+    out = _h1_green_permission_overlay(out, df_1h)
     out = _m5_sniper_sweep_overlay(out, df_5m, df_1h, blueprint)
 
     out["V4_Demand_PRZ_Qualified"] = buy_layers >= 2
@@ -597,11 +736,23 @@ def _overlay_blueprint_prz_memory(
         out["V4_Sell_Armed"]
         & _v4_bool_series(out, "V4_Sell_M5_Sniper_Evidence")
     )
+    # Pine's green dot is a confirmed H1 regular-candle permission printed on
+    # M15.  Inside a remembered two-layer demand PRZ it is an independent BUY
+    # trigger; it does not wait for the aggregate evidence score or a second HA
+    # confirmation.  Entry levels/RR/risk are still validated by the BUY engine
+    # and EA adapter exactly once.
+    out["V4_Buy_Green_Dot_Trigger"] = (
+        out["V4_M15_Bar_Closed"]
+        & _v4_bool_series(out, "V4_Buy_H1_Green_Dot")
+        & out["V4_Buy_Location_Memory"]
+        & ~out["V4_Supply_PRZ_Qualified"]
+    )
 
     out["V4_Buy_Memory_Trigger"] = (
         out["V4_Buy_HA_Trigger"]
         | out["V4_Buy_Pinbar_Trigger"]
         | out["V4_Buy_Sniper_Trigger"]
+        | out["V4_Buy_Green_Dot_Trigger"]
     )
     out["V4_Sell_Memory_Trigger"] = (
         out["V4_Sell_HA_Trigger"]
@@ -612,7 +763,19 @@ def _overlay_blueprint_prz_memory(
     out["V4_Buy_Trigger_Source"] = "NONE"
     out.loc[out["V4_Buy_HA_Trigger"], "V4_Buy_Trigger_Source"] = "M15_HA_BULL_FLIP"
     out.loc[out["V4_Buy_Pinbar_Trigger"], "V4_Buy_Trigger_Source"] = "BULL_PINBAR_HIGH_BREAK"
-    out.loc[out["V4_Buy_Sniper_Trigger"], "V4_Buy_Trigger_Source"] = "M5_SNIPER_RECLAIM"
+    out.loc[
+        out["V4_Buy_Green_Dot_Trigger"],
+        "V4_Buy_Trigger_Source",
+    ] = "M15_PRZ_GREEN_DOT"
+    out.loc[
+        out["V4_Buy_Sniper_Trigger"],
+        "V4_Buy_Trigger_Source",
+    ] = "M5_SNIPER_RECLAIM"
+    out.loc[
+        out["V4_Buy_Sniper_Trigger"]
+        & out["V4_Buy_M5_Sniper_Mode"].eq("TWO_POINT_RECLAIM"),
+        "V4_Buy_Trigger_Source",
+    ] = "M5_TWO_POINT_RECLAIM"
     out["V4_Sell_Trigger_Source"] = "NONE"
     out.loc[out["V4_Sell_HA_Trigger"], "V4_Sell_Trigger_Source"] = "M15_HA_BEAR_FLIP"
     out.loc[out["V4_Sell_Pinbar_Trigger"], "V4_Sell_Trigger_Source"] = "BEAR_PINBAR_LOW_BREAK"
@@ -620,13 +783,16 @@ def _overlay_blueprint_prz_memory(
 
     # Production V4 uses one canonical entry contract. Older setup flags from
     # add_indicators() remain observable but cannot bypass ARMED + OR trigger.
-    out["V4_Buy_Entry_Zone"] = out["V4_Buy_Armed"]
+    out["V4_Buy_Entry_Zone"] = (
+        out["V4_Buy_Armed"] | out["V4_Buy_Green_Dot_Trigger"]
+    )
     out["V4_Sell_Entry_Zone"] = out["V4_Sell_Armed"]
     out["V4_Buy_Setup"] = out["V4_Buy_Memory_Trigger"]
     out["V4_Sell_Setup"] = out["V4_Sell_Memory_Trigger"]
     out["V4_Block_Sell_At_Lower"] = (
         _v4_bool_series(out, "V4_Block_Sell_At_Lower")
         | out["V4_Buy_Armed"]
+        | out["V4_Buy_Green_Dot_Trigger"]
     )
     out["V4_Block_Buy_At_Upper"] = (
         _v4_bool_series(out, "V4_Block_Buy_At_Upper")
@@ -792,13 +958,14 @@ def _engine_v4_wait_diagnostics(
     sell_armed = _any("V4_Sell_Armed")
     buy_triggered = _any("V4_Buy_Memory_Trigger")
     sell_triggered = _any("V4_Sell_Memory_Trigger")
+    buy_green_dot_triggered = _any("V4_Buy_Green_Dot_Trigger")
 
     missing_buy = []
     if buy_layer_count < 2:
         missing_buy.append(f"PRZ_LAYERS_{buy_layer_count}_OF_2")
     if buy_structure_reset:
         missing_buy.append("CANCELLED_BY_BEAR_BOS_CHOCH")
-    if buy_evidence_score < evidence_min:
+    if buy_evidence_score < evidence_min and not buy_green_dot_triggered:
         missing_buy.append(
             f"EVIDENCE_{buy_evidence_score}_OF_{evidence_min}"
         )
@@ -889,8 +1056,14 @@ def _engine_v4_wait_diagnostics(
         "V4_Sell_M5_Sniper_BB",
         "V4_Buy_M5_Sniper_BB_TF",
         "V4_Sell_M5_Sniper_BB_TF",
+        "V4_Buy_M5_Sniper_Mode",
+        "V4_Sell_M5_Sniper_Mode",
+        "V4_Buy_M5_Sniper_Point_Count",
+        "V4_Sell_M5_Sniper_Point_Count",
         "V4_Buy_M5_Sniper_Time",
         "V4_Sell_M5_Sniper_Time",
+        "V4_Buy_H1_Green_Dot",
+        "V4_Buy_Green_Dot_Trigger",
         "V4_Buy_Location_Memory",
         "V4_Sell_Location_Memory",
         "V4_Buy_Location_Age_Bars",
@@ -986,6 +1159,30 @@ def _engine_v4_wait_diagnostics(
             sell_sniper_row.get("V4_Sell_M5_Sniper_BB_TF", "NONE")
             if sell_sniper_row is not None
             else "NONE"
+        ),
+        "buy_sniper_mode": str(
+            buy_sniper_row.get("V4_Buy_M5_Sniper_Mode", "NONE")
+            if buy_sniper_row is not None
+            else "NONE"
+        ),
+        "sell_sniper_mode": str(
+            sell_sniper_row.get("V4_Sell_M5_Sniper_Mode", "NONE")
+            if sell_sniper_row is not None
+            else "NONE"
+        ),
+        "buy_sniper_point_count": int(
+            _safe_float(
+                buy_sniper_row.get("V4_Buy_M5_Sniper_Point_Count")
+                if buy_sniper_row is not None
+                else 0
+            )
+        ),
+        "sell_sniper_point_count": int(
+            _safe_float(
+                sell_sniper_row.get("V4_Sell_M5_Sniper_Point_Count")
+                if sell_sniper_row is not None
+                else 0
+            )
         ),
         "location_sources": location_sources,
         "buy_evidence_score": buy_evidence_score,

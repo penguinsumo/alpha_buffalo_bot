@@ -2116,6 +2116,22 @@ def _owner_v4_context(payload: Dict) -> Dict:
             if direction == "SELL"
             else "NONE"
         ).upper(),
+        "sniper_mode": str(
+            diagnostic.get("buy_sniper_mode")
+            if direction == "BUY"
+            else diagnostic.get("sell_sniper_mode")
+            if direction == "SELL"
+            else "NONE"
+        ).upper(),
+        "sniper_point_count": int(
+            _safe_float(
+                diagnostic.get("buy_sniper_point_count")
+                if direction == "BUY"
+                else diagnostic.get("sell_sniper_point_count")
+                if direction == "SELL"
+                else 0
+            )
+        ),
         "tunnel_state": str(tunnel.get("state") or "NONE").upper(),
         "tunnel_valid": bool(tunnel.get("valid")),
         "tunnel_event": tunnel_event,
@@ -2199,7 +2215,11 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
     )
     sniper_text = sniper_side
     if sniper_side != "WAIT":
+        sniper_mode = _clean_text(context.get("sniper_mode") or "SINGLE_SWEEP")
+        sniper_points = int(_safe_float(context.get("sniper_point_count")))
         sniper_text += (
+            f" | {sniper_mode}"
+            f" x{max(1, sniper_points)}"
             f" | M5 ${_safe_float(context.get('sniper_move')):,.2f}"
             f" | Level {_safe_float(context.get('sniper_kivanc')):,.2f}"
             f" | BB-{_clean_text(context.get('sniper_bb_tf') or 'NONE')}"
@@ -2615,6 +2635,7 @@ def _run_engine_v4_baseline(
         "V4_Buy_M5_Sniper_Kivanc", "V4_Sell_M5_Sniper_Kivanc",
         "V4_Buy_M5_Sniper_BB", "V4_Sell_M5_Sniper_BB",
         "V4_Buy_M5_Sniper_BB_TF", "V4_Sell_M5_Sniper_BB_TF",
+        "V4_Buy_H1_Green_Dot", "V4_Buy_Green_Dot_Trigger",
         "V4_Buy_Location_Memory", "V4_Sell_Location_Memory",
         "V4_Buy_Evidence_Score", "V4_Sell_Evidence_Score",
         "V4_Buy_Armed", "V4_Sell_Armed",

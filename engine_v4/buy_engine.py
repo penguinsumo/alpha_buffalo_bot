@@ -68,7 +68,10 @@ class BuySignalEngine(BaseEngine):
             else sniper_window.iloc[0:0]
         )
         m5_sniper = bool(
-            trigger_source == "M5_SNIPER_RECLAIM"
+            trigger_source in {
+                "M5_SNIPER_RECLAIM",
+                "M5_TWO_POINT_RECLAIM",
+            }
             or (
                 trigger_source == "NONE"
                 and memory_trigger
@@ -164,7 +167,11 @@ class BuySignalEngine(BaseEngine):
             basis_parts.append("M5_SNIPER_KIVANC_BB")
         v5_basis = "|".join(basis_parts) if basis_parts else "LOWER_REACTION"
 
-        if trigger_source == "M5_SNIPER_RECLAIM":
+        if trigger_source == "M15_PRZ_GREEN_DOT":
+            entry_mode = "V4_BUY_M15_PRZ_GREEN_DOT"
+        elif trigger_source == "M5_TWO_POINT_RECLAIM":
+            entry_mode = "V4_BUY_M5_TWO_POINT_RECLAIM"
+        elif trigger_source == "M5_SNIPER_RECLAIM":
             entry_mode = "V4_BUY_M5_SNIPER_RECLAIM"
         elif trigger_source == "BULL_PINBAR_HIGH_BREAK":
             entry_mode = "V4_BUY_PINBAR_HIGH_BREAK"
@@ -227,6 +234,8 @@ class BuySignalEngine(BaseEngine):
             "m5_sniper_kivanc": float(sniper_row.get("V4_Buy_M5_Sniper_Kivanc", 0.0) or 0.0) if sniper_row is not None else 0.0,
             "m5_sniper_bb": float(sniper_row.get("V4_Buy_M5_Sniper_BB", 0.0) or 0.0) if sniper_row is not None else 0.0,
             "m5_sniper_bb_timeframe": str(sniper_row.get("V4_Buy_M5_Sniper_BB_TF", "NONE")) if sniper_row is not None else "NONE",
+            "m5_sniper_mode": str(sniper_row.get("V4_Buy_M5_Sniper_Mode", "NONE")) if sniper_row is not None else "NONE",
+            "m5_sniper_point_count": int(sniper_row.get("V4_Buy_M5_Sniper_Point_Count", 0) or 0) if sniper_row is not None else 0,
             "prz_evidence_score": int(row.get("V4_Buy_Evidence_Score", 0) or 0),
             "prz_location_age_bars": int(row.get("V4_Buy_Location_Age_Bars", -1) or 0),
             "vsa_wall_low": deep_wall_low if deep_reclaim else pinbar_wall_low if pinbar_break else memory_wall_low if memory_trigger else micro_low,

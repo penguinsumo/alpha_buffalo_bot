@@ -5,6 +5,8 @@ SignalRouter — V4 location-first router.
 Core rule:
 - PRZ layers >= 2 + evidence >= 3 arms the directional V4 setup.
 - Closed M15 HA flip, pinbar break, or closed M5 sniper reclaim triggers it.
+- A confirmed H1 green permission dot on closed M15 may trigger BUY directly
+  from remembered two-layer demand PRZ location.
 - The EA adapter validates levels/RR once; VSA is evidence, not a second gate.
 - CHoCH/BOS promotes V4 scalp to V5 journey; it is not required for V4 entry.
 """
