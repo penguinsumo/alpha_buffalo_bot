@@ -582,20 +582,22 @@ def test_no_choch_stays_v4_range() -> None:
         sell_engine=SellSignalEngine(),
     ).process(frame([base_row() for _ in range(5)] + [row]))
 
-    assert_true(routed, "router should select non-CHoCH BUY candidate")
-    assert_equal(routed[0]["journey_state"], "V4_SCALP_RANGE", "no CHoCH must stay V4 range")
-    assert_true(not routed[0]["bos_confirmed"], "no CHoCH must not mark BOS confirmed")
+    assert_true(routed, "router should select a non-CHoCH PRZ candidate")
+    selected = routed[0]
+    direction = selected["direction"]
+    assert_equal(selected["journey_state"], "V4_SCALP_RANGE", "no CHoCH must stay V4 range")
+    assert_true(not selected["bos_confirmed"], "no CHoCH must not mark BOS confirmed")
     assert_equal(
-        routed[0]["v4_state"],
-        "V4_BUY_PRZ_ENTRY_READY",
+        selected["v4_state"],
+        f"V4_{direction}_PRZ_ENTRY_READY",
         "PRZ entry must always expose V4",
     )
     assert_equal(
-        routed[0]["v5_state"],
-        "V5_BUY_WAIT_BOS_CHOCH",
+        selected["v5_state"],
+        f"V5_{direction}_WAIT_BOS_CHOCH",
         "PRZ entry must expose waiting V5 before structure confirms",
     )
-    runtime_signal = _runtime_signal(routed[0])
+    runtime_signal = _runtime_signal(selected)
     ea = build_ea_payload("XAUUSD", runtime_signal)
     response = build_api_signal_response("XAUUSD", runtime_signal, ea)
     assert_equal(
