@@ -206,6 +206,10 @@ def _apply_engine_v4_signal(signal: Dict, engine_signal: Dict | None) -> Dict:
     signal["setup_state"] = engine_signal.get("setup_state", "UNKNOWN")
     signal["scenario_state"] = engine_signal.get("scenario_state") or engine_signal.get("setup_state")
     signal["journey_state"] = engine_signal.get("journey_state")
+    signal["v4_state"] = engine_signal.get("v4_state")
+    signal["v5_state"] = engine_signal.get("v5_state")
+    signal["engine_stages"] = engine_signal.get("engine_stages")
+    signal["order_policy"] = engine_signal.get("order_policy")
     signal["entry_rr"] = engine_signal.get("entry_rr")
     signal["rr_ok"] = engine_signal.get("rr_ok")
     signal["zone_confluence"] = engine_signal.get("zone_confluence")
@@ -225,7 +229,8 @@ def _apply_engine_v4_signal(signal: Dict, engine_signal: Dict | None) -> Dict:
     signal["sell_dot_reason"] = engine_signal.get("sell_dot_reason", "UNKNOWN")
 
     for _key in (
-        "scenario_state", "journey_state", "trade_management", "break_prediction",
+        "scenario_state", "journey_state", "v4_state", "v5_state",
+        "engine_stages", "order_policy", "trade_management", "break_prediction",
         "bos_confirmed", "vsa_gate", "vsa_pressure_delta", "checkpoint_price",
         "approach_break_zone", "setup_state",
     ):
@@ -513,6 +518,10 @@ def build_ea_payload(symbol: str, signal: Dict, *, min_rr: float) -> Dict:
         "setup_state": setup_info["setup_state"],
         "scenario_state": signal.get("scenario_state") or (signal.get("engine_v4", {}) or {}).get("scenario_state"),
         "journey_state": signal.get("journey_state") or (signal.get("engine_v4", {}) or {}).get("journey_state"),
+        "v4_state": signal.get("v4_state") or (signal.get("engine_v4", {}) or {}).get("v4_state"),
+        "v5_state": signal.get("v5_state") or (signal.get("engine_v4", {}) or {}).get("v5_state"),
+        "engine_stages": signal.get("engine_stages") or (signal.get("engine_v4", {}) or {}).get("engine_stages") or {},
+        "order_policy": signal.get("order_policy") or (signal.get("engine_v4", {}) or {}).get("order_policy") or "V4_OPEN_ONCE_V5_MANAGE_EXISTING",
         "trade_management": trade_management,
         "break_prediction": signal.get("break_prediction") or (signal.get("engine_v4", {}) or {}).get("break_prediction"),
         "bos_confirmed": bool(signal.get("bos_confirmed") or (signal.get("engine_v4", {}) or {}).get("bos_confirmed")),
@@ -593,6 +602,12 @@ def build_api_signal_response(symbol: str, signal: Dict, ea: Dict) -> Dict:
         **contract,
         "symbol": symbol,
         "source": "PYTHON",
+        "engine_stages": (
+            ea.get("engine_stages")
+            or signal.get("engine_stages")
+            or engine.get("engine_stages")
+            or {}
+        ),
         "signal": signal,
         "ea": ea,
     }

@@ -1837,6 +1837,12 @@ def _owner_v4_context(payload: Dict) -> Dict:
     """Build an owner-only comparison of V4, PRZ, tunnel, Kivanc and harmonic."""
     signal = payload.get("signal", {}) or {}
     ea = payload.get("ea", {}) or {}
+    engine_stages = (
+        ea.get("engine_stages")
+        or signal.get("engine_stages")
+        or (signal.get("engine_v4", {}) or {}).get("engine_stages")
+        or {}
+    )
     blueprint = signal.get("blueprint", {}) or {}
     diagnostic = signal.get("engine_v4_diagnostics", {}) or {}
 
@@ -2048,6 +2054,20 @@ def _owner_v4_context(payload: Dict) -> Dict:
         "h1_zone_low": h1_low,
         "h1_zone_high": h1_high,
         "v4_status": str(diagnostic.get("status") or "WAIT").upper(),
+        "v4_state": str(
+            (engine_stages.get("v4") or {}).get("state")
+            or signal.get("v4_state")
+            or "V4_WAIT_PRZ_TRIGGER"
+        ).upper(),
+        "v5_state": str(
+            (engine_stages.get("v5") or {}).get("state")
+            or signal.get("v5_state")
+            or (
+                f"V5_{direction}_WAIT_BOS_CHOCH"
+                if direction in {"BUY", "SELL"}
+                else "V5_WAIT_DIRECTION"
+            )
+        ).upper(),
         "v4_selected": bool(diagnostic.get("v4_selected")),
         "buy_prz_layer_count": int(
             _safe_float(diagnostic.get("buy_prz_layer_count"))
@@ -2267,6 +2287,8 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
         f"📍 PRZ: {_clean_text(' + '.join(locations))}",
         f"🧩 V4: {_clean_text(context.get('v4_status'))}"
         f" | Layers B/S {layer_text}",
+        f"🧭 Stages: {_clean_text(context.get('v4_state'))}"
+        f" | {_clean_text(context.get('v5_state'))}",
         f"📊 Evidence B/S: {int(context.get('buy_evidence_score') or 0)}"
         f" / {int(context.get('sell_evidence_score') or 0)}"
         f" (need {int(context.get('evidence_min') or 3)})",

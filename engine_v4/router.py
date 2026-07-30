@@ -135,7 +135,20 @@ class SignalRouter:
             require_harmonic=require_harmonic,
         )
         setup_state = str(sig.get("setup_state") or f"{direction}_SETUP").upper()
-        is_cf_ready = setup_state.endswith("CF_READY")
+        aligned_structure = bool(
+            row.get("CHoCH_Bull", False) or row.get("Micro_BOS_Up", False)
+        ) if direction == "BUY" else bool(
+            row.get("CHoCH_Bear", False) or row.get("Micro_BOS_Down", False)
+        )
+        is_cf_ready = bool(
+            setup_state.endswith("CF_READY") or aligned_structure
+        )
+        v4_state = f"V4_{direction}_PRZ_ENTRY_READY"
+        v5_state = (
+            f"V5_{direction}_CONTINUATION_CONFIRMED"
+            if is_cf_ready
+            else f"V5_{direction}_WAIT_BOS_CHOCH"
+        )
 
         sig["selected_idx"] = idx
         sig["selected_age_bars"] = age_bars
@@ -143,6 +156,32 @@ class SignalRouter:
         sig["journey_state"] = (
             f"V5_{direction}_JOURNEY" if is_cf_ready else "V4_SCALP_RANGE"
         )
+        # Both engines are always observable for a selected PRZ signal. V4
+        # owns the single entry command; V5 may only promote/manage that same
+        # position after aligned BOS/CHoCH and must never create a second one.
+        sig["v4_state"] = v4_state
+        sig["v5_state"] = v5_state
+        sig["engine_stages"] = {
+            "v4": {
+                "state": v4_state,
+                "role": "PRZ_ENTRY",
+                "ready": True,
+                "command": "OPEN_IF_LEVELS_RR_RISK_PASS",
+                "creates_new_order": True,
+            },
+            "v5": {
+                "state": v5_state,
+                "role": "CONTINUATION_PROMOTION",
+                "ready": is_cf_ready,
+                "command": (
+                    "PROMOTE_EXISTING"
+                    if is_cf_ready
+                    else "WAIT_BOS_CHOCH"
+                ),
+                "creates_new_order": False,
+            },
+        }
+        sig["order_policy"] = "V4_OPEN_ONCE_V5_MANAGE_EXISTING"
         sig["vsa_gate"] = (
             "BUY_PRESSURE" if direction == "BUY" else "SELL_PRESSURE"
         )

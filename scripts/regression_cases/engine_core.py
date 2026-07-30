@@ -546,6 +546,16 @@ def test_choch_promotes_to_v5_journey() -> None:
     assert_equal(sig["direction"], "BUY", "CHoCH fixture direction")
     assert_equal(sig["journey_state"], "V5_BUY_JOURNEY", "CHoCH must promote to V5 journey")
     assert_true(sig["bos_confirmed"], "CHoCH promotion must mark BOS confirmed")
+    assert_equal(sig["v4_state"], "V4_BUY_PRZ_ENTRY_READY", "V4 entry stage remains visible")
+    assert_equal(
+        sig["v5_state"],
+        "V5_BUY_CONTINUATION_CONFIRMED",
+        "V5 continuation stage must be visible after CHoCH",
+    )
+    assert_true(
+        not sig["engine_stages"]["v5"]["creates_new_order"],
+        "V5 promotion must never create a duplicate order",
+    )
 
 def test_no_choch_stays_v4_range() -> None:
     row = base_row()
@@ -575,6 +585,30 @@ def test_no_choch_stays_v4_range() -> None:
     assert_true(routed, "router should select non-CHoCH BUY candidate")
     assert_equal(routed[0]["journey_state"], "V4_SCALP_RANGE", "no CHoCH must stay V4 range")
     assert_true(not routed[0]["bos_confirmed"], "no CHoCH must not mark BOS confirmed")
+    assert_equal(
+        routed[0]["v4_state"],
+        "V4_BUY_PRZ_ENTRY_READY",
+        "PRZ entry must always expose V4",
+    )
+    assert_equal(
+        routed[0]["v5_state"],
+        "V5_BUY_WAIT_BOS_CHOCH",
+        "PRZ entry must expose waiting V5 before structure confirms",
+    )
+    runtime_signal = _runtime_signal(routed[0])
+    ea = build_ea_payload("XAUUSD", runtime_signal)
+    response = build_api_signal_response("XAUUSD", runtime_signal, ea)
+    assert_equal(
+        response["engine_stages"],
+        ea["engine_stages"],
+        "API and EA must expose the same V4/V5 stage contract",
+    )
+    assert_equal(ea["action"], "OPEN", "V4 remains the single PRZ entry owner")
+    assert_equal(
+        ea["engine_stages"]["v5"]["command"],
+        "WAIT_BOS_CHOCH",
+        "V5 waits without opening another order",
+    )
 
 def test_session_kivanc_mask_uses_bangkok_asia_hours() -> None:
     index = pd.DatetimeIndex([
