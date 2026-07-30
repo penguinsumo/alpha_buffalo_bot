@@ -188,6 +188,10 @@ TELEGRAM_TIMEOUT_SECONDS = float(os.getenv("TELEGRAM_TIMEOUT_SECONDS", "5"))
 TRADE_MIN_RR = float(os.getenv("TRADE_MIN_RR", "1.5"))
 TELEGRAM_MIN_RR = float(os.getenv("TELEGRAM_MIN_RR", str(TRADE_MIN_RR)))
 TELEGRAM_NOTIFY_TREND_UPDATE = os.getenv("TELEGRAM_NOTIFY_TREND_UPDATE", "true").lower() in {"1", "true", "yes", "on"}
+TELEGRAM_SIGNAL_ONLY_MODE = os.getenv(
+    "TELEGRAM_SIGNAL_ONLY_MODE",
+    "true",
+).lower() in {"1", "true", "yes", "on"}
 TELEGRAM_TREND_MIN_INTERVAL_SECONDS = max(
     300,
     int(os.getenv("TELEGRAM_TREND_MIN_INTERVAL_SECONDS", "3600")),
@@ -2580,6 +2584,23 @@ def maybe_broadcast_signal(payload: Dict) -> bool:
     return sent
 
 
+def broadcast_runtime_telegram(payload: Dict) -> bool:
+    """Route production Telegram output through the confirmed OPEN lane.
+
+    SIGNAL_ONLY is the production default. Trend, WAIT-CF, owner-context, and
+    Pine-monitor formatters remain available for explicit diagnostics/tests,
+    but scanner loops cannot publish them while this mode is enabled.
+    """
+    signal_sent = maybe_broadcast_signal(payload)
+    if TELEGRAM_SIGNAL_ONLY_MODE:
+        return signal_sent
+
+    maybe_broadcast_trend_update(payload)
+    maybe_broadcast_confirmation(payload)
+    maybe_broadcast_owner_v4_context(payload)
+    return signal_sent
+
+
 def _log_engine_v4_debug(message: str) -> None:
     """Best-effort runtime trace for engine_v4 selection. Never blocks trading loop."""
     try:
@@ -3023,10 +3044,7 @@ def _cloud_signal_loop() -> None:
             payload = run_pipeline()
             _set_latest_signal(payload)
             queued = _publish_python_entry_command(payload)
-            maybe_broadcast_signal(payload)
-            maybe_broadcast_trend_update(payload)
-            maybe_broadcast_confirmation(payload)
-            maybe_broadcast_owner_v4_context(payload)
+            broadcast_runtime_telegram(payload)
             decision = payload.get("signal", {}).get("decision", {})
             ea = payload.get("ea", {})
             print(
@@ -3072,7 +3090,11 @@ def _pine_monitor_loop() -> None:
     )
     while True:
         try:
-            if TELEGRAM_NOTIFY_TREND_UPDATE and _telegram_market_is_open():
+            if (
+                not TELEGRAM_SIGNAL_ONLY_MODE
+                and TELEGRAM_NOTIFY_TREND_UPDATE
+                and _telegram_market_is_open()
+            ):
                 monitor = _pine_monitor_payload()
                 maybe_broadcast_trend_update(monitor)
                 maybe_broadcast_confirmation(monitor)
@@ -3099,7 +3121,11 @@ def _start_cloud_signal_loop() -> None:
             f"{'ENABLED' if TELEGRAM_PINE_NOTIFICATIONS_ENABLED else 'DISABLED'}",
             flush=True,
         )
-        if TELEGRAM_PINE_NOTIFICATIONS_ENABLED and TELEGRAM_PINE_MONITOR_ENABLED:
+        if (
+            not TELEGRAM_SIGNAL_ONLY_MODE
+            and TELEGRAM_PINE_NOTIFICATIONS_ENABLED
+            and TELEGRAM_PINE_MONITOR_ENABLED
+        ):
             worker = threading.Thread(
                 target=_pine_monitor_loop,
                 name="alpha-pine-telegram-monitor",
@@ -3201,10 +3227,15 @@ def telegram_status(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
             SIGNAL_SOURCE == "PYTHON" and PINE_NOTIFICATION_ONLY
         ),
         "pine_monitor_enabled": bool(
-            TELEGRAM_PINE_NOTIFICATIONS_ENABLED
+            not TELEGRAM_SIGNAL_ONLY_MODE
+            and TELEGRAM_PINE_NOTIFICATIONS_ENABLED
             and TELEGRAM_PINE_MONITOR_ENABLED
         ),
-        "trend_update_enabled": TELEGRAM_NOTIFY_TREND_UPDATE,
+        "signal_only_mode": TELEGRAM_SIGNAL_ONLY_MODE,
+        "trend_update_enabled": bool(
+            not TELEGRAM_SIGNAL_ONLY_MODE
+            and TELEGRAM_NOTIFY_TREND_UPDATE
+        ),
         "market_open": _telegram_market_is_open(),
         "last_delivery": delivery,
         "pending_action": pending.get("action", "HOLD"),

@@ -154,6 +154,54 @@ def test_confirmed_open_is_the_only_public_directional_setup() -> None:
     assert_true("Watch for 🟢 B Setup..." in text, "confirmed OPEN may publish BUY setup")
 
 
+def test_runtime_telegram_signal_only_suppresses_all_monitor_updates() -> None:
+    payload = {
+        "source": "PYTHON",
+        "symbol": "XAUUSD",
+        "signal": {
+            "timestamp": "2026-07-30T00:02:00+00:00",
+            "blueprint": {"current_price": 4085.42},
+        },
+        "ea": {"action": "WAIT", "execution_state": "WATCH"},
+    }
+    calls = []
+    original_mode = runtime.TELEGRAM_SIGNAL_ONLY_MODE
+    original_signal = runtime.maybe_broadcast_signal
+    original_trend = runtime.maybe_broadcast_trend_update
+    original_confirmation = runtime.maybe_broadcast_confirmation
+    original_owner = runtime.maybe_broadcast_owner_v4_context
+    try:
+        runtime.TELEGRAM_SIGNAL_ONLY_MODE = True
+        runtime.maybe_broadcast_signal = (
+            lambda value: calls.append(("signal", value)) or False
+        )
+        runtime.maybe_broadcast_trend_update = (
+            lambda value: calls.append(("trend", value)) or True
+        )
+        runtime.maybe_broadcast_confirmation = (
+            lambda value: calls.append(("confirmation", value)) or True
+        )
+        runtime.maybe_broadcast_owner_v4_context = (
+            lambda value: calls.append(("owner", value)) or True
+        )
+
+        assert_true(
+            not runtime.broadcast_runtime_telegram(payload),
+            "WAIT payload does not report a Telegram signal delivery",
+        )
+        assert_equal(
+            [name for name, _ in calls],
+            ["signal"],
+            "runtime calls only the confirmed OPEN broadcaster",
+        )
+    finally:
+        runtime.TELEGRAM_SIGNAL_ONLY_MODE = original_mode
+        runtime.maybe_broadcast_signal = original_signal
+        runtime.maybe_broadcast_trend_update = original_trend
+        runtime.maybe_broadcast_confirmation = original_confirmation
+        runtime.maybe_broadcast_owner_v4_context = original_owner
+
+
 def test_incomplete_pipeline_payload_never_sends_zero_price_trend() -> None:
     payload = {
         "status": "ERROR",
