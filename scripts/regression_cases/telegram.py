@@ -67,6 +67,11 @@ def test_telegram_public_output_hides_engine_internals() -> None:
         "ALPHA BUFFALO" in signal_text,
         "V5 journey should use the public TP1/TP2 runner template",
     )
+    assert_true(
+        "📊 Type     : 🔴" in signal_text
+        and "📊 Type     : 🔴 SELL" not in signal_text,
+        "V5 public Type row must expose only the direction icon",
+    )
 
 def test_pine_monitor_does_not_promote_blocked_buy_inside_sell_ha_context() -> None:
     """Regression for the 15 Jul chart: Demand location is not BUY permission."""

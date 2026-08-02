@@ -1113,7 +1113,7 @@ def format_telegram_signal(payload: Dict) -> str:
         f"{side_icon} <b>ALPHA BUFFALO</b>",
         "━━━━━━━━━━━━━━━━━━━━━",
         f"📌 Asset    : <b>{_clean_text(symbol)}</b>",
-        f"📊 Type     : {side_icon} {_clean_text(side_label)}",
+        f"📊 Type     : {side_icon}",
         f"🎯 Entry    : ~{entry:,.2f}",
         f"🛡️ SL Zone  : {_price_zone(sl, direction)}",
         f"🎯 TP1      : {tp1:,.1f}  (M15 ~30min)",
