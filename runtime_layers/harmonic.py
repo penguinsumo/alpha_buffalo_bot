@@ -6,7 +6,7 @@ from typing import Dict
 from runtime_layers.common import _safe_float
 
 def _harmonic_gate_context(blueprint) -> Dict:
-    """Normalize ScenarioBlueprint into the one V4/V5 bias contract."""
+    """Normalize ScenarioBlueprint into the post-BOS target contract."""
     if blueprint is None:
         return {
             "found": False,
@@ -26,7 +26,9 @@ def _harmonic_gate_context(blueprint) -> Dict:
         "source_tf": str(getattr(blueprint, "harmonic_source_tf", "NONE") or "NONE"),
         "pattern_state": str(getattr(blueprint, "harmonic_pattern_state", "NONE") or "NONE"),
         "projection_mode": str(getattr(blueprint, "harmonic_projection_mode", "NONE") or "NONE"),
-        "execution_authority": bool(getattr(blueprint, "harmonic_execution_authority", True)),
+        "execution_authority": False,
+        "entry_authority": False,
+        "target_authority_after_bos": True,
         "tunnel_broken": bool(getattr(blueprint, "harmonic_tunnel_broken", False)),
         "candidate_patterns": list(getattr(blueprint, "harmonic_candidate_patterns", []) or []),
         "current_xad": _safe_float(getattr(blueprint, "harmonic_current_xad", 0.0)),
@@ -38,11 +40,7 @@ def _harmonic_gate_context(blueprint) -> Dict:
         "current_price": _safe_float(getattr(blueprint, "current_price", 0.0)),
         "tunnel_state": str(getattr(blueprint, "tunnel_state", "NONE") or "NONE").upper(),
         "tunnel_valid": bool(getattr(blueprint, "tunnel_valid", False)),
-        "bos_eligible": bool(getattr(blueprint, "harmonic_bos_eligible", False)),
-        "bos_state": str(getattr(blueprint, "harmonic_bos_state", "WAIT_BOS") or "WAIT_BOS"),
-        "bos_sources": list(getattr(blueprint, "harmonic_bos_sources", []) or []),
-        "bos_direction": str(getattr(blueprint, "harmonic_bos_direction", "NONE") or "NONE"),
-        "bos_primary_timeframe": str(
-            getattr(blueprint, "harmonic_bos_primary_timeframe", "NONE") or "NONE"
-        ),
+        # Structural BOS/CHoCH is evaluated by V4/V5.  Detector-local BOS
+        # hints are intentionally not exported because Harmonic starts only
+        # after structure has independently promoted the existing position.
     }

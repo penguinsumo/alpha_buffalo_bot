@@ -129,8 +129,8 @@ def main() -> None:
     counter_buy = evaluate_harmonic_bias("BUY", forming_context, require_harmonic=True)
     assert approach_sell.allowed is True
     assert approach_sell.phase == "C_TO_D"
-    assert counter_buy.allowed is False
-    assert counter_buy.reason == "HARMONIC_FORMING_SELL_ONLY"
+    assert counter_buy.allowed is True
+    assert counter_buy.reason == "HARMONIC_FORMING_TARGET_CONTEXT"
 
     near_chart_price = project_harmonic_from_xabc(POINTS, 3995.06)
     extended = by_family(near_chart_price, "Extended_XABCD")
@@ -164,31 +164,31 @@ def main() -> None:
     continuation_sell = evaluate_harmonic_bias("SELL", d_context, require_harmonic=True)
     assert reversal_buy.allowed is True
     assert reversal_buy.phase == "D_REVERSAL"
-    assert continuation_sell.allowed is False
-    assert continuation_sell.reason == "HARMONIC_BIAS_BUY_ONLY"
+    assert continuation_sell.allowed is True
+    assert continuation_sell.reason == "HARMONIC_D_AVAILABLE_FOR_POST_BOS_TARGET"
 
     fallback_only = evaluate_harmonic_bias(
         "BUY",
         {**extended, "found": True, "tunnel_state": "DOWNTREND"},
         require_harmonic=True,
     )
-    assert fallback_only.allowed is False
-    assert fallback_only.reason == "HARMONIC_CANDIDATE_CONTEXT_ONLY"
+    assert fallback_only.allowed is True
+    assert fallback_only.reason == "HARMONIC_D_AVAILABLE_FOR_POST_BOS_TARGET"
 
     broken_tunnel = evaluate_harmonic_bias(
         "SELL",
         {**forming_context, "tunnel_state": "UPTREND"},
         require_harmonic=True,
     )
-    assert broken_tunnel.allowed is False
-    assert broken_tunnel.reason == "WAIT_PARALLEL_TUNNEL_ALIGNMENT"
+    assert broken_tunnel.allowed is True
+    assert broken_tunnel.reason == "HARMONIC_FORMING_TARGET_CONTEXT"
 
     explicit_break = evaluate_harmonic_bias(
         "SELL",
         {**forming_context, "tunnel_broken": True},
         require_harmonic=True,
     )
-    assert explicit_break.allowed is False
+    assert explicit_break.allowed is True
     assert explicit_break.reason == "HARMONIC_TUNNEL_BROKEN"
 
     print("PASS reciprocal AB=CD projects .618 C retrace to 1.618 BC")
@@ -196,12 +196,12 @@ def main() -> None:
     print("PASS Newday preserves AB=CD targets, evidence and statistics status")
     print("PASS completed AB=CD rejects the contradictory .618 + 1.272 pair")
     print("PASS confirmed XABC predicts Gartley before D exists")
-    print("PASS forming C->D phase allows only tunnel-aligned SELL approach")
+    print("PASS forming C->D remains non-blocking target context")
     print("PASS price passing Gartley advances to named Crab, not broad fallback")
-    print("PASS projected Crab D/PRZ switches hard bias to BUY reversal")
-    print("PASS broad Extended XABCD remains context-only")
-    print("PASS broken parallel tunnel blocks the forming route")
-    print("PASS explicit tunnel break invalidates the projected route")
+    print("PASS projected Crab D/PRZ is available only as a post-BOS target")
+    print("PASS broad Extended XABCD never gains entry authority")
+    print("PASS tunnel alignment remains context and cannot block entry")
+    print("PASS explicit tunnel break invalidates only the projected target")
     print("PASS morph metadata records measured passed-PRZ candidate ladder")
     print("Summary: 12/12 predictive harmonic checks passed")
 

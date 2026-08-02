@@ -61,7 +61,6 @@ try:
     from engine_v4.indicators import add_indicators
     from engine_v4.router import SignalRouter
     from engine_v4.final_gate import FinalGate
-    from engine_v4.harmonic_bias_gate import evaluate_harmonic_bias
     from engine_v4.buy_engine import BuySignalEngine
     from engine_v4.sell_engine import SellSignalEngine
 except Exception as exc:  # pragma: no cover - runtime diagnostic path
@@ -69,7 +68,6 @@ except Exception as exc:  # pragma: no cover - runtime diagnostic path
     add_indicators = None
     SignalRouter = None
     FinalGate = None
-    evaluate_harmonic_bias = None
     BuySignalEngine = None
     SellSignalEngine = None
 
@@ -140,14 +138,11 @@ python_signal_bridge = PineSignalBridge(
     open_ttl_env="ALPHA_PYTHON_OPEN_TTL_SECONDS",
     close_ttl_env="ALPHA_PYTHON_CLOSE_TTL_SECONDS",
 )
-# Harmonic is production guidance, never a mandatory entry prerequisite.
-# A separate, intentionally named switch keeps the historical hard gate
-# available only for controlled research/backtests.  The deprecated
-# ALPHA_REQUIRE_HARMONIC_BIAS value is deliberately ignored so a stale Railway
-# variable cannot silently block every live order again.
-REQUIRE_HARMONIC_BIAS = os.getenv(
-    "ALPHA_STRICT_HARMONIC_RESEARCH_MODE", "false"
-).lower() in {"1", "true", "yes", "on"}
+# Harmonic has no entry authority. It becomes a TP2 source only after aligned
+# BOS/CHoCH and only when its D projection overlaps the next opposite PRZ.
+# Keep the compatibility name false so stale Railway variables cannot restore
+# the removed hard gate.
+REQUIRE_HARMONIC_BIAS = False
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 
 
@@ -743,25 +738,12 @@ def _live_harmonic_gate_context(public_symbol: str) -> Dict:
 
 
 def _pine_entry_permission(direction: str, public_symbol: str) -> GateResult:
-    """Check time/risk for Pine OPEN; harmonic is optional context by default."""
+    """Check time/risk for Pine OPEN; Harmonic never participates in entry."""
     direction = str(direction or "").upper()
     if direction not in {"BUY", "SELL"}:
         return GateResult(False, "INVALID_ENTRY_DIRECTION")
     if FinalGate is None:
         return GateResult(False, "FINAL_GATE_UNAVAILABLE")
-
-    harmonic_context = None
-    if REQUIRE_HARMONIC_BIAS:
-        try:
-            harmonic_context = _live_harmonic_gate_context(public_symbol)
-        except Exception as exc:
-            print(
-                "AlphaBuffalo strict harmonic entry gate failed | "
-                f"symbol={public_symbol} direction={direction} "
-                f"error={type(exc).__name__}:{exc}",
-                flush=True,
-            )
-            return GateResult(False, "HARMONIC_CONTEXT_UNAVAILABLE")
 
     clock = SessionClock()
     risk_permissions = execution_lifecycle.risk_permissions(
@@ -771,8 +753,8 @@ def _pine_entry_permission(direction: str, public_symbol: str) -> GateResult:
         clock.get(),
         direction,
         **risk_permissions,
-        harmonic_context=harmonic_context,
-        require_harmonic=REQUIRE_HARMONIC_BIAS,
+        harmonic_context=None,
+        require_harmonic=False,
     )
 
 
@@ -1061,10 +1043,11 @@ def _has_tp2_opportunity(payload: Dict, direction: str, tp1: float, tp2: float) 
         return False
 
     bos_direction = str(
-        blueprint.get("harmonic_bos_direction")
-        or _deep_get(blueprint, ["harmonic", "bos_direction"], "")
-        or engine.get("bos_direction")
-        or ""
+        engine.get("bos_direction")
+        or signal.get("bos_direction")
+        or blueprint.get("bos_direction")
+        or blueprint.get("choch_direction")
+        or direction
     ).upper()
     aligned_bos = bool(
         ea.get("bos_confirmed")
@@ -1072,8 +1055,6 @@ def _has_tp2_opportunity(payload: Dict, direction: str, tp1: float, tp2: float) 
         or engine.get("bos_confirmed")
         or blueprint.get("bos_confirmed")
         or blueprint.get("choch_confirmed")
-        or blueprint.get("harmonic_bos_eligible")
-        or _deep_get(blueprint, ["harmonic", "bos_eligible"], False)
     ) and bos_direction in {"", "NONE", "MIXED", direction}
 
     journey = str(
@@ -1722,23 +1703,25 @@ def _h1_prz_confirmation_context(
 def _bos_confirmation_context(payload: Dict) -> tuple[bool, str, float, int]:
     signal = payload.get("signal", {}) or {}
     ea = payload.get("ea", {}) or {}
+    engine = signal.get("engine_v4", {}) or {}
     blueprint = signal.get("blueprint", {}) or {}
-    harmonic = blueprint.get("harmonic", {}) or {}
     eligible = bool(
         ea.get("bos_confirmed")
         or signal.get("bos_confirmed")
+        or engine.get("bos_confirmed")
         or blueprint.get("bos_confirmed")
-        or blueprint.get("harmonic_bos_eligible")
-        or harmonic.get("bos_eligible")
+        or blueprint.get("choch_confirmed")
     )
     direction = str(
-        blueprint.get("harmonic_bos_direction")
-        or harmonic.get("bos_direction")
+        engine.get("bos_direction")
+        or signal.get("bos_direction")
+        or blueprint.get("bos_direction")
+        or blueprint.get("choch_direction")
         or ea.get("direction")
+        or signal.get("direction")
+        or engine.get("direction")
         or "NONE"
     ).upper()
-    if direction not in {"BUY", "SELL"}:
-        direction = _trend_bias_label(signal)
     price = _safe_float(
         blueprint.get("current_price")
         or _deep_get(blueprint, ["price_action", "current_price"], 0)
@@ -1767,8 +1750,13 @@ def _confirmation_event_context(payload: Dict) -> Dict:
     bos_ok, bos_direction, price, score = _bos_confirmation_context(payload)
     signal = payload.get("signal", {}) or {}
     blueprint = signal.get("blueprint", {}) or {}
-    sources = blueprint.get("harmonic_bos_sources") or _deep_get(
-        blueprint, ["harmonic", "bos_sources"], []
+    engine = signal.get("engine_v4", {}) or {}
+    sources = (
+        engine.get("bos_sources")
+        or signal.get("bos_sources")
+        or blueprint.get("bos_sources")
+        or blueprint.get("choch_sources")
+        or []
     )
     return {
         "eligible": bos_ok,
@@ -1854,11 +1842,6 @@ def _owner_v4_context(payload: Dict) -> Dict:
         direction = h1_direction
 
     harmonic = blueprint.get("harmonic", {}) or diagnostic.get("harmonic", {}) or {}
-    harmonic_direction = str(
-        harmonic.get("direction") or harmonic.get("approach_direction") or "NONE"
-    ).upper()
-    if direction not in {"BUY", "SELL"} and harmonic_direction in {"BUY", "SELL"}:
-        direction = harmonic_direction
 
     tunnel = _deep_get(blueprint, ["prz_layers", "tunnel_state"], {}) or {}
     if not tunnel:
@@ -2297,7 +2280,8 @@ def format_telegram_owner_v4_context(payload: Dict) -> str:
         + (f" | {_clean_text(', '.join(tunnel_flags))}" if tunnel_flags else ""),
         f"🟡 Level state: {_clean_text(level_state)}",
         f"🎯 Entry cluster: {_clean_text(entry_watch_text)}",
-        f"🔷 Harmonic: {_clean_text(harmonic_text)}",
+        f"🔷 Harmonic target: {_clean_text(harmonic_text)}"
+        " | TARGET ONLY AFTER BOS",
         f"📐 Pattern compare: {_clean_text(candidate_text)}",
         f"⚡ Trigger: {_clean_text(context.get('trigger_source') or 'NONE')}",
         f"⛔ Missing: {_clean_text(', '.join(missing) if missing else 'NONE')}",
@@ -2381,9 +2365,9 @@ def build_telegram_test_messages(direction: str = "SELL") -> list[str]:
                 "current_price": 3983.98,
                 "trend_h1": "UP" if is_buy else "DOWN",
                 "trend_h4": "UP" if is_buy else "DOWN",
-                "harmonic_bos_eligible": True,
-                "harmonic_bos_direction": direction,
-                "harmonic_bos_sources": ["M15"],
+                "bos_confirmed": True,
+                "bos_direction": direction,
+                "bos_sources": ["M15"],
                 "price_action": {
                     "m15_phase": phase,
                     "h1_phase": phase,
@@ -2723,43 +2707,6 @@ def _run_engine_v4_baseline(
         session_clock = SessionClock()
         risk_permissions = execution_lifecycle.risk_permissions(symbol)
         harmonic_context = _harmonic_gate_context(blueprint) if blueprint else None
-        if REQUIRE_HARMONIC_BIAS and evaluate_harmonic_bias is not None:
-            harmonic_direction = str(
-                (harmonic_context or {}).get("direction", "NONE")
-            ).upper()
-            harmonic_state = str(
-                (harmonic_context or {}).get("state", "NONE")
-            ).upper()
-            approach_direction = str(
-                (harmonic_context or {}).get("approach_direction", "NONE")
-            ).upper()
-            requested_direction = (
-                approach_direction
-                if harmonic_state == "FORMING" and approach_direction in {"BUY", "SELL"}
-                else
-                harmonic_direction
-                if harmonic_direction in {"BUY", "SELL"}
-                else "BUY"
-            )
-            bias_gate = evaluate_harmonic_bias(
-                requested_direction,
-                harmonic_context,
-                require_harmonic=True,
-            )
-            if not bias_gate.allowed:
-                if diagnostics_out is not None:
-                    diagnostics_out["status"] = "BLOCKED_HARMONIC_RESEARCH_GATE"
-                blocked_direction = (
-                    harmonic_direction
-                    if harmonic_direction in {"BUY", "SELL"}
-                    else None
-                )
-                return {
-                    "status": BLOCKED,
-                    "direction": blocked_direction,
-                    "reason": bias_gate.reason,
-                    "harmonic_bias": bias_gate.to_dict(),
-                }
         routed = SignalRouter(
             clock=session_clock,
             gate=FinalGate(session_clock),
@@ -2769,7 +2716,7 @@ def _run_engine_v4_baseline(
             df,
             **risk_permissions,
             harmonic_context=harmonic_context,
-            require_harmonic=REQUIRE_HARMONIC_BIAS,
+            require_harmonic=False,
         )
         signal = routed[0] if routed else None
         if diagnostics_out is not None:
@@ -3684,7 +3631,7 @@ async def webhook_tv(request: Request):
             raise HTTPException(status_code=409, detail=entry_gate.reason)
 
     # CLOSE must always pass.  A requested reverse is a new entry and therefore
-    # must pass the same time/risk/harmonic gate; if it fails, keep the close
+    # must pass the same market/risk gate; if it fails, keep the close
     # command but strip only the reverse leg.
     reverse_direction = str(payload.get("reverse_direction") or "").upper()
     if action in {"CLOSE", "EXIT", "CLOSE_ALL"} and reverse_direction:

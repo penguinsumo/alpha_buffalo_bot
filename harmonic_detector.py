@@ -334,8 +334,9 @@ def _project_embedded_abcd(
 
     AB and CD are projected as equal price legs.  The BC projection must be
     reciprocal to the C retracement, so both calculations converge on one D.
-    Harmonic geometry only grants directional permission; the entry engines
-    must still confirm the reversal candle breakout and HTF structure.
+    Harmonic geometry projects a possible post-BOS target. It never grants
+    entry permission; V4 owns the PRZ entry and structure independently
+    promotes that existing position before this projection may become TP2.
     """
     ab_size = abs(pts.b - pts.a)
     bc_size = abs(pts.c - pts.b)
@@ -416,7 +417,9 @@ def _project_embedded_abcd(
         "in_prz": in_prz,
         "priority": 1,
         "fallback": False,
-        "execution_authority": True,
+        "execution_authority": False,
+        "entry_authority": False,
+        "target_authority_after_bos": True,
         "ratio_model": "RECIPROCAL_AB_EQUALS_CD",
         "confirmation_required": [
             "PRZ_REVERSAL_CANDLE",
@@ -552,9 +555,10 @@ def project_harmonic_from_xabc(
                 "in_prz": in_prz,
                 "priority": int(rule.get("priority", 9)),
                 "fallback": bool(rule.get("fallback", False)),
-                # A broad geometry fallback is useful on the dashboard, but
-                # only a named ratio family may own execution bias.
-                "execution_authority": not bool(rule.get("fallback", False)),
+                # Named and fallback geometry are target context only.
+                "execution_authority": False,
+                "entry_authority": False,
+                "target_authority_after_bos": True,
                 "ratio_model": "XABCD_PRZ_CONVERGENCE",
                 "confirmation_required": [
                     "PRZ_REVERSAL_CANDLE",

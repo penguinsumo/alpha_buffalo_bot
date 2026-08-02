@@ -9,13 +9,11 @@ Entry confirmation belongs to the V4 setup:
     A confirmed H1 regular-candle green dot projected onto a closed M15 bar may
     use the two-layer demand-PRZ fast path without waiting for evidence >= 3.
 
-This gate therefore owns only market/risk permission and an optional research
-harmonic restriction.  It must not repeat an HA check or restrict BUY to a
-small list of historical "profit hours" after a valid closed-bar trigger has
-already fired.
+This gate therefore owns only market/risk permission. It must not repeat an HA
+check, restrict BUY to historical "profit hours", or use Harmonic as an entry
+restriction after a valid closed-bar trigger has already fired.
 """
 from session_clock import SessionState
-from engine_v4.harmonic_bias_gate import evaluate_harmonic_bias
 from engine_v4.session_gate import GateResult
 
 class FinalGate:
@@ -35,24 +33,9 @@ class FinalGate:
         if not consec_loss_ok:
             return GateResult(False, "Max consecutive losses reached")
 
-        harmonic_gate = evaluate_harmonic_bias(
-            direction,
-            harmonic_context,
-            require_harmonic=require_harmonic,
-        )
-        if not harmonic_gate.allowed:
-            return GateResult(False, harmonic_gate.reason)
-
-        harmonic_reason = (
-            f"|{harmonic_gate.reason}"
-            if harmonic_context is not None or require_harmonic
-            else ""
-        )
-
         if direction in {"BUY", "SELL"}:
             return GateResult(
                 True,
-                f"{session_state.session} {direction.lower()} allowed"
-                + harmonic_reason,
+                f"{session_state.session} {direction.lower()} allowed",
             )
         return GateResult(False, "Unknown direction")

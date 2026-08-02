@@ -79,7 +79,7 @@ def test_upper_zone_blocks_fresh_buy() -> None:
     sig = BuySignalEngine().evaluate(frame([row]), 0, NY_SESSION, ALLOWED)
     assert_equal(sig, None, "upper-zone bearish setup must block fresh BUY")
 
-def test_harmonic_d_prz_is_one_direction_only() -> None:
+def test_harmonic_d_prz_is_post_bos_target_only() -> None:
     context = {
         "found": True,
         "pattern": "Bullish_Symmetric_XABCD",
@@ -91,13 +91,47 @@ def test_harmonic_d_prz_is_one_direction_only() -> None:
     buy = evaluate_harmonic_bias("BUY", context, require_harmonic=True)
     sell = evaluate_harmonic_bias("SELL", context, require_harmonic=True)
 
-    assert_true(buy.allowed, "bullish harmonic D must license only BUY setup evaluation")
-    assert_true(not sell.allowed, "bullish harmonic D must hard-block fresh SELL")
-    assert_equal(sell.reason, "HARMONIC_BIAS_BUY_ONLY", "opposite harmonic reason")
+    assert_true(buy.allowed, "harmonic target context must never block BUY entry")
+    assert_true(sell.allowed, "harmonic target context must never block SELL entry")
+    assert_equal(
+        buy.reason,
+        "HARMONIC_D_AVAILABLE_FOR_POST_BOS_TARGET",
+        "completed D is target context only",
+    )
+    assert_equal(
+        sell.allowed_direction,
+        "BOTH",
+        "harmonic must have no one-way entry authority",
+    )
     assert_equal(
         buy.tunnel_alignment,
         "C_TO_D_APPROACH_ALIGNED",
         "falling parallel tunnel is the normal approach into bullish D",
+    )
+
+def test_decision_engine_never_uses_harmonic_for_entry_direction() -> None:
+    blueprint = ScenarioBlueprint(
+        timestamp="2026-07-30T00:00:00+00:00",
+        is_valid=True,
+        base_score=8,
+        watch_bias="BUY",
+        trade_plan="EXECUTE_READY",
+        harmonic_is_real=True,
+        harmonic_state="ACTIVE",
+        harmonic_direction="SELL",
+        harmonic_execution_authority=True,  # stale payload must be ignored
+    )
+
+    decision = DecisionEngine().evaluate(blueprint)
+
+    assert_equal(decision.action, "BUY", "PRZ/watch direction must own entry")
+    assert_true(
+        "harmonic_role=POST_BOS_TP2_ONLY" in decision.reason,
+        "decision diagnostics must expose the target-only harmonic contract",
+    )
+    assert_true(
+        not blueprint.to_dict()["harmonic"]["execution_authority"],
+        "serialized Harmonic context must never advertise entry authority",
     )
 
 def test_confirmed_tunnel_sweep_arms_only_the_aligned_approach() -> None:
@@ -248,7 +282,7 @@ def test_closed_m15_break_invalidates_h1_tunnel_but_forming_wick_does_not() -> N
         "closed M15 candle above falling upper boundary must invalidate tunnel",
     )
 
-def test_final_gate_owns_market_risk_and_optional_harmonic_only() -> None:
+def test_final_gate_owns_market_risk_and_never_harmonic() -> None:
     gate = FinalGate(SessionClock())
     context = {
         "found": True,
@@ -277,11 +311,14 @@ def test_final_gate_owns_market_risk_and_optional_harmonic_only() -> None:
         require_harmonic=True,
     )
 
-    assert_true(allowed.allowed, "NY BUY + bullish D must pass the single entry gate")
-    assert_true(not blocked.allowed, "SELL must not bypass bullish harmonic bias")
-    assert_equal(blocked.reason, "HARMONIC_BIAS_BUY_ONLY", "hard bias reason")
-    assert_true(not waiting.allowed, "pattern far from D must not create an entry")
-    assert_equal(waiting.reason, "WAIT_HARMONIC_D_PRZ", "wait for D location")
+    assert_true(allowed.allowed, "NY BUY must pass the market/risk entry gate")
+    assert_true(blocked.allowed, "opposite harmonic must not block a valid PRZ SELL")
+    assert_equal(
+        blocked.reason,
+        "NY sell allowed",
+        "entry gate must contain no harmonic decision",
+    )
+    assert_true(waiting.allowed, "pattern far from D has no entry authority")
 
 def test_final_gate_does_not_repeat_hour_or_ha_entry_checks() -> None:
     gate = FinalGate(SessionClock())
@@ -531,6 +568,8 @@ def test_choch_promotes_to_v5_journey() -> None:
             "V4_Sell_Entry_Zone": False,
             "CHoCH_Bull": True,
             "Pine_Valid_Buy": True,
+            "Pine_PRZ_Resistance_Low": 112.0,
+            "Pine_PRZ_Resistance_High": 120.0,
         }
     )
     rows = [base_row() for _ in range(5)] + [row]
@@ -539,7 +578,19 @@ def test_choch_promotes_to_v5_journey() -> None:
         gate=FinalGate(SessionClock()),
         buy_engine=BuySignalEngine(),
         sell_engine=SellSignalEngine(),
-    ).process(frame(rows))
+    ).process(
+        frame(rows),
+        harmonic_context={
+            "found": True,
+            "direction": "SELL",
+            "state": "ACTIVE",
+            "pattern": "BEARISH_ABCD",
+            "d_point": 116.0,
+            "prz_low": 112.0,
+            "prz_high": 120.0,
+        },
+        require_harmonic=True,
+    )
 
     assert_true(routed, "router should select CHoCH BUY candidate")
     sig = routed[0]
@@ -555,6 +606,29 @@ def test_choch_promotes_to_v5_journey() -> None:
     assert_true(
         not sig["engine_stages"]["v5"]["creates_new_order"],
         "V5 promotion must never create a duplicate order",
+    )
+    assert_equal(sig["tp1_price"], 105.0, "V4 keeps the local scalp checkpoint")
+    assert_equal(sig["tp2_price"], 116.0, "post-BOS TP2 uses harmonic D in next PRZ")
+    assert_equal(
+        sig["target_source"],
+        "HARMONIC_D_AT_NEXT_PRZ",
+        "Harmonic is a target source only after BOS",
+    )
+    assert_true(sig["harmonic_target_eligible"], "aligned next-PRZ D target is eligible")
+    assert_equal(sig["tp_mode"], "TP1_TP2", "V5 promotion exposes the runner route")
+    ea = build_ea_payload("XAUUSD", _runtime_signal(sig))
+    assert_equal(ea["action"], "OPEN", "V4 remains the sole entry command")
+    assert_equal(ea["tp1"], 105.0, "EA receives the V4 scalp checkpoint")
+    assert_equal(ea["tp_final"], 116.0, "EA receives post-BOS TP2")
+    assert_equal(
+        ea["target_source"],
+        "HARMONIC_D_AT_NEXT_PRZ",
+        "EA receives the same post-BOS target source",
+    )
+    assert_equal(
+        ea["order_policy"],
+        "V4_OPEN_ONCE_V5_MANAGE_EXISTING",
+        "EA contract forbids a duplicate V5 order",
     )
 
 def test_no_choch_stays_v4_range() -> None:
@@ -588,6 +662,16 @@ def test_no_choch_stays_v4_range() -> None:
     assert_equal(selected["journey_state"], "V4_SCALP_RANGE", "no CHoCH must stay V4 range")
     assert_true(not selected["bos_confirmed"], "no CHoCH must not mark BOS confirmed")
     assert_equal(
+        selected["tp2_price"],
+        selected["tp1_price"],
+        "without BOS V4 must expose one scalp target only",
+    )
+    assert_equal(selected["tp_mode"], "SINGLE_TP", "V4 scalp uses one public TP")
+    assert_true(
+        not selected["harmonic_target_eligible"],
+        "Harmonic target stays inactive before BOS",
+    )
+    assert_equal(
         selected["v4_state"],
         f"V4_{direction}_PRZ_ENTRY_READY",
         "PRZ entry must always expose V4",
@@ -610,6 +694,111 @@ def test_no_choch_stays_v4_range() -> None:
         ea["engine_stages"]["v5"]["command"],
         "WAIT_BOS_CHOCH",
         "V5 waits without opening another order",
+    )
+
+def test_cf_ready_without_structure_does_not_promote_v5() -> None:
+    selected = {
+        "status": SIGNAL,
+        "direction": "BUY",
+        "entry_price": 100.0,
+        "sl_price": 95.0,
+        "tp1_price": 105.0,
+        "tp2_price": 110.0,
+        "setup_state": "BUY_CF_READY",
+    }
+    router = SignalRouter(
+        clock=SessionClock(),
+        gate=FinalGate(SessionClock()),
+        buy_engine=BuySignalEngine(),
+        sell_engine=SellSignalEngine(),
+    )
+    row = base_row()
+    row.update({"CHoCH_Bull": False, "Micro_BOS_Up": False})
+
+    router._enrich_signal(selected, 0, 0, row)
+
+    assert_true(
+        not selected["bos_confirmed"],
+        "entry confirmation alone must not masquerade as structural BOS",
+    )
+    assert_equal(
+        selected["journey_state"],
+        "V4_SCALP_RANGE",
+        "confirmed V4 entry stays scalp until aligned BOS/CHoCH",
+    )
+    assert_equal(
+        selected["tp_mode"],
+        "SINGLE_TP",
+        "pre-BOS V4 exposes only the local scalp target",
+    )
+
+def test_bos_without_next_prz_does_not_invent_tp2() -> None:
+    selected = {
+        "status": SIGNAL,
+        "direction": "BUY",
+        "entry_price": 100.0,
+        "sl_price": 95.0,
+        "tp1_price": 105.0,
+        "tp2_price": 110.0,
+        "setup_state": "BUY_CF_READY",
+    }
+    router = SignalRouter(
+        clock=SessionClock(),
+        gate=FinalGate(SessionClock()),
+        buy_engine=BuySignalEngine(),
+        sell_engine=SellSignalEngine(),
+    )
+    row = base_row()
+    row.update(
+        {
+            "CHoCH_Bull": True,
+            "Micro_BOS_Up": False,
+            # No opposite PRZ beyond the local scalp checkpoint.
+            "Pine_PRZ_Resistance_Low": 99.0,
+            "Pine_PRZ_Resistance_High": 102.0,
+        }
+    )
+
+    router._enrich_signal(selected, 0, 0, row)
+
+    assert_true(selected["bos_confirmed"], "aligned CHoCH promotes management")
+    assert_equal(
+        selected["tp2_price"],
+        selected["tp1_price"],
+        "missing next PRZ must keep the safe V4 scalp target",
+    )
+    assert_equal(
+        selected["target_source"],
+        "V5_WAIT_NEXT_PRZ_TARGET",
+        "V5 waits for a mapped opposite PRZ instead of inventing TP2",
+    )
+    assert_equal(selected["tp_mode"], "SINGLE_TP", "no mapped runner target")
+
+def test_v5_continuation_never_creates_fresh_sell_order() -> None:
+    row = base_row()
+    row.update(
+        {
+            "V4_Sell_Setup": False,
+            "Pine_Valid_Sell": False,
+            "V4_Sell_Entry_Zone": False,
+            "BB_PRZ_Resistance_Confluence": False,
+            "Micro_BOS_Down": True,
+            "VSA_Sell_Wins": True,
+            "Trend_1H_Up": False,
+            "EMA20": 90.0,
+            "EMA50": 100.0,
+        }
+    )
+    signal = SellSignalEngine().evaluate(
+        frame([row]),
+        0,
+        NY_SESSION,
+        ALLOWED,
+    )
+    assert_equal(
+        signal,
+        None,
+        "BOS/V5 continuation may manage existing but never open a new SELL",
     )
 
 def test_session_kivanc_mask_uses_bangkok_asia_hours() -> None:

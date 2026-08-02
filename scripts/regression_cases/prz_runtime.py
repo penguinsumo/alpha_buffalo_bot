@@ -522,6 +522,98 @@ def test_m5_sniper_sweep_requires_closed_kivanc_bb_prz_reclaim_and_mirrors() -> 
         "SELL order retains its sniper source",
     )
 
+    # WATCH promotion: an ordinary completed rejection wick does not need to
+    # be a $10 one-candle spike or touch BB and Fib in the same candle.  The
+    # surrounding two-layer PRZ + evidence gate still applies before OPEN.
+    watch_buy_m5 = pd.DataFrame(
+        [
+            {"open": 98.0, "high": 99.0, "low": 96.0, "close": 97.0},
+            {"open": 97.0, "high": 98.0, "low": 95.0, "close": 96.0},
+            {"open": 96.0, "high": 97.0, "low": 94.0, "close": 95.0},
+            {"open": 95.0, "high": 96.0, "low": 94.5, "close": 95.0},
+            # Closed lower wick reclaims Fib 90; range is only $4.5.
+            {"open": 92.0, "high": 94.0, "low": 89.5, "close": 93.5},
+            {"open": 93.5, "high": 94.0, "low": 93.0, "close": 93.5},
+        ],
+        index=pd.date_range("2026-07-10 15:15", periods=6, freq="5min", tz="UTC"),
+    )
+    watch_buy_result = runtime._overlay_blueprint_prz_memory(
+        m15_buy,
+        BuyBlueprint(),
+        lock_bars=4,
+        df_5m=watch_buy_m5,
+        df_1h=None,
+    )
+    assert_equal(
+        watch_buy_result["V4_Buy_M5_Sniper_Mode"].iloc[-1],
+        "WICK_RECLAIM",
+        "closed lower wick promotes WATCH_BUY",
+    )
+    watch_buy_candidate = BuySignalEngine().evaluate(
+        watch_buy_result, 2, NY_SESSION, ALLOWED
+    )
+    assert_true(
+        watch_buy_candidate is not None,
+        "WATCH_BUY plus closed M5 wick reaches BUY engine",
+    )
+    assert_equal(
+        watch_buy_candidate["entry_mode"],
+        "V4_BUY_M5_WICK_RECLAIM",
+        "EA receives explicit BUY wick source",
+    )
+    assert_true(
+        watch_buy_candidate["entry_price"]
+        < watch_buy_candidate["tp1_price"]
+        <= watch_buy_candidate["tp2_price"],
+        "BUY wick signal always exposes directionally valid TP levels",
+    )
+
+    watch_sell_rows = [dict(row) for row in sell_rows]
+    for row in watch_sell_rows:
+        row["BB_Upper"] = 120.0
+    watch_sell_m5 = pd.DataFrame(
+        [
+            {"open": 102.0, "high": 104.0, "low": 101.0, "close": 103.0},
+            {"open": 103.0, "high": 105.0, "low": 102.0, "close": 104.0},
+            {"open": 104.0, "high": 106.0, "low": 103.0, "close": 105.0},
+            {"open": 105.0, "high": 106.0, "low": 104.5, "close": 105.0},
+            # Closed upper wick rejects Fib 110; range is only $5.
+            {"open": 108.0, "high": 111.0, "low": 106.0, "close": 106.5},
+            {"open": 106.5, "high": 107.0, "low": 106.0, "close": 106.5},
+        ],
+        index=pd.date_range("2026-07-10 15:15", periods=6, freq="5min", tz="UTC"),
+    )
+    watch_sell_result = runtime._overlay_blueprint_prz_memory(
+        frame(watch_sell_rows),
+        SellBlueprint(),
+        lock_bars=4,
+        df_5m=watch_sell_m5,
+        df_1h=None,
+    )
+    assert_equal(
+        watch_sell_result["V4_Sell_M5_Sniper_Mode"].iloc[-1],
+        "WICK_RECLAIM",
+        "closed upper wick promotes WATCH_SELL",
+    )
+    watch_sell_candidate = SellSignalEngine().evaluate(
+        watch_sell_result, 2, NY_SESSION, ALLOWED
+    )
+    assert_true(
+        watch_sell_candidate is not None,
+        "WATCH_SELL plus closed M5 wick reaches SELL engine",
+    )
+    assert_equal(
+        watch_sell_candidate["entry_mode"],
+        "V4_SELL_M5_WICK_RECLAIM",
+        "EA receives explicit SELL wick source",
+    )
+    assert_true(
+        watch_sell_candidate["tp2_price"]
+        <= watch_sell_candidate["tp1_price"]
+        < watch_sell_candidate["entry_price"],
+        "SELL wick signal always exposes directionally valid TP levels",
+    )
+
 def test_m5_two_point_reclaim_confirms_multibar_kivanc_reaction() -> None:
     class Blueprint:
         htf_prz_support_low = 88.0

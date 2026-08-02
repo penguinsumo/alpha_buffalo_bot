@@ -86,6 +86,21 @@ def _m5_sniper_sweep_overlay(
         2,
         int(os.getenv("ENGINE_V4_SNIPER_TWO_POINT_WINDOW", "6")),
     )
+    wick_minimum = max(
+        0.1,
+        float(os.getenv("ENGINE_V4_SNIPER_M5_WICK_MIN", "1.5")),
+    )
+    wick_body_ratio = max(
+        0.5,
+        float(os.getenv("ENGINE_V4_SNIPER_M5_WICK_BODY_RATIO", "1.25")),
+    )
+    wick_close_fraction = min(
+        0.9,
+        max(
+            0.5,
+            float(os.getenv("ENGINE_V4_SNIPER_M5_CLOSE_FRACTION", "0.55")),
+        ),
+    )
 
     m15_index = out.index
     if m15_index.tz is None:
@@ -292,6 +307,40 @@ def _m5_sniper_sweep_overlay(
             and close < sell_kivanc_level
         )
 
+        # WATCH promotion path for ordinary closed M5 rejection wicks.  The
+        # original $10 spike remains the strongest single-sweep path, but a
+        # smaller wick may release an already-armed multi-layer PRZ setup when
+        # it reclaims either an important level or a confirmed M15/H1 BB.  The
+        # PRZ-layer and evidence requirements are applied later by V4_Armed, so
+        # this path cannot turn a mid-zone wick into an order.
+        body_size = abs(close - open_price)
+        lower_wick = max(0.0, lower_body - low)
+        upper_wick = max(0.0, high - upper_body)
+        close_position = (close - low) / move if move > 0 else 0.0
+        sell_close_position = (high - close) / move if move > 0 else 0.0
+        buy_reclaimed_level = any(
+            close > level for level in touched_buy_levels
+        ) or bool(touched_buy_bb)
+        sell_reclaimed_level = any(
+            close < level for level in touched_sell_levels
+        ) or bool(touched_sell_bb)
+        buy_wick_reclaim = bool(
+            buy_location
+            and (touched_buy_levels or touched_buy_bb)
+            and buy_reclaimed_level
+            and lower_wick >= wick_minimum
+            and lower_wick >= max(body_size, 0.1) * wick_body_ratio
+            and close_position >= wick_close_fraction
+        )
+        sell_wick_reclaim = bool(
+            sell_location
+            and (touched_sell_levels or touched_sell_bb)
+            and sell_reclaimed_level
+            and upper_wick >= wick_minimum
+            and upper_wick >= max(body_size, 0.1) * wick_body_ratio
+            and sell_close_position >= wick_close_fraction
+        )
+
         # The chart can print two green BUY reactions while the decline is
         # distributed over several M5 candles.  Do not require either reaction
         # candle to be a $10 spike.  Instead, confirm two closed bullish
@@ -374,6 +423,23 @@ def _m5_sniper_sweep_overlay(
             out.at[row_index, "V4_Buy_M5_Sniper_Mode"] = "SINGLE_SWEEP"
             out.at[row_index, "V4_Buy_M5_Sniper_Point_Count"] = 1
             out.at[row_index, "V4_Buy_M5_Sniper_Time"] = timestamp.isoformat()
+        elif buy_wick_reclaim:
+            bb_tf, bb_level = (
+                min(touched_buy_bb, key=lambda item: abs(low - item[1]))
+                if touched_buy_bb
+                else ("NONE", 0.0)
+            )
+            out.at[row_index, "V4_Buy_M5_Sniper_Evidence"] = True
+            out.at[row_index, "V4_Buy_M5_Sniper_Move"] = max(
+                _safe_float(out.at[row_index, "V4_Buy_M5_Sniper_Move"]),
+                move,
+            )
+            out.at[row_index, "V4_Buy_M5_Sniper_Kivanc"] = buy_kivanc_level
+            out.at[row_index, "V4_Buy_M5_Sniper_BB"] = bb_level
+            out.at[row_index, "V4_Buy_M5_Sniper_BB_TF"] = bb_tf
+            out.at[row_index, "V4_Buy_M5_Sniper_Mode"] = "WICK_RECLAIM"
+            out.at[row_index, "V4_Buy_M5_Sniper_Point_Count"] = 1
+            out.at[row_index, "V4_Buy_M5_Sniper_Time"] = timestamp.isoformat()
         elif buy_two_point and buy_pair_bb is not None:
             bb_tf, bb_level = buy_pair_bb
             out.at[row_index, "V4_Buy_M5_Sniper_Evidence"] = True
@@ -401,6 +467,23 @@ def _m5_sniper_sweep_overlay(
             out.at[row_index, "V4_Sell_M5_Sniper_BB"] = bb_level
             out.at[row_index, "V4_Sell_M5_Sniper_BB_TF"] = bb_tf
             out.at[row_index, "V4_Sell_M5_Sniper_Mode"] = "SINGLE_SWEEP"
+            out.at[row_index, "V4_Sell_M5_Sniper_Point_Count"] = 1
+            out.at[row_index, "V4_Sell_M5_Sniper_Time"] = timestamp.isoformat()
+        elif sell_wick_reclaim:
+            bb_tf, bb_level = (
+                min(touched_sell_bb, key=lambda item: abs(high - item[1]))
+                if touched_sell_bb
+                else ("NONE", 0.0)
+            )
+            out.at[row_index, "V4_Sell_M5_Sniper_Evidence"] = True
+            out.at[row_index, "V4_Sell_M5_Sniper_Move"] = max(
+                _safe_float(out.at[row_index, "V4_Sell_M5_Sniper_Move"]),
+                move,
+            )
+            out.at[row_index, "V4_Sell_M5_Sniper_Kivanc"] = sell_kivanc_level
+            out.at[row_index, "V4_Sell_M5_Sniper_BB"] = bb_level
+            out.at[row_index, "V4_Sell_M5_Sniper_BB_TF"] = bb_tf
+            out.at[row_index, "V4_Sell_M5_Sniper_Mode"] = "WICK_RECLAIM"
             out.at[row_index, "V4_Sell_M5_Sniper_Point_Count"] = 1
             out.at[row_index, "V4_Sell_M5_Sniper_Time"] = timestamp.isoformat()
 
@@ -776,10 +859,20 @@ def _overlay_blueprint_prz_memory(
         & out["V4_Buy_M5_Sniper_Mode"].eq("TWO_POINT_RECLAIM"),
         "V4_Buy_Trigger_Source",
     ] = "M5_TWO_POINT_RECLAIM"
+    out.loc[
+        out["V4_Buy_Sniper_Trigger"]
+        & out["V4_Buy_M5_Sniper_Mode"].eq("WICK_RECLAIM"),
+        "V4_Buy_Trigger_Source",
+    ] = "M5_WICK_RECLAIM"
     out["V4_Sell_Trigger_Source"] = "NONE"
     out.loc[out["V4_Sell_HA_Trigger"], "V4_Sell_Trigger_Source"] = "M15_HA_BEAR_FLIP"
     out.loc[out["V4_Sell_Pinbar_Trigger"], "V4_Sell_Trigger_Source"] = "BEAR_PINBAR_LOW_BREAK"
     out.loc[out["V4_Sell_Sniper_Trigger"], "V4_Sell_Trigger_Source"] = "M5_SNIPER_RECLAIM"
+    out.loc[
+        out["V4_Sell_Sniper_Trigger"]
+        & out["V4_Sell_M5_Sniper_Mode"].eq("WICK_RECLAIM"),
+        "V4_Sell_Trigger_Source",
+    ] = "M5_WICK_RECLAIM"
 
     # Production V4 uses one canonical entry contract. Older setup flags from
     # add_indicators() remain observable but cannot bypass ARMED + OR trigger.

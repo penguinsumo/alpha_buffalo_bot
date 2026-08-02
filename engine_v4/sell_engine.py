@@ -44,17 +44,9 @@ class SellSignalEngine(BaseEngine):
 
         upper_setup = bool(row.get("V4_Sell_Setup", False))
         pine_valid = bool(row.get("Pine_Valid_Sell", False))
-        sell_continuation = bool(recent_micro_bos_down and row.get("VSA_Sell_Wins", False))
-
-        # Keep bearish trend context for continuation only. V4 upper-zone
-        # location setups must not be blocked by H1/EMA trend bias.
+        # V5 may manage an existing V4 position after BOS/CHoCH, but it must
+        # never create a fresh continuation order away from a supply PRZ.
         if not (upper_setup or pine_valid):
-            if bool(row.get("Trend_1H_Up", False)):
-                return None
-            if not (row.get("EMA20", 0) < row.get("EMA50", 0)):
-                return None
-
-        if not (upper_setup or pine_valid or sell_continuation):
             return None
 
         entry = float(row["close"])
@@ -85,7 +77,10 @@ class SellSignalEngine(BaseEngine):
             else sniper_window.iloc[0:0]
         )
         m5_sniper = bool(
-            trigger_source == "M5_SNIPER_RECLAIM"
+            trigger_source in {
+                "M5_SNIPER_RECLAIM",
+                "M5_WICK_RECLAIM",
+            }
             or (
                 trigger_source == "NONE"
                 and memory_trigger
@@ -114,12 +109,8 @@ class SellSignalEngine(BaseEngine):
 
         signal_tp = float(row.get("Fib_072", 0.0) or 0.0)
         bb_lower_tp = float(row.get("BB_Lower", 0.0) or 0.0)
-        if signal_tp > 0 and signal_tp < entry and (recent_micro_bos_down or recent_sweep_above_100 or recent_sell_reclaim):
-            tp = signal_tp
-            exit_mode = "V5_SIGNAL_TP"
-        else:
-            tp = bb_lower_tp
-            exit_mode = "V4_BB_LOWER"
+        tp = bb_lower_tp
+        exit_mode = "V4_BB_LOWER"
 
         if not (tp < entry < sl):
             return None
@@ -188,6 +179,8 @@ class SellSignalEngine(BaseEngine):
 
         if trigger_source == "M5_SNIPER_RECLAIM":
             entry_mode = "V4_SELL_M5_SNIPER_RECLAIM"
+        elif trigger_source == "M5_WICK_RECLAIM":
+            entry_mode = "V4_SELL_M5_WICK_RECLAIM"
         elif trigger_source == "BEAR_PINBAR_LOW_BREAK":
             entry_mode = "V4_SELL_PINBAR_LOW_BREAK"
         elif trigger_source == "M15_HA_BEAR_FLIP":
@@ -202,10 +195,8 @@ class SellSignalEngine(BaseEngine):
             entry_mode = "V4_SELL_PRZ_MEMORY_HA_FLIP"
         elif bb_prz_confluence:
             entry_mode = "V4_SELL_BB_PRZ_CONFLUENCE"
-        elif upper_setup or pine_valid:
-            entry_mode = "V4_SELL_PINE_PRZ_VSA"
         else:
-            entry_mode = "V5_SELL_CONTINUATION"
+            entry_mode = "V4_SELL_PINE_PRZ_VSA"
 
         tp1 = float(row.get("BB_Mid", 0.0) or 0.0)
         if not (tp < tp1 < entry):
@@ -272,8 +263,8 @@ class SellSignalEngine(BaseEngine):
             "entry_rr": rr,
             "rr_ok": rr_ok,
             "min_rr": min_rr,
-            "session_quality_gate": trigger_source if trigger_source != "NONE" else "DEEP_100_WALL_RECLAIM" if deep_reclaim else "KIVANC_PINBAR_BREAK" if pinbar_break else "M5_SNIPER_KIVANC_BB_HA_FLIP" if m5_sniper else "PRZ_MEMORY_EVIDENCE_TRIGGER" if memory_trigger else "PINE_PRZ_RESISTANCE_PA_VSA" if upper_setup or pine_valid else "BOS_CONTINUATION",
-            "sell_dot_reason": "PINE_PRZ_PA_VSA" if pine_valid else "MICRO_BOS_CONTINUATION",
+            "session_quality_gate": trigger_source if trigger_source != "NONE" else "DEEP_100_WALL_RECLAIM" if deep_reclaim else "KIVANC_PINBAR_BREAK" if pinbar_break else "M5_SNIPER_KIVANC_BB_HA_FLIP" if m5_sniper else "PRZ_MEMORY_EVIDENCE_TRIGGER" if memory_trigger else "PINE_PRZ_RESISTANCE_PA_VSA",
+            "sell_dot_reason": "PINE_PRZ_PA_VSA" if pine_valid else "V4_PRZ_REJECTION",
             "pine_valid": pine_valid,
             "pa_bear_confirmed": bool(row.get("Pine_PA_Bear_Confirmed", False)),
             "vsa_buy_pressure": float(row.get("VSA_Buy_Pressure", 0.0) or 0.0),

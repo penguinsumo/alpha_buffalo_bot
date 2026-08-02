@@ -227,12 +227,24 @@ def _apply_engine_v4_signal(signal: Dict, engine_signal: Dict | None) -> Dict:
     signal["v5_basis"] = engine_signal.get("v5_basis", "BASE")
     signal["session_quality_gate"] = engine_signal.get("session_quality_gate", "BUY_TIMING_GATE" if direction == "BUY" else "UNKNOWN")
     signal["sell_dot_reason"] = engine_signal.get("sell_dot_reason", "UNKNOWN")
+    signal["target_source"] = engine_signal.get("target_source")
+    signal["tp_mode"] = engine_signal.get("tp_mode")
+    signal["target_contract"] = engine_signal.get("target_contract")
+    signal["harmonic_role"] = engine_signal.get("harmonic_role")
+    signal["harmonic_target_price"] = engine_signal.get("harmonic_target_price")
+    signal["harmonic_target_eligible"] = bool(
+        engine_signal.get("harmonic_target_eligible")
+    )
+    signal["next_prz_low"] = engine_signal.get("next_prz_low")
+    signal["next_prz_high"] = engine_signal.get("next_prz_high")
 
     for _key in (
         "scenario_state", "journey_state", "v4_state", "v5_state",
         "engine_stages", "order_policy", "trade_management", "break_prediction",
         "bos_confirmed", "vsa_gate", "vsa_pressure_delta", "checkpoint_price",
-        "approach_break_zone", "setup_state",
+        "approach_break_zone", "setup_state", "target_source", "tp_mode",
+        "target_contract", "harmonic_role", "harmonic_target_price",
+        "harmonic_target_eligible", "next_prz_low", "next_prz_high",
     ):
         if engine_signal.get(_key) is not None:
             signal[_key] = engine_signal.get(_key)
@@ -265,6 +277,8 @@ def _python_trade_management_contract(direction: str, signal: Dict, setup_info: 
     management["m5_fallback"] = "HOLD_USE_SL_TP_TIMEOUT"
     management["ha_trailing_activation"] = "AFTER_TP1_AND_BE_ONLY"
     management.setdefault("bos_required_always", False)
+    management["bos_required_for_tp2"] = True
+    management["harmonic_role"] = "POST_BOS_TP2_AT_NEXT_PRZ_ONLY"
 
     if direction == "BUY":
         management.setdefault("entry_source", "VSA_DEMAND_WALL_REACTION")
@@ -274,9 +288,8 @@ def _python_trade_management_contract(direction: str, signal: Dict, setup_info: 
         management.setdefault("vsa_wall_high", _safe_float(engine_v4.get("vsa_wall_high")))
         management.setdefault("sl_rule", "BELOW_VSA_WALL_LOW")
         management.setdefault("tp_route", {
-            "tp1": "UPPER_BB_CHECKPOINT",
-            "tp2": "NEXT_PRZ",
-            "tp3": "HARMONIC_ROUTE_OR_NEXT_HARMONIC_PRZ",
+            "tp1": "V4_REACTION_CHECKPOINT_BEFORE_BOS",
+            "tp2": "HARMONIC_D_IF_OVERLAPS_NEXT_SUPPLY_PRZ_AFTER_BOS",
         })
         management["ha_close_all_if"] = "TWO_CLOSED_HA5_RED_AFTER_BE"
         management["move_be_if"] = "TP1_REACHED"
@@ -291,9 +304,8 @@ def _python_trade_management_contract(direction: str, signal: Dict, setup_info: 
         management.setdefault("vsa_wall_high", _safe_float(engine_v4.get("vsa_wall_high")))
         management.setdefault("sl_rule", "ABOVE_VSA_WALL_HIGH")
         management.setdefault("tp_route", {
-            "tp1": "LOWER_BB_CHECKPOINT",
-            "tp2": "NEXT_PRZ",
-            "tp3": "HARMONIC_ROUTE_OR_NEXT_HARMONIC_PRZ",
+            "tp1": "V4_REACTION_CHECKPOINT_BEFORE_BOS",
+            "tp2": "HARMONIC_D_IF_OVERLAPS_NEXT_DEMAND_PRZ_AFTER_BOS",
         })
         management["ha_close_all_if"] = "TWO_CLOSED_HA5_GREEN_AFTER_BE"
         management["move_be_if"] = "TP1_REACHED"
@@ -527,6 +539,14 @@ def build_ea_payload(symbol: str, signal: Dict, *, min_rr: float) -> Dict:
         "bos_confirmed": bool(signal.get("bos_confirmed") or (signal.get("engine_v4", {}) or {}).get("bos_confirmed")),
         "vsa_gate": signal.get("vsa_gate") or (signal.get("engine_v4", {}) or {}).get("vsa_gate"),
         "checkpoint_price": _safe_float(signal.get("checkpoint_price") or (signal.get("engine_v4", {}) or {}).get("checkpoint_price")),
+        "target_source": signal.get("target_source") or (signal.get("engine_v4", {}) or {}).get("target_source") or "V4_SCALP_CHECKPOINT",
+        "tp_mode": signal.get("tp_mode") or (signal.get("engine_v4", {}) or {}).get("tp_mode") or "SINGLE_TP",
+        "target_contract": signal.get("target_contract") or (signal.get("engine_v4", {}) or {}).get("target_contract") or {},
+        "harmonic_role": signal.get("harmonic_role") or (signal.get("engine_v4", {}) or {}).get("harmonic_role") or "POST_BOS_TP2_ONLY",
+        "harmonic_target_price": _safe_float(signal.get("harmonic_target_price") or (signal.get("engine_v4", {}) or {}).get("harmonic_target_price")),
+        "harmonic_target_eligible": bool(signal.get("harmonic_target_eligible") or (signal.get("engine_v4", {}) or {}).get("harmonic_target_eligible")),
+        "next_prz_low": _safe_float(signal.get("next_prz_low") or (signal.get("engine_v4", {}) or {}).get("next_prz_low")),
+        "next_prz_high": _safe_float(signal.get("next_prz_high") or (signal.get("engine_v4", {}) or {}).get("next_prz_high")),
 
         "visual_sl_source": trade_management.get("visual_sl_source", "NONE"),
         "tp_route": trade_management.get("tp_route", {}),

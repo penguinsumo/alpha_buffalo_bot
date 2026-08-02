@@ -155,7 +155,7 @@ class ScenarioBlueprint:
     harmonic_tp3: float = 0.0
     harmonic_invalidation: float = 0.0
     harmonic_projection_mode: str = "COMPLETED_XABCD"
-    harmonic_execution_authority: bool = True
+    harmonic_execution_authority: bool = False
     harmonic_tunnel_broken: bool = False
     harmonic_selected_pattern: str = ""
     harmonic_candidate_patterns: List[Dict] = field(default_factory=list)
@@ -365,7 +365,9 @@ class ScenarioBlueprint:
                 "tp3": self.harmonic_tp3,
                 "invalidation": self.harmonic_invalidation,
                 "projection_mode": self.harmonic_projection_mode,
-                "execution_authority": self.harmonic_execution_authority,
+                "execution_authority": False,
+                "entry_authority": False,
+                "target_authority_after_bos": True,
                 "tunnel_broken": self.harmonic_tunnel_broken,
                 "selected_pattern": self.harmonic_selected_pattern,
                 "candidate_patterns": self.harmonic_candidate_patterns,

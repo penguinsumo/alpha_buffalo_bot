@@ -71,6 +71,7 @@ class BuySignalEngine(BaseEngine):
             trigger_source in {
                 "M5_SNIPER_RECLAIM",
                 "M5_TWO_POINT_RECLAIM",
+                "M5_WICK_RECLAIM",
             }
             or (
                 trigger_source == "NONE"
@@ -105,6 +106,8 @@ class BuySignalEngine(BaseEngine):
             tp = tp1
         if not (sl < entry < tp):
             return None
+        if not (entry < tp1 <= tp):
+            tp1 = tp
 
         risk = entry - sl
         reward = tp - entry
@@ -173,6 +176,8 @@ class BuySignalEngine(BaseEngine):
             entry_mode = "V4_BUY_M5_TWO_POINT_RECLAIM"
         elif trigger_source == "M5_SNIPER_RECLAIM":
             entry_mode = "V4_BUY_M5_SNIPER_RECLAIM"
+        elif trigger_source == "M5_WICK_RECLAIM":
+            entry_mode = "V4_BUY_M5_WICK_RECLAIM"
         elif trigger_source == "BULL_PINBAR_HIGH_BREAK":
             entry_mode = "V4_BUY_PINBAR_HIGH_BREAK"
         elif trigger_source == "M15_HA_BULL_FLIP":

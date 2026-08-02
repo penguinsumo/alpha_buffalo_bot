@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Hard directional bias for PRZ V4/V5 entries.
+"""Harmonic/Newday context for post-BOS targets.
 
-The harmonic detector's direction is the reversal direction at D.  It is not
-the direction of the final C->D approach leg.  Once price is armed at, or is
-inside, the harmonic PRZ, fresh entries are permitted only in that reversal
-direction.  Entry confirmation (sweep/reclaim, BB/VSA and HA) remains the job
-of the BUY/SELL engines; this gate never creates a trade by itself.
+Harmonic never owns or blocks a fresh V4 entry. PRZ location plus a confirmed
+price-action trigger owns entry. After aligned BOS/CHoCH promotes the existing
+position to V5, the harmonic D projection may select TP2 when it overlaps the
+next opposite PRZ.
+
+The historic function name is retained for API compatibility. ``allowed`` is
+therefore always true for a valid BUY/SELL request; the remaining fields are
+diagnostic target context only.
 """
 from __future__ import annotations
 
@@ -71,11 +74,11 @@ def evaluate_harmonic_bias(
     *,
     require_harmonic: bool = True,
 ) -> HarmonicBiasResult:
-    """Return the one direction that may arm a fresh V4/V5 entry.
+    """Return non-blocking harmonic context for compatibility.
 
-    CLOSE/EXIT commands must never call this function.  A confirmed XABC in
-    FORMING state may license only its tunnel-aligned C->D approach.  ARMED or
-    ACTIVE at the projected D/PRZ switches authority to the reversal direction.
+    ``require_harmonic`` is intentionally ignored. A stale production or
+    research flag must never turn a missing/opposite pattern into an entry
+    veto again.
     """
     requested = str(direction or "").upper()
     if requested not in {"BUY", "SELL"}:
@@ -84,12 +87,8 @@ def evaluate_harmonic_bias(
         )
 
     if context is None:
-        if require_harmonic:
-            return HarmonicBiasResult(
-                False, "NONE", "MISSING", "HARMONIC_BIAS_UNAVAILABLE"
-            )
         return HarmonicBiasResult(
-            True, "BOTH", "OPTIONAL", "HARMONIC_BIAS_OPTIONAL"
+            True, "BOTH", "MISSING", "HARMONIC_TARGET_CONTEXT_UNAVAILABLE"
         )
 
     found = bool(
@@ -125,28 +124,14 @@ def evaluate_harmonic_bias(
         )
         or "NONE"
     ).upper()
-    execution_authority = bool(_value(context, "execution_authority", True))
     tunnel_broken = bool(_value(context, "tunnel_broken", False))
 
     if not found or harmonic_direction not in {"BUY", "SELL"}:
-        if require_harmonic:
-            return HarmonicBiasResult(
-                False,
-                "NONE",
-                state,
-                "HARMONIC_BIAS_UNAVAILABLE",
-                pattern,
-                source,
-                alignment,
-                harmonic_direction,
-                approach_direction,
-                "MISSING",
-            )
         return HarmonicBiasResult(
             True,
             "BOTH",
             state,
-            "HARMONIC_BIAS_OPTIONAL",
+            "HARMONIC_TARGET_CONTEXT_OPTIONAL",
             pattern,
             source,
             alignment,
@@ -155,24 +140,10 @@ def evaluate_harmonic_bias(
             "OPTIONAL",
         )
 
-    if not execution_authority:
-        return HarmonicBiasResult(
-            False,
-            "NONE",
-            state,
-            "HARMONIC_CANDIDATE_CONTEXT_ONLY",
-            pattern,
-            source,
-            alignment,
-            harmonic_direction,
-            approach_direction,
-            "CONTEXT_ONLY",
-        )
-
     if tunnel_broken:
         return HarmonicBiasResult(
-            False,
-            "NONE",
+            True,
+            "BOTH",
             state,
             "HARMONIC_TUNNEL_BROKEN",
             pattern,
@@ -185,8 +156,8 @@ def evaluate_harmonic_bias(
 
     if state in INVALID_HARMONIC_STATES:
         return HarmonicBiasResult(
-            False,
-            "NONE",
+            True,
+            "BOTH",
             state,
             "HARMONIC_PATTERN_INVALIDATED",
             pattern,
@@ -198,50 +169,11 @@ def evaluate_harmonic_bias(
         )
 
     if state in FORMING_HARMONIC_STATES:
-        if approach_direction not in {"BUY", "SELL"}:
-            return HarmonicBiasResult(
-                False,
-                "NONE",
-                state,
-                "HARMONIC_APPROACH_DIRECTION_UNAVAILABLE",
-                pattern,
-                source,
-                alignment,
-                harmonic_direction,
-                approach_direction,
-                "C_TO_D",
-            )
-        if alignment != "C_TO_D_APPROACH_ALIGNED":
-            return HarmonicBiasResult(
-                False,
-                approach_direction,
-                state,
-                "WAIT_PARALLEL_TUNNEL_ALIGNMENT",
-                pattern,
-                source,
-                alignment,
-                harmonic_direction,
-                approach_direction,
-                "C_TO_D",
-            )
-        if requested != approach_direction:
-            return HarmonicBiasResult(
-                False,
-                approach_direction,
-                state,
-                f"HARMONIC_FORMING_{approach_direction}_ONLY",
-                pattern,
-                source,
-                alignment,
-                harmonic_direction,
-                approach_direction,
-                "C_TO_D",
-            )
         return HarmonicBiasResult(
             True,
-            approach_direction,
+            "BOTH",
             state,
-            f"HARMONIC_C_TO_D_{approach_direction}_ALLOWED",
+            "HARMONIC_FORMING_TARGET_CONTEXT",
             pattern,
             source,
             alignment,
@@ -252,10 +184,10 @@ def evaluate_harmonic_bias(
 
     if state not in ACTIVE_HARMONIC_STATES:
         return HarmonicBiasResult(
-            False,
-            harmonic_direction,
+            True,
+            "BOTH",
             state,
-            "WAIT_HARMONIC_D_PRZ",
+            "WAIT_HARMONIC_TARGET_PRZ",
             pattern,
             source,
             alignment,
@@ -264,25 +196,11 @@ def evaluate_harmonic_bias(
             "WAIT_D",
         )
 
-    if requested != harmonic_direction:
-        return HarmonicBiasResult(
-            False,
-            harmonic_direction,
-            state,
-            f"HARMONIC_BIAS_{harmonic_direction}_ONLY",
-            pattern,
-            source,
-            alignment,
-            harmonic_direction,
-            approach_direction,
-            "D_REVERSAL",
-        )
-
     return HarmonicBiasResult(
         True,
-        harmonic_direction,
+        "BOTH",
         state,
-        f"HARMONIC_{harmonic_direction}_D_PRZ_ALLOWED",
+        "HARMONIC_D_AVAILABLE_FOR_POST_BOS_TARGET",
         pattern,
         source,
         alignment,

@@ -36,7 +36,9 @@ class HarmonicContext(BaseModel):
     priority: int = 5
     reliability: str = "UNKNOWN"
     projection_mode: str = "COMPLETED_XABCD"
-    execution_authority: bool = True
+    execution_authority: bool = False
+    entry_authority: bool = False
+    target_authority_after_bos: bool = True
     selected_pattern: str = ""
     candidate_patterns: List[Dict] = Field(default_factory=list)
     current_xad: float = 0.0

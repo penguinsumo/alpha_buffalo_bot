@@ -21,6 +21,7 @@ import alpha_buffalo_signal as runtime
 import early_warning as warning_runtime
 import telegram_bot as telegram_bot_runtime
 import telegram_guard as telegram_guard_runtime
+from decision_engine import DecisionEngine
 from engine_v4.buy_engine import BuySignalEngine
 from engine_v4.final_gate import FinalGate
 from engine_v4.harmonic_bias_gate import evaluate_harmonic_bias
@@ -40,6 +41,7 @@ from scenario_scanner import (
     confirmed_channel_boundary_broken,
     detect_confirmed_tunnel_sweep,
 )
+from scenario_blueprint import ScenarioBlueprint
 from session_clock import SessionClock, SessionState, market_closed_reason
 from alpha_buffalo_signal import (
     API_LICENSE_KEY,

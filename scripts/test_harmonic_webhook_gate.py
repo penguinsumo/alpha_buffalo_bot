@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end checks for harmonic one-way entry bias at /webhook/tv."""
+"""End-to-end check that Harmonic has no entry authority at /webhook/tv."""
 from __future__ import annotations
 
 import os
@@ -57,51 +57,41 @@ def main() -> None:
             "session_state": None,
         }
         service._pine_entry_permission = lambda direction, symbol: GateResult(
-            str(direction).upper() == "BUY",
-            "HARMONIC_BUY_D_PRZ_ALLOWED"
-            if str(direction).upper() == "BUY"
-            else "HARMONIC_BIAS_BUY_ONLY",
+            True,
+            f"TEST_{str(direction).upper()}_MARKET_RISK_ALLOWED",
         )
 
         with TestClient(service.app) as client:
-            blocked_sell = client.post(
+            opened_sell = client.post(
                 "/webhook/tv",
-                json=command("OPEN", "SELL", "XAUUSD-HARMONIC-SELL-BLOCK"),
+                json=command("OPEN", "SELL", "XAUUSD-HARMONIC-SELL-OPEN"),
             )
-            assert blocked_sell.status_code == 409, blocked_sell.text
-            assert blocked_sell.json()["detail"] == "HARMONIC_BIAS_BUY_ONLY"
+            assert opened_sell.status_code == 200, opened_sell.text
+            assert opened_sell.json()["command"]["direction"] == "SELL"
 
-            opened_buy = client.post(
-                "/webhook/tv",
-                json=command("OPEN", "BUY", "XAUUSD-HARMONIC-BUY-OPEN"),
-            )
-            assert opened_buy.status_code == 200, opened_buy.text
-            assert opened_buy.json()["command"]["direction"] == "BUY"
-
-            close = command("CLOSE", "BUY", "XAUUSD-HARMONIC-BUY-OPEN")
+            close = command("CLOSE", "SELL", "XAUUSD-HARMONIC-SELL-OPEN")
             close.update(
                 {
-                    "reverse_direction": "SELL",
-                    "reverse_entry_price": 3995.0,
-                    "reverse_sl_price": 4005.0,
-                    "reverse_tp1_price": 3985.0,
-                    "reverse_tp2_price": 3970.0,
+                    "reverse_direction": "BUY",
+                    "reverse_entry_price": 4005.0,
+                    "reverse_sl_price": 3995.0,
+                    "reverse_tp1_price": 4015.0,
+                    "reverse_tp2_price": 4030.0,
                     "reverse_score": 5,
-                    "reverse_signal_id": "XAUUSD-HARMONIC-REV-SELL",
-                    "reverse_target_source": "DEMAND_PRZ",
+                    "reverse_signal_id": "XAUUSD-HARMONIC-REV-BUY",
+                    "reverse_target_source": "SUPPLY_PRZ",
                 }
             )
             closed = client.post("/webhook/tv", json=close)
             assert closed.status_code == 200, closed.text
             close_command = closed.json()["command"]
             assert close_command["action"] == "CLOSE_ALL"
-            assert "after_ack" not in close_command
-            assert close_command["reverse_blocked_reason"] == "HARMONIC_BIAS_BUY_ONLY"
+            assert close_command["after_ack"]["direction"] == "BUY"
+            assert "reverse_blocked_reason" not in close_command
 
-    print("PASS bullish harmonic D blocks fresh SELL webhook")
-    print("PASS aligned BUY webhook remains executable")
-    print("PASS CLOSE passes while counter-bias reverse leg is removed")
-    print("Summary: 3/3 harmonic webhook checks passed")
+    print("PASS Harmonic cannot block a fresh SELL webhook")
+    print("PASS CLOSE may retain a market/risk-approved reverse BUY")
+    print("Summary: 2/2 harmonic target-only webhook checks passed")
 
 
 if __name__ == "__main__":
