@@ -93,7 +93,8 @@ def main() -> None:
             assert opened.json()["telegram_notified"] is True
             assert len(telegram_messages) == 1
             assert telegram_messages[-1][0] == "PINE"
-            assert "BUY" in telegram_messages[-1][1]
+            assert "📊 Type     : 🟢" in telegram_messages[-1][1]
+            assert "📊 Type     : 🟢 BUY" not in telegram_messages[-1][1]
             assert "ALPHA BUFFALO" in telegram_messages[-1][1]
             assert "TP1" in telegram_messages[-1][1]
             assert "TP2" in telegram_messages[-1][1]
@@ -102,6 +103,7 @@ def main() -> None:
             assert "Signal accepted and queued" not in telegram_messages[-1][1]
             open_command = opened.json()["command"]
             assert open_command["action"] == "OPEN"
+            assert open_command["direction"] == "BUY"
 
             telegram_status = client.get(
                 "/telegram/status",
@@ -233,7 +235,8 @@ def main() -> None:
             assert close_ack.json()["telegram_notified"] is True
             assert len(telegram_messages) == 2
             assert telegram_messages[-1][0] == "PINE"
-            assert "SELL" in telegram_messages[-1][1]
+            assert "📊 Type     : 🔴" in telegram_messages[-1][1]
+            assert "📊 Type     : 🔴 SELL" not in telegram_messages[-1][1]
 
             reverse_poll = client.get(
                 "/execution/command",
