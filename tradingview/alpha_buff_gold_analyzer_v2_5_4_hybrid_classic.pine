@@ -1,0 +1,660 @@
+//@version=6
+indicator("AlphaBuff Gold Analyzer v2.5.4 Hybrid Classic", shorttitle="AlphaBuff v2.5.4", overlay=true, max_labels_count=150, max_lines_count=80, max_boxes_count=30)
+
+// =============================================================================
+// AlphaBuff v2.5.4 Hybrid Classic
+// สถาปัตยกรรม: M15 (Location, Sweep, Evidence, Latch) -> M5 (Execution Trigger)
+// ใช้ M15 เป็น Context และตัวง้างไก (Armed) จากนั้นใช้ M5 Heikin Ashi ยืนยัน Momentum
+// และเข้าออเดอร์ด้วยราคาปิดจริง (Regular Close) ของ M5
+// Stop Loss อ้างอิงจากจุดกวาด (Sweep Extreme) ของ M15 เสมอ
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// 1. Inputs & UI Grouping
+// -----------------------------------------------------------------------------
+groupCore = "1. Core"
+executionTfOnly = input.bool(true, "Require chart timeframe = 5m", group=groupCore)
+marketSession = input.session("0000-2359:23456", "Alert session (Mon-Fri)", group=groupCore)
+marketTimezone = input.string("Asia/Bangkok", "Session timezone", group=groupCore)
+webhookKey = input.string("CHANGE_ME", "Webhook key", group=groupCore)
+minCluster = input.int(2, "Minimum PRZ cluster levels", minval=1, maxval=3, group=groupCore)
+minEvidence = input.int(3, "Minimum evidence score", minval=1, maxval=8, group=groupCore)
+setupTtlBars = input.int(4, "Setup latch (M15 bars)", minval=1, maxval=12, group=groupCore)
+cooldownBars = input.int(3, "Cooldown after exit (M5 bars)", minval=0, maxval=20, group=groupCore)
+
+groupPrz = "2. Confirmed PRZ"
+pivotBars = input.int(3, "Pivot confirmation bars", minval=2, maxval=8, group=groupPrz)
+lookbackD = input.int(60, "D1 swing lookback", minval=20, maxval=240, group=groupPrz)
+lookbackH4 = input.int(60, "H4 swing lookback", minval=20, maxval=240, group=groupPrz)
+lookbackH1 = input.int(60, "H1 swing lookback", minval=20, maxval=240, group=groupPrz)
+lookbackM5 = input.int(144, "M5 Fib swing lookback", minval=30, maxval=500, group=groupPrz)
+fibNear = input.float(0.72, "Deep PRZ near ratio", minval=0.50, maxval=0.90, step=0.001, group=groupPrz)
+fibDeep = input.float(0.886, "Deep PRZ deep ratio", minval=0.60, maxval=1.00, step=0.001, group=groupPrz)
+asiaFibSession = input.session("0400-1400:23456", "Asia Fib session", group=groupPrz)
+asiaFibNear = input.float(0.618, "Asia PRZ near ratio", minval=0.50, maxval=0.80, step=0.001, group=groupPrz)
+asiaFibDeep = input.float(0.705, "Asia PRZ deep ratio", minval=0.60, maxval=0.90, step=0.001, group=groupPrz)
+fibLineToleranceAtr = input.float(0.30, "M5/H1 Fib-line tolerance (M15 ATR)", minval=0.05, maxval=1.0, step=0.05, group=groupPrz)
+fibBbStackToleranceAtr = input.float(0.20, "Fib + BB15/BB30 stack tolerance (M15 ATR)", minval=0.05, maxval=0.75, step=0.05, group=groupPrz)
+
+groupEvidence = "3. Evidence (Evaluated on M15)"
+bbLen = input.int(20, "BB length", minval=5, maxval=100, group=groupEvidence)
+bbMult = input.float(2.0, "BB deviation", minval=0.5, maxval=5.0, step=0.1, group=groupEvidence)
+rsiLen = input.int(14, "M15 RSI length", minval=2, maxval=50, group=groupEvidence)
+stochLen = input.int(14, "M15 Stoch length", minval=3, maxval=50, group=groupEvidence)
+stochSmoothK = input.int(3, "M15 Stoch K smoothing", minval=1, maxval=10, group=groupEvidence)
+stochSmoothD = input.int(3, "M15 Stoch D smoothing", minval=1, maxval=10, group=groupEvidence)
+stochOversold = input.float(20.0, "M15 Stoch oversold", minval=1.0, maxval=40.0, step=1.0, group=groupEvidence)
+stochOverbought = input.float(80.0, "M15 Stoch overbought", minval=60.0, maxval=99.0, step=1.0, group=groupEvidence)
+pinWickRatio = input.float(1.5, "Pinbar wick/body ratio", minval=1.0, maxval=5.0, step=0.1, group=groupEvidence)
+gcSymbol = input.symbol("COMEX:GC1!", "GC futures symbol", group=groupEvidence)
+gcRvolMin = input.float(1.5, "GC RVOL bonus threshold", minval=1.0, maxval=5.0, step=0.1, group=groupEvidence)
+sweepTtlBars = input.int(8, "Sweep/reclaim memory (M15 bars)", minval=1, maxval=40, group=groupEvidence)
+reclaimAtr = input.float(0.25, "Reclaim allowance (ATR)", minval=0.0, maxval=1.0, step=0.05, group=groupEvidence)
+sweepInvalidationAtr = input.float(0.15, "Beyond 1.00 invalidation (ATR)", minval=0.0, maxval=1.0, step=0.05, group=groupEvidence)
+entryMaxDistanceAtr = input.float(0.75, "Max execution distance from zone (ATR)", minval=0.1, maxval=2.0, step=0.05, group=groupEvidence)
+
+groupRisk = "4. Risk and lifecycle"
+riskAtrBuffer = input.float(0.20, "SL ATR buffer", minval=0.0, maxval=2.0, step=0.05, group=groupRisk)
+tp1R = input.float(1.0, "TP1 / BE trigger (R)", minval=0.5, maxval=5.0, step=0.25, group=groupRisk)
+tp1StructuralMaxR = input.float(2.0, "Maximum structural TP1 distance (R)", minval=0.5, maxval=5.0, step=0.25, group=groupRisk)
+tp2R = input.float(3.0, "TP2 (R)", minval=1.0, maxval=10.0, step=0.25, group=groupRisk)
+maxTradeBars = input.int(40, "Maximum trade life (M5 bars)", minval=4, maxval=300, group=groupRisk)
+
+groupTargets = "5. Pattern targets / Zone fusion"
+patternSimilarityAtr = input.float(1.0, "Double top/bottom similarity (H1 ATR)", minval=0.25, maxval=3.0, step=0.25, group=groupTargets)
+targetMergeAtr = input.float(0.25, "Target merge tolerance (H1 ATR)", minval=0.05, maxval=1.0, step=0.05, group=groupTargets)
+minimumTargetR = input.float(1.0, "Minimum structural target (R)", minval=0.5, maxval=3.0, step=0.25, group=groupTargets)
+smcMaxAgeH1 = input.int(24, "Maximum OB/FVG age (H1 bars)", minval=3, maxval=120, group=groupTargets)
+fibExt127 = input.float(1.272, "Post-BOS Fib target 1", minval=1.0, maxval=2.0, step=0.001, group=groupTargets)
+fibExt1414 = input.float(1.414, "Post-BOS Fib target 2", minval=1.0, maxval=2.0, step=0.001, group=groupTargets)
+fibExt1618 = input.float(1.618, "Post-BOS Fib target 3", minval=1.0, maxval=3.0, step=0.001, group=groupTargets)
+
+groupVisual = "6. Visual"
+showZones = input.bool(true, "Show current decision zones", group=groupVisual)
+showHistoricalZones = input.bool(false, "Show rolling historical PRZ bands", group=groupVisual)
+zoneHistoryBars = input.int(48, "Current PRZ bars to the left", minval=0, maxval=500, group=groupVisual)
+zoneProjectionBars = input.int(60, "Current PRZ projection bars", minval=5, maxval=300, group=groupVisual)
+showTargetMap = input.bool(false, "Show measured target lines", group=groupVisual)
+showFibEntryLines = input.bool(true, "Show M5/H1 Fib entry confluence", group=groupVisual)
+showEvidenceDots = input.bool(true, "Show context/evidence dots", group=groupVisual)
+evidenceHistoryDays = input.int(14, "Evidence-dot history (days)", minval=1, maxval=14, group=groupVisual)
+showActiveTradeMap = input.bool(true, "Show active Entry / SL / TP map", group=groupVisual) // แก้ไขเพิ่มตัวแปรนี้
+tradeProjectionBars = input.int(24, "Active trade projection bars", minval=5, maxval=100, group=groupVisual) // แก้ไขเพิ่มตัวแปรนี้
+showDashboard = input.bool(true, "Show compact dashboard", group=groupVisual)
+
+// -----------------------------------------------------------------------------
+// 2. Helper Functions
+// -----------------------------------------------------------------------------
+f_num(float _value) => na(_value) ? "null" : str.tostring(_value, "#.#####")
+f_price(float _value) => na(_value) ? "-" : str.tostring(_value, "#.##")
+f_dashboard_bg(int _row) => _row == 0 ? color.rgb(38, 38, 38) : _row % 2 == 0 ? color.new(color.rgb(58, 58, 58), 8) : color.new(color.rgb(34, 34, 34), 8)
+
+f_m15_context(int _bbLen, float _bbMult, int _rsiLen, int _stochLen, int _smoothK, int _smoothD) =>
+    _bbBasis = ta.sma(close, _bbLen)
+    _bbDev = ta.stdev(close, _bbLen) * _bbMult
+    _stochLow = ta.lowest(low, _stochLen)
+    _stochHigh = ta.highest(high, _stochLen)
+    _stochRaw = _stochHigh == _stochLow ? 50.0 : 100.0 * (close - _stochLow) / (_stochHigh - _stochLow)
+    _stochK = ta.sma(_stochRaw, _smoothK)
+    _stochD = ta.sma(_stochK, _smoothD)
+    [open[1], high[1], low[1], close[1], ta.atr(14)[1], ta.rsi(close, _rsiLen)[1], ta.rsi(close, _rsiLen)[2], _bbBasis[1], (_bbBasis - _bbDev)[1], (_bbBasis + _bbDev)[1], _stochK[1], _stochD[1], _stochK[2], _stochD[2], time_close[1]]
+
+f_confirmed_bb(int _length, float _mult) =>
+    _basis = ta.sma(close, _length)
+    _dev = ta.stdev(close, _length) * _mult
+    [_basis[1], (_basis - _dev)[1], (_basis + _dev)[1]]
+
+// ฟังก์ชันสำหรับส่ง Webhook Alert (Clean Code Structure)
+f_emit(string _action, string _direction, string _reason, float _entry, float _exit, float _sl, float _tp1, float _tp2, int _score, string _signalId, string _targetSource, int _targetScore) =>
+    _payload = '{"key":"' + webhookKey + '","status":"SIGNAL","source":"PINE","strategy":"ALPHABUFF_V2_5_HYBRID","engine_version":"2.5.4","action":"' + _action + '","direction":"' + _direction + '","symbol":"' + syminfo.ticker + '","ticker_id":"' + syminfo.tickerid + '","timeframe":"' + timeframe.period + '","signal_id":"' + _signalId + '","entry_price":' + f_num(_entry) + ',"exit_price":' + f_num(_exit) + ',"sl_price":' + f_num(_sl) + ',"tp1_price":' + f_num(_tp1) + ',"tp2_price":' + f_num(_tp2) + ',"score":' + str.tostring(_score) + ',"target_score":' + str.tostring(_targetScore) + ',"target_source":"' + _targetSource + '","reason":"' + _reason + '"}'
+    alert(_payload, alert.freq_once_per_bar_close)
+
+f_confirmed_swing_range(int _lookback, int _pivotBars) =>
+    _ph = ta.pivothigh(high, _pivotBars, _pivotBars)
+    _pl = ta.pivotlow(low, _pivotBars, _pivotBars)
+    _confirmedHigh = ta.valuewhen(not na(_ph), _ph, 0)
+    _confirmedLow = ta.valuewhen(not na(_pl), _pl, 0)
+    _highAge = ta.barssince(not na(_ph))
+    _lowAge = ta.barssince(not na(_pl))
+    _fallbackHigh = ta.highest(high, _lookback)[1]
+    _fallbackLow = ta.lowest(low, _lookback)[1]
+    _high = not na(_confirmedHigh[1]) and nz(_highAge[1], _lookback + 1) <= _lookback ? _confirmedHigh[1] : _fallbackHigh
+    _low = not na(_confirmedLow[1]) and nz(_lowAge[1], _lookback + 1) <= _lookback ? _confirmedLow[1] : _fallbackLow
+    [math.max(_high, _low), math.min(_high, _low)]
+
+asiaFibActive = not na(time(timeframe.period, asiaFibSession, marketTimezone))
+activeFibNear = asiaFibActive ? asiaFibNear : fibNear
+activeFibDeep = asiaFibActive ? asiaFibDeep : fibDeep
+
+f_buy_zone(float _high, float _low) =>
+    _width = math.max(_high - _low, syminfo.mintick)
+    [_high - _width * activeFibDeep, _high - _width * activeFibNear]
+
+f_sell_zone(float _high, float _low) =>
+    _width = math.max(_high - _low, syminfo.mintick)
+    [_low + _width * activeFibNear, _low + _width * activeFibDeep]
+
+f_overlap(float _lo1, float _hi1, float _lo2, float _hi2) =>
+    not na(_lo1) and not na(_hi1) and not na(_lo2) and not na(_hi2) and math.max(_lo1, _lo2) <= math.min(_hi1, _hi2)
+
+f_distance(float _price, float _lo, float _hi) =>
+    _price < _lo ? _lo - _price : _price > _hi ? _price - _hi : 0.0
+
+f_cluster3(float _aLo, float _aHi, float _bLo, float _bHi, float _cLo, float _cHi, float _price) =>
+    _ab = f_overlap(_aLo, _aHi, _bLo, _bHi)
+    _ac = f_overlap(_aLo, _aHi, _cLo, _cHi)
+    _bc = f_overlap(_bLo, _bHi, _cLo, _cHi)
+    _countA = 1 + (_ab ? 1 : 0) + (_ac ? 1 : 0)
+    _countB = 1 + (_ab ? 1 : 0) + (_bc ? 1 : 0)
+    _countC = 1 + (_ac ? 1 : 0) + (_bc ? 1 : 0)
+    _loA = math.min(_aLo, math.min(_ab ? _bLo : _aLo, _ac ? _cLo : _aLo))
+    _hiA = math.max(_aHi, math.max(_ab ? _bHi : _aHi, _ac ? _cHi : _aHi))
+    _loB = math.min(_bLo, math.min(_ab ? _aLo : _bLo, _bc ? _cLo : _bLo))
+    _hiB = math.max(_bHi, math.max(_ab ? _aHi : _bHi, _bc ? _cHi : _bHi))
+    _loC = math.min(_cLo, math.min(_ac ? _aLo : _cLo, _bc ? _bLo : _cLo))
+    _hiC = math.max(_cHi, math.max(_ac ? _aHi : _cHi, _bc ? _bHi : _cHi))
+    float _bestLo = _loA
+    float _bestHi = _hiA
+    int _bestCount = _countA
+    if _countB > _bestCount or (_countB == _bestCount and f_distance(_price, _loB, _hiB) < f_distance(_price, _bestLo, _bestHi))
+        _bestLo := _loB
+        _bestHi := _hiB
+        _bestCount := _countB
+    if _countC > _bestCount or (_countC == _bestCount and f_distance(_price, _loC, _hiC) < f_distance(_price, _bestLo, _bestHi))
+        _bestLo := _loC
+        _bestHi := _hiC
+        _bestCount := _countC
+    [_bestLo, _bestHi, _bestCount]
+
+f_near(float _a, float _b, float _tolerance) => not na(_a) and not na(_b) and math.abs(_a - _b) <= _tolerance
+f_zone_near(float _price, float _lo, float _hi, float _tolerance) => not na(_price) and not na(_lo) and not na(_hi) and _price >= _lo - _tolerance and _price <= _hi + _tolerance
+
+f_nearest4(float _price, float _a, float _b, float _c, float _d) =>
+    float _best = _a
+    if na(_best) or math.abs(_price - _b) < math.abs(_price - _best)
+        _best := _b
+    if na(_best) or math.abs(_price - _c) < math.abs(_price - _best)
+        _best := _c
+    if na(_best) or math.abs(_price - _d) < math.abs(_price - _best)
+        _best := _d
+    _best
+
+f_nearest_above(float _minimum, float _a, float _b, float _c, float _d, float _e, float _f) =>
+    float _best = na
+    if not na(_a) and _a >= _minimum
+        _best := _a
+    if not na(_b) and _b >= _minimum and (na(_best) or _b < _best)
+        _best := _b
+    if not na(_c) and _c >= _minimum and (na(_best) or _c < _best)
+        _best := _c
+    if not na(_d) and _d >= _minimum and (na(_best) or _d < _best)
+        _best := _d
+    if not na(_e) and _e >= _minimum and (na(_best) or _e < _best)
+        _best := _e
+    if not na(_f) and _f >= _minimum and (na(_best) or _f < _best)
+        _best := _f
+    _best
+
+f_nearest_below(float _maximum, float _a, float _b, float _c, float _d, float _e, float _f) =>
+    float _best = na
+    if not na(_a) and _a <= _maximum
+        _best := _a
+    if not na(_b) and _b <= _maximum and (na(_best) or _b > _best)
+        _best := _b
+    if not na(_c) and _c <= _maximum and (na(_best) or _c > _best)
+        _best := _c
+    if not na(_d) and _d <= _maximum and (na(_best) or _d > _best)
+        _best := _d
+    if not na(_e) and _e <= _maximum and (na(_best) or _e > _best)
+        _best := _e
+    if not na(_f) and _f <= _maximum and (na(_best) or _f > _best)
+        _best := _f
+    _best
+
+// -----------------------------------------------------------------------------
+// 3. Pattern & Target Engines
+// -----------------------------------------------------------------------------
+f_confirmed_pattern_targets(int _pivotBars, float _similarityAtr) =>
+    _ph = ta.pivothigh(high, _pivotBars, _pivotBars)
+    _pl = ta.pivotlow(low, _pivotBars, _pivotBars)
+    _high0 = ta.valuewhen(not na(_ph), _ph, 0), _high1 = ta.valuewhen(not na(_ph), _ph, 1)
+    _low0 = ta.valuewhen(not na(_pl), _pl, 0), _low1 = ta.valuewhen(not na(_pl), _pl, 1)
+    _highTime0 = ta.valuewhen(not na(_ph), time[_pivotBars], 0), _highTime1 = ta.valuewhen(not na(_ph), time[_pivotBars], 1)
+    _lowTime0 = ta.valuewhen(not na(_pl), time[_pivotBars], 0), _lowTime1 = ta.valuewhen(not na(_pl), time[_pivotBars], 1)
+    _atr = ta.atr(14)
+    _doubleBottomGeometry = not na(_low1) and not na(_high0) and not na(_low0) and _lowTime1 < _highTime0 and _highTime0 < _lowTime0
+    _doubleTopGeometry = not na(_high1) and not na(_low0) and not na(_high0) and _highTime1 < _lowTime0 and _lowTime0 < _highTime0
+    _doubleBottomForming = _doubleBottomGeometry and math.abs(_low0 - _low1) <= _atr * _similarityAtr and _high0 - math.min(_low0, _low1) >= _atr
+    _doubleTopForming = _doubleTopGeometry and math.abs(_high0 - _high1) <= _atr * _similarityAtr and math.max(_high0, _high1) - _low0 >= _atr
+    _doubleBottomConfirmed = _doubleBottomForming and close > _high0
+    _doubleTopConfirmed = _doubleTopForming and close < _low0
+    _doubleBottomTarget = _doubleBottomConfirmed ? _high0 + (_high0 - math.min(_low0, _low1)) : na
+    _doubleTopTarget = _doubleTopConfirmed ? _low0 - (math.max(_high0, _high1) - _low0) : na
+    [_doubleBottomConfirmed[1], _doubleBottomTarget[1], _doubleTopConfirmed[1], _doubleTopTarget[1]]
+
+f_confirmed_extension_map(int _pivotBars, float _ext127, float _ext1414, float _ext1618) =>
+    _ph = ta.pivothigh(high, _pivotBars, _pivotBars), _pl = ta.pivotlow(low, _pivotBars, _pivotBars)
+    _high0 = ta.valuewhen(not na(_ph), _ph, 0), _high1 = ta.valuewhen(not na(_ph), _ph, 1)
+    _low0 = ta.valuewhen(not na(_pl), _pl, 0), _low1 = ta.valuewhen(not na(_pl), _pl, 1)
+    _highTime0 = ta.valuewhen(not na(_ph), time[_pivotBars], 0), _lowTime0 = ta.valuewhen(not na(_pl), time[_pivotBars], 0)
+    _bullSequence = not na(_low1) and not na(_high0) and not na(_low0) and _highTime0 < _lowTime0
+    _bearSequence = not na(_high1) and not na(_low0) and not na(_high0) and _lowTime0 < _highTime0
+    _bullImpulse = _bullSequence ? math.abs(_high0 - _low1) : na
+    _bearImpulse = _bearSequence ? math.abs(_high1 - _low0) : na
+    _up127 = _bullSequence ? _low0 + _bullImpulse * _ext127 : na
+    _up1414 = _bullSequence ? _low0 + _bullImpulse * _ext1414 : na
+    _up1618 = _bullSequence ? _low0 + _bullImpulse * _ext1618 : na
+    _down127 = _bearSequence ? _high0 - _bearImpulse * _ext127 : na
+    _down1414 = _bearSequence ? _high0 - _bearImpulse * _ext1414 : na
+    _down1618 = _bearSequence ? _high0 - _bearImpulse * _ext1618 : na
+    [_up127[1], _up1414[1], _up1618[1], _down127[1], _down1414[1], _down1618[1]]
+
+f_confirmed_smc_map(int _lookback) =>
+    _bullBos = close > ta.highest(high[1], _lookback)
+    _bearBos = close < ta.lowest(low[1], _lookback)
+    _bullFvgEvent = low > high[2]
+    _bearFvgEvent = high < low[2]
+    _bullFvgLo = ta.valuewhen(_bullFvgEvent, high[2], 0), _bullFvgHi = ta.valuewhen(_bullFvgEvent, low, 0)
+    _bearFvgLo = ta.valuewhen(_bearFvgEvent, high, 0), _bearFvgHi = ta.valuewhen(_bearFvgEvent, low[2], 0)
+    _bullFvgAge = ta.barssince(_bullFvgEvent), _bearFvgAge = ta.barssince(_bearFvgEvent)
+    _lastBearLo = ta.valuewhen(close < open, low, 0), _lastBearHi = ta.valuewhen(close < open, high, 0)
+    _lastBullLo = ta.valuewhen(close > open, low, 0), _lastBullHi = ta.valuewhen(close > open, high, 0)
+    _bullObLo = ta.valuewhen(_bullBos, _lastBearLo, 0), _bullObHi = ta.valuewhen(_bullBos, _lastBearHi, 0)
+    _bearObLo = ta.valuewhen(_bearBos, _lastBullLo, 0), _bearObHi = ta.valuewhen(_bearBos, _lastBullHi, 0)
+    _bullObAge = ta.barssince(_bullBos), _bearObAge = ta.barssince(_bearBos)
+    [_bullFvgLo[1], _bullFvgHi[1], _bullFvgAge[1], _bearFvgLo[1], _bearFvgHi[1], _bearFvgAge[1], _bullObLo[1], _bullObHi[1], _bullObAge[1], _bearObLo[1], _bearObHi[1], _bearObAge[1]]
+
+f_target_score(float _target, float _opposingLo, float _opposingHi, float _patternTarget, float _fib127, float _fib1414, float _fib1618, float _fvgLo, float _fvgHi, float _obLo, float _obHi, float _tolerance) =>
+    _opposing = f_zone_near(_target, _opposingLo, _opposingHi, _tolerance) ? 3 : 0
+    _pattern = f_near(_target, _patternTarget, _tolerance) ? 2 : 0
+    _fib = f_near(_target, _fib127, _tolerance) or f_near(_target, _fib1414, _tolerance) or f_near(_target, _fib1618, _tolerance) ? 1 : 0
+    _fvg = f_zone_near(_target, _fvgLo, _fvgHi, _tolerance) ? 1 : 0
+    _ob = f_zone_near(_target, _obLo, _obHi, _tolerance) ? 1 : 0
+    math.min(10, _opposing + _pattern + _fib + _fvg + _ob)
+
+f_target_source(float _target, float _opposingLo, float _opposingHi, float _patternTarget, float _fib127, float _fib1414, float _fib1618, float _fvgLo, float _fvgHi, float _obLo, float _obHi, float _tolerance) =>
+    string _source = ""
+    if f_zone_near(_target, _opposingLo, _opposingHi, _tolerance)
+        _source := "OPPOSING_PRZ"
+    if f_near(_target, _patternTarget, _tolerance)
+        _source := _source == "" ? "PATTERN" : _source + "+PATTERN"
+    if f_near(_target, _fib127, _tolerance) or f_near(_target, _fib1414, _tolerance) or f_near(_target, _fib1618, _tolerance)
+        _source := _source == "" ? "FIB_EXT" : _source + "+FIB_EXT"
+    if f_zone_near(_target, _fvgLo, _fvgHi, _tolerance)
+        _source := _source == "" ? "FVG" : _source + "+FVG"
+    if f_zone_near(_target, _obLo, _obHi, _tolerance)
+        _source := _source == "" ? "OB" : _source + "+OB"
+    _source == "" ? "R_FALLBACK" : _source
+
+// -----------------------------------------------------------------------------
+// 4. Data Acquisition (ใช้ Security ป้องกัน Repaint)
+// -----------------------------------------------------------------------------
+[rangeHighD, rangeLowD] = request.security(syminfo.tickerid, "D", f_confirmed_swing_range(lookbackD, pivotBars), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+[rangeHighH4, rangeLowH4] = request.security(syminfo.tickerid, "240", f_confirmed_swing_range(lookbackH4, pivotBars), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+[rangeHighH1, rangeLowH1] = request.security(syminfo.tickerid, "60", f_confirmed_swing_range(lookbackH1, pivotBars), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+[rangeHighM5, rangeLowM5] = request.security(syminfo.tickerid, "5", f_confirmed_swing_range(lookbackM5, pivotBars), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+[dbConfirmed, dbTarget, dtConfirmed, dtTarget] = request.security(syminfo.tickerid, "60", f_confirmed_pattern_targets(pivotBars, patternSimilarityAtr), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+[fibUp127, fibUp1414, fibUp1618, fibDown127, fibDown1414, fibDown1618] = request.security(syminfo.tickerid, "60", f_confirmed_extension_map(pivotBars, fibExt127, fibExt1414, fibExt1618), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+[bullFvgLoRaw, bullFvgHiRaw, bullFvgAge, bearFvgLoRaw, bearFvgHiRaw, bearFvgAge, bullObLoRaw, bullObHiRaw, bullObAge, bearObLoRaw, bearObHiRaw, bearObAge] = request.security(syminfo.tickerid, "60", f_confirmed_smc_map(5), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+bullFvgLo = bullFvgAge <= smcMaxAgeH1 ? bullFvgLoRaw : na, bullFvgHi = bullFvgAge <= smcMaxAgeH1 ? bullFvgHiRaw : na
+bearFvgLo = bearFvgAge <= smcMaxAgeH1 ? bearFvgLoRaw : na, bearFvgHi = bearFvgAge <= smcMaxAgeH1 ? bearFvgHiRaw : na
+bullObLo = bullObAge <= smcMaxAgeH1 ? bullObLoRaw : na, bullObHi = bullObAge <= smcMaxAgeH1 ? bullObHiRaw : na
+bearObLo = bearObAge <= smcMaxAgeH1 ? bearObLoRaw : na, bearObHi = bearObAge <= smcMaxAgeH1 ? bearObHiRaw : na
+
+[h1Close, h1Ema20, h1Ema50, h1Rsi, h1BullBos, h1BearBos] = request.security(syminfo.tickerid, "60", [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1], ta.rsi(close, 14)[1], close[1] > ta.highest(high[2], 5), close[1] < ta.lowest(low[2], 5)], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+// M15 Data สำหรับ Setup และ Latch — ใช้เฉพาะแท่งที่ปิดแล้ว
+[m15Open, m15High, m15Low, m15Close, m15Atr, m15Rsi, m15PrevRsi, m15BbMid, m15BbLower, m15BbUpper, m15StochK, m15StochD, m15PrevStochK, m15PrevStochD, m15Time] = request.security(syminfo.tickerid, "15", f_m15_context(bbLen, bbMult, rsiLen, stochLen, stochSmoothK, stochSmoothD), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+[m30BbMid, m30BbLower, m30BbUpper] = request.security(syminfo.tickerid, "30", f_confirmed_bb(bbLen, bbMult), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+[m15HaOpen, m15HaClose, m15HaPrevOpen, m15HaPrevClose] = request.security(ticker.heikinashi(syminfo.tickerid), "15", [open[1], close[1], open[2], close[2]], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+// M5 Data (คำนวณสดบน Timeframe ปัจจุบัน สำหรับ Execution)
+var float haOpen = na
+haClose = (open + high + low + close) / 4
+haOpen := na(haOpen[1]) ? (open + close) / 2.0 : (haOpen[1] + nz(haClose[1])) / 2.0
+haPrevOpen = haOpen[1]
+haPrevClose = haClose[1]
+
+// -----------------------------------------------------------------------------
+// 5. Zone Mapping
+// -----------------------------------------------------------------------------
+[buyLoD, buyHiD] = f_buy_zone(rangeHighD, rangeLowD)
+[buyLoH4, buyHiH4] = f_buy_zone(rangeHighH4, rangeLowH4)
+[buyLoH1, buyHiH1] = f_buy_zone(rangeHighH1, rangeLowH1)
+[sellLoD, sellHiD] = f_sell_zone(rangeHighD, rangeLowD)
+[sellLoH4, sellHiH4] = f_sell_zone(rangeHighH4, rangeLowH4)
+[sellLoH1, sellHiH1] = f_sell_zone(rangeHighH1, rangeLowH1)
+
+[buyClusterLo, buyClusterHi, buyClusterCount] = f_cluster3(buyLoD, buyHiD, buyLoH4, buyHiH4, buyLoH1, buyHiH1, close)
+[sellClusterLo, sellClusterHi, sellClusterCount] = f_cluster3(sellLoD, sellHiD, sellLoH4, sellHiH4, sellLoH1, sellHiH1, close)
+
+buyExtreme = rangeLowD
+sellExtreme = rangeHighD
+
+// Fib-line confluence: M5 ใช้หาจุดละเอียด ส่วน H1 ยืนยันว่าจุดนั้นอยู่บนโครงสร้างใหญ่
+m5Width = math.max(rangeHighM5 - rangeLowM5, syminfo.mintick)
+h1Width = math.max(rangeHighH1 - rangeLowH1, syminfo.mintick)
+m5BuyFib = f_nearest4(close, rangeHighM5 - m5Width * 0.618, rangeHighM5 - m5Width * 0.705, rangeHighM5 - m5Width * 0.786, rangeHighM5 - m5Width * 0.886)
+h1BuyFib = f_nearest4(close, rangeHighH1 - h1Width * 0.618, rangeHighH1 - h1Width * 0.705, rangeHighH1 - h1Width * 0.786, rangeHighH1 - h1Width * 0.886)
+m5SellFib = f_nearest4(close, rangeLowM5 + m5Width * 0.618, rangeLowM5 + m5Width * 0.705, rangeLowM5 + m5Width * 0.786, rangeLowM5 + m5Width * 0.886)
+h1SellFib = f_nearest4(close, rangeLowH1 + h1Width * 0.618, rangeLowH1 + h1Width * 0.705, rangeLowH1 + h1Width * 0.786, rangeLowH1 + h1Width * 0.886)
+fibLineTolerance = math.max(m15Atr * fibLineToleranceAtr, syminfo.mintick * 10)
+buyFibLineConfluence = f_near(m5BuyFib, h1BuyFib, fibLineTolerance) and f_near(close, (m5BuyFib + h1BuyFib) / 2.0, fibLineTolerance * 2.0)
+sellFibLineConfluence = f_near(m5SellFib, h1SellFib, fibLineTolerance) and f_near(close, (m5SellFib + h1SellFib) / 2.0, fibLineTolerance * 2.0)
+buyFibEntryLine = buyFibLineConfluence ? (m5BuyFib + h1BuyFib) / 2.0 : na
+sellFibEntryLine = sellFibLineConfluence ? (m5SellFib + h1SellFib) / 2.0 : na
+fibBbStackTolerance = math.max(m15Atr * fibBbStackToleranceAtr, syminfo.mintick * 10)
+buyFibBbStack = buyFibLineConfluence and f_near(buyFibEntryLine, m15BbLower, fibBbStackTolerance) and f_near(buyFibEntryLine, m30BbLower, fibBbStackTolerance) and low <= math.max(m15BbLower, m30BbLower) + fibBbStackTolerance and close >= buyFibEntryLine - fibBbStackTolerance
+sellFibBbStack = sellFibLineConfluence and f_near(sellFibEntryLine, m15BbUpper, fibBbStackTolerance) and f_near(sellFibEntryLine, m30BbUpper, fibBbStackTolerance) and high >= math.min(m15BbUpper, m30BbUpper) - fibBbStackTolerance and close <= sellFibEntryLine + fibBbStackTolerance
+
+// Price-first trigger: ประเมินทุกแท่ง M5 ที่ปิดแล้ว ไม่ต้องรอรอบเปลี่ยนแท่ง M15
+buyFibBbInPrz = buyClusterCount >= minCluster and f_zone_near(buyFibEntryLine, buyClusterLo, buyClusterHi, fibBbStackTolerance)
+sellFibBbInPrz = sellClusterCount >= minCluster and f_zone_near(sellFibEntryLine, sellClusterLo, sellClusterHi, fibBbStackTolerance)
+buyFibBbTrigger = buyFibBbStack and buyFibBbInPrz and not buyFibBbStack[1]
+sellFibBbTrigger = sellFibBbStack and sellFibBbInPrz and not sellFibBbStack[1]
+
+// -----------------------------------------------------------------------------
+// 6. M15 Setup Latch (ประเมินโซน, Sweep, Reclaim)
+// -----------------------------------------------------------------------------
+newM15Bar = ta.change(m15Time) != 0
+
+var bool buyM15Armed = false
+var bool sellM15Armed = false
+var float buySweepLow = na
+var float sellSweepHigh = na
+var int buyM15ArmAge = 0
+var int sellM15ArmAge = 0
+var int buyArmScore = 0
+var int sellArmScore = 0
+var bool buyArmStrong = false
+var bool sellArmStrong = false
+
+var bool m15BuySweepArmed = false
+var float m15BuySweepLow = na
+var int m15BuySweepAge = 0
+var bool m15SellSweepArmed = false
+var float m15SellSweepHigh = na
+var int m15SellSweepAge = 0
+
+if newM15Bar
+    if m15BuySweepArmed
+        m15BuySweepAge += 1
+        m15BuySweepLow := math.min(m15BuySweepLow, m15Low)
+    if m15SellSweepArmed
+        m15SellSweepAge += 1
+        m15SellSweepHigh := math.max(m15SellSweepHigh, m15High)
+
+    if m15Low < buyExtreme - m15Atr * sweepInvalidationAtr or m15BuySweepAge > sweepTtlBars
+        m15BuySweepArmed := false
+        m15BuySweepLow := na
+        m15BuySweepAge := 0
+    if m15High > sellExtreme + m15Atr * sweepInvalidationAtr or m15SellSweepAge > sweepTtlBars
+        m15SellSweepArmed := false
+        m15SellSweepHigh := na
+        m15SellSweepAge := 0
+
+    if m15Low < buyClusterLo and m15Low >= buyExtreme - m15Atr * sweepInvalidationAtr
+        m15BuySweepArmed := true
+        m15BuySweepLow := na(m15BuySweepLow) ? m15Low : math.min(m15BuySweepLow, m15Low)
+        m15BuySweepAge := 0
+    if m15High > sellClusterHi and m15High <= sellExtreme + m15Atr * sweepInvalidationAtr
+        m15SellSweepArmed := true
+        m15SellSweepHigh := na(m15SellSweepHigh) ? m15High : math.max(m15SellSweepHigh, m15High)
+        m15SellSweepAge := 0
+
+    buyReclaimNow = m15BuySweepArmed and m15Close >= buyClusterLo and m15Close <= buyClusterHi + m15Atr * reclaimAtr
+    sellReclaimNow = m15SellSweepArmed and m15Close <= sellClusterHi and m15Close >= sellClusterLo - m15Atr * reclaimAtr
+
+    // ให้คะแนน Evidence
+    buyRsiEvidence = (m15PrevRsi < 35 and m15Rsi > m15PrevRsi) or (m15Rsi <= 35 and m15Close > m15Open)
+    sellRsiEvidence = (m15PrevRsi > 65 and m15Rsi < m15PrevRsi) or (m15Rsi >= 65 and m15Close < m15Open)
+    buyBbTouch = m15Low <= m15BbLower
+    sellBbTouch = m15High >= m15BbUpper
+    buyStochEvidence = (m15PrevStochK <= m15PrevStochD and m15StochK > m15StochD and math.min(m15StochK, m15StochD) <= stochOversold + 10) or (m15PrevStochK < stochOversold and m15StochK > m15PrevStochK)
+    sellStochEvidence = (m15PrevStochK >= m15PrevStochD and m15StochK < m15StochD and math.max(m15StochK, m15StochD) >= stochOverbought - 10) or (m15PrevStochK > stochOverbought and m15StochK < m15PrevStochK)
+
+    m15Body = math.max(math.abs(m15Close - m15Open), syminfo.mintick)
+    m15LowerWick = math.min(m15Open, m15Close) - m15Low
+    m15UpperWick = m15High - math.max(m15Open, m15Close)
+    buyPin = m15LowerWick >= m15Body * pinWickRatio and m15UpperWick <= m15Body
+    sellPin = m15UpperWick >= m15Body * pinWickRatio and m15LowerWick <= m15Body
+
+    buyEvidenceScore = (buyReclaimNow ? 2 : 0) + (buyPin ? 2 : 0) + (buyBbTouch ? 1 : 0) + (buyStochEvidence ? 1 : 0) + (buyRsiEvidence ? 1 : 0) + (m15HaClose > m15HaOpen ? 1 : 0) + (buyFibLineConfluence ? 1 : 0)
+    sellEvidenceScore = (sellReclaimNow ? 2 : 0) + (sellPin ? 2 : 0) + (sellBbTouch ? 1 : 0) + (sellStochEvidence ? 1 : 0) + (sellRsiEvidence ? 1 : 0) + (m15HaClose < m15HaOpen ? 1 : 0) + (sellFibLineConfluence ? 1 : 0)
+
+    buyCoreLocation = buyClusterCount >= minCluster and buyBbTouch and m15Low <= buyClusterHi and m15Close >= buyClusterLo - m15Atr * reclaimAtr
+    sellCoreLocation = sellClusterCount >= minCluster and sellBbTouch and m15High >= sellClusterLo and m15Close <= sellClusterHi + m15Atr * reclaimAtr
+    buyCleanSetup = buyCoreLocation and (buyEvidenceScore >= minEvidence or buyFibBbStack)
+    sellCleanSetup = sellCoreLocation and (sellEvidenceScore >= minEvidence or sellFibBbStack)
+
+    if buyM15Armed
+        buyM15ArmAge += 1
+        if buyM15ArmAge > setupTtlBars
+            buyM15Armed := false
+            buyArmStrong := false
+    if sellM15Armed
+        sellM15ArmAge += 1
+        if sellM15ArmAge > setupTtlBars
+            sellM15Armed := false
+            sellArmStrong := false
+
+    if buyCleanSetup and (not sellCleanSetup or buyEvidenceScore > sellEvidenceScore)
+        buyM15Armed := true
+        sellM15Armed := false
+        sellArmStrong := false
+        buyM15ArmAge := 0
+        buyArmScore := buyFibBbStack ? math.max(buyEvidenceScore, minEvidence) : buyEvidenceScore
+        buyArmStrong := buyFibBbStack
+        buySweepLow := buyReclaimNow and not na(m15BuySweepLow) ? m15BuySweepLow : m15Low
+    else if sellCleanSetup
+        sellM15Armed := true
+        buyM15Armed := false
+        buyArmStrong := false
+        sellM15ArmAge := 0
+        sellArmScore := sellFibBbStack ? math.max(sellEvidenceScore, minEvidence) : sellEvidenceScore
+        sellArmStrong := sellFibBbStack
+        sellSweepHigh := sellReclaimNow and not na(m15SellSweepHigh) ? m15SellSweepHigh : m15High
+
+// -----------------------------------------------------------------------------
+// 7. M5 Execution Trigger & Trade Management
+// -----------------------------------------------------------------------------
+exactM5 = timeframe.period == "5"
+timeframeOk = not executionTfOnly or exactM5
+marketOpen = not na(time(timeframe.period, marketSession, marketTimezone))
+
+haBull = haClose > haOpen
+haPrevBull = haPrevClose > haPrevOpen
+haBear = haClose < haOpen
+haPrevBear = haPrevClose < haPrevOpen
+
+// เช็ค HA สีเดิม 2 แท่งติด
+ha5SecondGreenHigher = haBull and haPrevBull and haClose > haPrevClose
+ha5SecondRedLower = haBear and haPrevBear and haClose < haPrevClose
+ha15TwoGreenHigher = m15HaClose > m15HaOpen and m15HaPrevClose > m15HaPrevOpen and m15HaClose > m15HaPrevClose
+ha15TwoRedLower = m15HaClose < m15HaOpen and m15HaPrevClose < m15HaPrevOpen and m15HaClose < m15HaPrevClose
+
+// ตรวจสอบสัญญาณเข้าซื้อ-ขาย: Price-first stack เปิดได้ทันทีที่แท่ง M5 ปิด
+buyPriceEntry = buyFibBbTrigger and close > buyClusterLo - fibBbStackTolerance and close <= buyClusterHi + m15Atr * entryMaxDistanceAtr
+sellPriceEntry = sellFibBbTrigger and close < sellClusterHi + fibBbStackTolerance and close >= sellClusterLo - m15Atr * entryMaxDistanceAtr
+buyEntryConfirmed = (buyPriceEntry or (buyM15Armed and ha5SecondGreenHigher)) and marketOpen and timeframeOk
+sellEntryConfirmed = (sellPriceEntry or (sellM15Armed and ha5SecondRedLower)) and marketOpen and timeframeOk
+
+var int tradeSide = 0
+var float tradeEntry = na
+var float tradeSl = na
+var float tradeTp1 = na
+var float tradeTp2 = na
+var int tradeScore = 0
+var int tradeTargetScore = 0
+var int tradeAge = 0
+var bool tradeBeArmed = false
+var bool tradeV5Promoted = false
+var string tradeSignalId = ""
+var string tradeTargetSource = "NONE"
+var int cooldown = 999
+
+bool buySignal = false
+bool sellSignal = false
+bool closeSignal = false
+string closeReason = ""
+float closePrice = na
+
+if barstate.isconfirmed
+    cooldown += 1
+
+    // State Machine: Trade Active
+    if tradeSide != 0
+        tradeAge += 1
+        _buyTrade = tradeSide == 1
+        _alignedBos = _buyTrade ? h1BullBos : h1BearBos
+        if _alignedBos and not tradeV5Promoted
+            _patternRunner = _buyTrade and dbConfirmed ? dbTarget : not _buyTrade and dtConfirmed ? dtTarget : na
+            _runnerBoundary = tradeTp2 + tradeSide * math.max(m15Atr * targetMergeAtr, syminfo.mintick * 10)
+            _runnerPrimary = _buyTrade ? f_nearest_above(_runnerBoundary, sellClusterLo, sellClusterHi, _patternRunner, fibUp127, fibUp1414, fibUp1618) : f_nearest_below(_runnerBoundary, buyClusterHi, buyClusterLo, _patternRunner, fibDown127, fibDown1414, fibDown1618)
+            _runnerSmc = _buyTrade ? f_nearest_above(_runnerBoundary, bearFvgLo, bearFvgHi, bearObLo, bearObHi, na, na) : f_nearest_below(_runnerBoundary, bullFvgLo, bullFvgHi, bullObLo, bullObHi, na, na)
+            _runnerTarget = na(_runnerPrimary) ? _runnerSmc : na(_runnerSmc) ? _runnerPrimary : _buyTrade ? math.min(_runnerPrimary, _runnerSmc) : math.max(_runnerPrimary, _runnerSmc)
+            if not na(_runnerTarget)
+                tradeTp2 := _runnerTarget
+                tradeTargetSource := "V5_POST_BOS_PRZ_PATTERN_FIB"
+                tradeTargetScore := math.max(tradeTargetScore, 5)
+                tradeV5Promoted := true
+        _activeStop = tradeBeArmed ? tradeEntry : tradeSl
+        _stopHit = _buyTrade ? low <= _activeStop : high >= _activeStop
+        _tp2Hit = _buyTrade ? high >= tradeTp2 : low <= tradeTp2
+        _tp1Hit = _buyTrade ? high >= tradeTp1 : low <= tradeTp1
+        _oppositeBos = _buyTrade ? h1BearBos : h1BullBos
+
+        // หลัง TP1/BE ใช้ HA15 สองแท่งปิดยืนยัน เพื่อลด noise จาก HA5
+        _haRunnerExit = tradeBeArmed and (_buyTrade ? ha15TwoRedLower : ha15TwoGreenHigher)
+
+        if _stopHit
+            closeSignal := true
+            closeReason := tradeBeArmed ? "BREAK_EVEN" : "INITIAL_SL"
+            closePrice := _activeStop
+        else if _tp2Hit
+            closeSignal := true
+            closeReason := "TP2"
+            closePrice := tradeTp2
+        else
+            if _tp1Hit
+                tradeBeArmed := true
+            if tradeBeArmed and _oppositeBos
+                closeSignal := true
+                closeReason := "OPPOSITE_H1_BOS_AFTER_BE"
+                closePrice := close
+            else if _haRunnerExit
+                closeSignal := true
+                closeReason := "HA15_TWO_BODY_RUNNER_EXIT"
+                closePrice := close
+            else if tradeAge >= maxTradeBars
+                closeSignal := true
+                closeReason := "TIMEOUT"
+                closePrice := close
+
+        if closeSignal
+            _direction = tradeSide == 1 ? "BUY" : "SELL"
+            f_emit("CLOSE", _direction, closeReason, tradeEntry, closePrice, tradeSl, tradeTp1, tradeTp2, tradeScore, tradeSignalId, tradeTargetSource, tradeTargetScore)
+            tradeSide := 0
+            tradeEntry := na, tradeSl := na, tradeTp1 := na, tradeTp2 := na, tradeScore := 0, tradeTargetScore := 0
+            tradeAge := 0, tradeBeArmed := false, tradeV5Promoted := false, tradeSignalId := "", tradeTargetSource := "NONE", cooldown := 0
+
+    // State Machine: Ready for Entry
+    if tradeSide == 0
+        if cooldown >= cooldownBars and (buyEntryConfirmed or sellEntryConfirmed)
+            _side = buyEntryConfirmed ? 1 : -1
+            _direction = buyEntryConfirmed ? "BUY" : "SELL"
+            _entry = close // ใช้ราคาปิดจริง (Regular Close)
+            _priceFirstEntry = buyEntryConfirmed ? buyPriceEntry : sellPriceEntry
+
+            // ใช้ค่าสุดกวาด (Sweep Extreme) จาก M15 หักออกด้วย ATR เสมอ
+            _rawStop = buyEntryConfirmed ? (_priceFirstEntry ? low : nz(buySweepLow, m15Low)) : (_priceFirstEntry ? high : nz(sellSweepHigh, m15High))
+            if not na(_rawStop)
+                _rawStop := buyEntryConfirmed ? _rawStop - m15Atr * riskAtrBuffer : _rawStop + m15Atr * riskAtrBuffer
+
+            _risk = math.abs(_entry - _rawStop)
+            _directionalStopOk = not na(_rawStop) and (buyEntryConfirmed ? _rawStop < _entry : _rawStop > _entry)
+
+            if _directionalStopOk and _risk >= syminfo.mintick * 2
+                _fallbackTp1 = _entry + _side * _risk * tp1R
+                _bbTp1 = _side == 1 and m15BbMid > _entry ? m15BbMid : _side == -1 and m15BbMid < _entry ? m15BbMid : na
+                _tp1 = na(_bbTp1) ? _fallbackTp1 : _bbTp1
+                _fallbackTp2 = _entry + _side * _risk * tp2R
+                _bbTp2 = _side == 1 and m15BbUpper > _tp1 ? m15BbUpper : _side == -1 and m15BbLower < _tp1 ? m15BbLower : na
+                _tp2 = na(_bbTp2) ? _fallbackTp2 : _bbTp2
+
+                tradeSide := _side
+                tradeEntry := _entry
+                tradeSl := _rawStop
+                tradeTp1 := _tp1
+                tradeTp2 := _tp2
+                tradeScore := buyPriceEntry or sellPriceEntry ? math.max(buyEntryConfirmed ? buyArmScore : sellArmScore, minEvidence) : buyEntryConfirmed ? buyArmScore : sellArmScore
+                tradeTargetScore := 3
+                tradeTargetSource := "V4_BB_MID_TO_OPPOSITE_BAND"
+                tradeV5Promoted := false
+                tradeSignalId := str.replace_all(syminfo.ticker, "-", "_") + "-" + str.tostring(time_close) + "-" + _direction
+
+                buySignal := buyEntryConfirmed
+                sellSignal := sellEntryConfirmed
+                _entryReason = buyPriceEntry ? "V4_BUY_M5_H1_FIB_BB15_BB30_STACK" : sellPriceEntry ? "V4_SELL_M5_H1_FIB_BB15_BB30_STACK" : "M15_ARMED_M5_HA_EXEC"
+                f_emit("OPEN", _direction, _entryReason, tradeEntry, na, tradeSl, tradeTp1, tradeTp2, tradeScore, tradeSignalId, tradeTargetSource, tradeTargetScore)
+
+                buyM15Armed := false
+                sellM15Armed := false
+                buyArmStrong := false
+                sellArmStrong := false
+
+// -----------------------------------------------------------------------------
+// 8. Visuals & Compact Dashboard
+// -----------------------------------------------------------------------------
+plotshape(buySignal, title="BUY OPEN", style=shape.labelup, location=location.belowbar, color=color.lime, text="BUY", textcolor=color.black, size=size.tiny)
+plotshape(sellSignal, title="SELL OPEN", style=shape.labeldown, location=location.abovebar, color=color.red, text="SELL", textcolor=color.white, size=size.tiny)
+plotshape(closeSignal, title="CLOSE", style=shape.xcross, location=location.abovebar, color=color.orange, size=size.tiny)
+
+plot(showActiveTradeMap and tradeSide != 0 ? tradeEntry : na, "Active entry", color=color.new(color.blue, 0), style=plot.style_linebr)
+plot(showActiveTradeMap and tradeSide != 0 ? (tradeBeArmed ? tradeEntry : tradeSl) : na, "Active stop", color=color.new(color.red, 0), style=plot.style_linebr)
+plot(showActiveTradeMap and tradeSide != 0 ? tradeTp1 : na, "TP1 / BE", color=color.new(color.yellow, 0), style=plot.style_linebr)
+plot(showActiveTradeMap and tradeSide != 0 ? tradeTp2 : na, "TP2", color=color.new(color.aqua, 0), style=plot.style_linebr)
+plot(showFibEntryLines ? buyFibEntryLine : na, "M5/H1 Buy Fib Line", color=color.new(color.lime, 0), linewidth=2, style=plot.style_linebr)
+plot(showFibEntryLines ? sellFibEntryLine : na, "M5/H1 Sell Fib Line", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+plot(showTargetMap ? fibUp127 : na, "Post-BOS Up 1.272", color=color.new(color.aqua, 35), style=plot.style_linebr)
+plot(showTargetMap ? fibUp1414 : na, "Post-BOS Up 1.414", color=color.new(color.blue, 35), style=plot.style_linebr)
+plot(showTargetMap ? fibUp1618 : na, "Post-BOS Up 1.618", color=color.new(color.purple, 35), style=plot.style_linebr)
+plot(showTargetMap ? fibDown127 : na, "Post-BOS Down 1.272", color=color.new(color.aqua, 35), style=plot.style_linebr)
+plot(showTargetMap ? fibDown1414 : na, "Post-BOS Down 1.414", color=color.new(color.blue, 35), style=plot.style_linebr)
+plot(showTargetMap ? fibDown1618 : na, "Post-BOS Down 1.618", color=color.new(color.purple, 35), style=plot.style_linebr)
+
+var table dashboard = table.new(position.bottom_left, 2, 11, bgcolor=color.new(color.rgb(25, 25, 25), 3), frame_color=color.new(color.white, 40), frame_width=1, border_color=color.new(color.white, 72), border_width=1)
+if showDashboard and barstate.islast
+    _sessionEngine = (marketOpen ? "OPEN" : "CLOSED") + " | " + (exactM5 ? "EXEC M5" : "VIEW " + timeframe.period + " → REQ M5")
+    _demand = f_price(buyClusterLo) + " - " + f_price(buyClusterHi) + " | " + str.tostring(buyClusterCount) + "L"
+    _supply = f_price(sellClusterLo) + " - " + f_price(sellClusterHi) + " | " + str.tostring(sellClusterCount) + "L"
+    _setup = buyArmStrong or buyFibBbTrigger ? "BUY FIB+BB15+BB30 ARMED" : sellArmStrong or sellFibBbTrigger ? "SELL FIB+BB15+BB30 ARMED" : buyM15Armed ? "M15 BUY ARMED " + str.tostring(buyM15ArmAge) + "/" + str.tostring(setupTtlBars) : sellM15Armed ? "M15 SELL ARMED " + str.tostring(sellM15ArmAge) + "/" + str.tostring(setupTtlBars) : "WAIT M15 EVIDENCE"
+    _trigger = buyFibBbTrigger ? "BUY @ M5 CLOSE" : sellFibBbTrigger ? "SELL @ M5 CLOSE" : ha5SecondGreenHigher ? "M5 HA BUY FLIP" : ha5SecondRedLower ? "M5 HA SELL FLIP" : "WAIT M5 PRICE/HA"
+    _fibLine = buyFibLineConfluence ? "BUY " + f_price(buyFibEntryLine) : sellFibLineConfluence ? "SELL " + f_price(sellFibEntryLine) : "NO M5/H1 OVERLAP"
+    _bbStack = buyArmStrong or buyFibBbStack ? "BUY " + f_price(buyFibEntryLine) + " | 15 " + f_price(m15BbLower) + " | 30 " + f_price(m30BbLower) : sellArmStrong or sellFibBbStack ? "SELL " + f_price(sellFibEntryLine) + " | 15 " + f_price(m15BbUpper) + " | 30 " + f_price(m30BbUpper) : "WAIT FIB + BB15/BB30"
+    _trade = tradeSide == 1 ? "BUY E " + f_price(tradeEntry) + " | SL " + f_price(tradeSl) + "\nTP1 " + f_price(tradeTp1) + " | TP2 " + f_price(tradeTp2) : tradeSide == -1 ? "SELL E " + f_price(tradeEntry) + " | SL " + f_price(tradeSl) + "\nTP1 " + f_price(tradeTp1) + " | TP2 " + f_price(tradeTp2) : "FLAT"
+
+    table.cell(dashboard, 0, 0, "ALPHA BUFF", text_color=color.white, bgcolor=f_dashboard_bg(0))
+    table.cell(dashboard, 1, 0, "v2.5.4 HYBRID", text_color=color.yellow, bgcolor=f_dashboard_bg(0))
+    table.cell(dashboard, 0, 1, "Session / Engine", text_color=color.white, bgcolor=f_dashboard_bg(1))
+    table.cell(dashboard, 1, 1, _sessionEngine, text_color=marketOpen ? color.lime : color.orange, bgcolor=f_dashboard_bg(1))
+    table.cell(dashboard, 0, 2, "Demand PRZ", text_color=color.white, bgcolor=f_dashboard_bg(2))
+    table.cell(dashboard, 1, 2, _demand, text_color=color.lime, bgcolor=f_dashboard_bg(2))
+    table.cell(dashboard, 0, 3, "Supply PRZ", text_color=color.white, bgcolor=f_dashboard_bg(3))
+    table.cell(dashboard, 1, 3, _supply, text_color=color.red, bgcolor=f_dashboard_bg(3))
+    table.cell(dashboard, 0, 4, "M15 Setup", text_color=color.white, bgcolor=f_dashboard_bg(4))
+    table.cell(dashboard, 1, 4, _setup, text_color=buyM15Armed or buyFibBbTrigger ? color.lime : sellM15Armed or sellFibBbTrigger ? color.red : color.silver, bgcolor=f_dashboard_bg(4))
+    table.cell(dashboard, 0, 5, "M5 HA Trigger", text_color=color.white, bgcolor=f_dashboard_bg(5))
+    table.cell(dashboard, 1, 5, _trigger, text_color=ha5SecondGreenHigher ? color.lime : ha5SecondRedLower ? color.red : color.silver, bgcolor=f_dashboard_bg(5))
+    table.cell(dashboard, 0, 6, "Trade / TP", text_color=color.white, bgcolor=f_dashboard_bg(6))
+    table.cell(dashboard, 1, 6, _trade, text_color=tradeSide == 1 ? color.lime : tradeSide == -1 ? color.red : color.silver, bgcolor=f_dashboard_bg(6))
+    table.cell(dashboard, 0, 7, "M5/H1 Fib Line", text_color=color.white, bgcolor=f_dashboard_bg(7))
+    table.cell(dashboard, 1, 7, _fibLine, text_color=buyFibLineConfluence ? color.lime : sellFibLineConfluence ? color.red : color.silver, bgcolor=f_dashboard_bg(7))
+    table.cell(dashboard, 0, 8, "Fib + BB15/30", text_color=color.white, bgcolor=f_dashboard_bg(8))
+    table.cell(dashboard, 1, 8, _bbStack, text_color=buyArmStrong or buyFibBbStack ? color.lime : sellArmStrong or sellFibBbStack ? color.red : color.silver, bgcolor=f_dashboard_bg(8))
+
+alertcondition(buySignal, "AlphaBuff v2.5.4 BUY", "Confirmed AlphaBuff v2.5.4 HYBRID BUY")
+alertcondition(sellSignal, "AlphaBuff v2.5.4 SELL", "Confirmed AlphaBuff v2.5.4 HYBRID SELL")
+alertcondition(closeSignal, "AlphaBuff v2.5.4 CLOSE", "Confirmed AlphaBuff v2.5.4 HYBRID CLOSE")
