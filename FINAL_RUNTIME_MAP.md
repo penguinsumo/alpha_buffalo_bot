@@ -57,6 +57,35 @@ are directions. RR and directional price validation still decide EA readiness.
 - `kivanc_vsaob.py`
 - `scripts/daily_market_scan.py`
 - `core/models/newday_market_map.py`
+- `runtime_layers/newday.py` — reads the map `daily_market_scan.py` already
+  builds and exposes it at runtime via `GET /newday/map`. This was
+  previously dead code: nothing in the running service read the map, and
+  no scheduler ran the scan. **Wiring is done; scheduling is not.**
+  `scripts/daily_market_scan.py` still needs an external trigger (a
+  Railway cron service, or equivalent) running once after each daily
+  close, writing into the same `ALPHA_MARKET_MAP_DIR` volume the API
+  process reads from. Until that is configured, `/newday/map` returns
+  `available=false` and every consumer degrades to "no newday context"
+  exactly as if the feature were absent.
+- `fundamental/` — DXY, Fear & Greed, COT, and news-calendar context ported
+  from clean v5's `context_engine.py`/`plugin_*.py`, exposed via
+  `GET /context/fundamental`. v12-core had no fundamental layer before
+  this. Every source fails closed to a neutral value on network error.
+- `runtime_layers/hourly_stats.py` — adaptive win-rate-by-UTC-hour
+  tracker ported from clean v5's `trade_manager.py` (`HourlyStats`),
+  recorded automatically on every closed trade in
+  `execution_lifecycle.py`, exposed via `GET /execution/hourly-stats`,
+  persisted in the same state file as positions/risk.
+
+All three additions above are diagnostic/context only -- nothing in
+`engine_v4` reads them, so none can become a trend/EMA/BOS-style entry
+gate (see the Red Lines section of `ALPHA_FUSION_CONTRACT.md`). The BUY
+off-hours policy in `engine_v4/session_gate.py` is the one gate-adjacent
+change: it now supports an opt-in soft mode
+(`ALPHA_BUY_SOFT_SESSION_GATE=true`) that trades the historical hard block
+for a reduced `risk_adjustment` (`ALPHA_BUY_OFFHOURS_RISK_MULTIPLIER`,
+default `0.5`) instead of vetoing the setup outright. Default behavior
+(flag unset) is unchanged from the historical hard block.
 
 ## Supported Checks
 

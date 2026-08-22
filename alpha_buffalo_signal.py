@@ -48,6 +48,8 @@ from runtime_layers.execution import (
     build_ea_payload as _build_ea_payload,
 )
 from runtime_layers.harmonic import _harmonic_gate_context
+from runtime_layers.newday import newday_bias_for_direction, newday_diagnostic
+from fundamental.context import fundamental_bias_for_direction, fundamental_diagnostic
 from pine_signal_bridge import (
     PineSignalBridge,
     PineSignalError,
@@ -3300,6 +3302,23 @@ def execution_state(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
     }
 
 
+@app.get("/execution/hourly-stats")
+def execution_hourly_stats(key: str = "", symbol: str = PUBLIC_SYMBOL_DEFAULT):
+    """Diagnostic-only win-rate-by-UTC-hour snapshot, built from real closed
+    trades (see execution_lifecycle.py's _record_close). Ported from clean
+    v5's trade_manager.py HourlyStats -- the seed of an AI-learning
+    feedback loop. Never gates entry; nothing in engine_v4 reads this.
+    """
+    if not verify_license(key):
+        raise HTTPException(status_code=403, detail="INVALID_LICENSE")
+    public_symbol = symbol.replace("/", "")
+    return {
+        "status": "ok",
+        "symbol": public_symbol,
+        "hourly_stats": execution_lifecycle.hourly_stats_summary(public_symbol),
+    }
+
+
 @app.post("/execution/fill")
 async def execution_fill(request: Request):
     """EA confirms a fill while the configured source keeps command ownership."""
@@ -3588,7 +3607,50 @@ def signal_scenarios(key: str = "", symbol: str = SYMBOL_DEFAULT):
         "status": "ok",
         "symbol": symbol.replace("/", ""),
         "blueprint": blueprint.to_dict(),
+        "newday": newday_diagnostic(symbol.replace("/", "")),
     }
+
+
+@app.get("/newday/map")
+def newday_map(key: str = "", symbol: str = SYMBOL_DEFAULT):
+    """Diagnostic-only view of the latest market-close NewdayMarketMap.
+
+    This never gates entry (see PROJECT_CONTRACT.md / ALPHA_FUSION_CONTRACT.md
+    red lines). It exists so the map that scripts/daily_market_scan.py already
+    builds is actually reachable at runtime instead of sitting unused on disk.
+    Returns available=false rather than an error when no map has been
+    generated yet -- callers must treat that as "no newday context", not a
+    failure.
+    """
+    if not verify_license(key):
+        raise HTTPException(status_code=403, detail="INVALID_LICENSE")
+
+    public_symbol = symbol.replace("/", "")
+    diag = newday_diagnostic(public_symbol)
+    return {
+        "status": "ok",
+        "symbol": public_symbol,
+        "newday": diag,
+    }
+
+
+@app.get("/context/fundamental")
+def context_fundamental(key: str = "", direction: str = ""):
+    """Diagnostic-only DXY / Fear&Greed / COT / news-calendar snapshot.
+
+    Ported from clean v5's context_engine.py + plugin_* modules -- v12-core
+    had no fundamental layer at all before this. Never gates entry: pass
+    `direction` (BUY/SELL) to also see the non-blocking combined adjustment
+    that could later feed a soft risk_adjustment, same role as
+    /newday/map's bias hint.
+    """
+    if not verify_license(key):
+        raise HTTPException(status_code=403, detail="INVALID_LICENSE")
+
+    direction = direction.upper().strip()
+    if direction in {"BUY", "SELL"}:
+        return {"status": "ok", "direction": direction, "fundamental": fundamental_bias_for_direction(direction)}
+    return {"status": "ok", "fundamental": fundamental_diagnostic()}
 
 
 @app.post("/webhook/tv")

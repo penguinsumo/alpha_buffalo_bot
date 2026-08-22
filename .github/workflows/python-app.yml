@@ -21,7 +21,7 @@ jobs:
           pine_signal_bridge.py scenario_blueprint.py scenario_scanner.py
           session_clock.py signal_composer.py signal_schema.py
           telegram_bot.py telegram_guard.py engine_v4/*.py runtime_layers/*.py
-          scripts/regression_cases/*.py
+          fundamental/*.py scripts/regression_cases/*.py
       - run: python scripts/alpha_regression_suite.py
       - run: python scripts/test_python_execution_roundtrip.py
       - run: python scripts/test_pine_webhook_roundtrip.py

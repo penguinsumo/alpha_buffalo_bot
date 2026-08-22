@@ -13,6 +13,10 @@ from scripts.regression_cases.lifecycle import *
 from scripts.regression_cases.telegram import *
 from scripts.regression_cases.prz_runtime import *
 from scripts.regression_cases.data_runtime import *
+from scripts.regression_cases.newday_runtime import *
+from scripts.regression_cases.session_gate_runtime import *
+from scripts.regression_cases.fundamental_runtime import *
+from scripts.regression_cases.hourly_stats_runtime import *
 
 TESTS = [
     test_upper_sell_not_blocked_by_bullish_context,
@@ -85,6 +89,22 @@ TESTS = [
     test_python_queue_reports_pipeline_error_instead_of_generic_hold,
     test_daily_limit_cooldown_ends_at_next_utc_midnight,
     test_daily_limit_circuit_breaker_skips_duplicate_network_calls,
+    test_newday_diagnostic_reports_unavailable_without_a_map,
+    test_newday_diagnostic_reads_the_latest_generated_map,
+    test_newday_bias_is_a_hint_never_a_gate,
+    test_newday_diagnostic_never_raises_on_corrupt_map_file,
+    test_buy_offhours_default_is_still_a_hard_block,
+    test_buy_offhours_soft_gate_allows_with_reduced_risk,
+    test_buy_offhours_soft_gate_still_respects_risk_gates,
+    test_sell_is_never_touched_by_the_buy_offhours_policy,
+    test_fundamental_diagnostic_never_raises_offline,
+    test_fundamental_bias_has_no_gating_fields,
+    test_fundamental_bias_degrades_to_neutral_without_network,
+    test_hourly_stats_unit_is_neutral_until_min_samples,
+    test_hourly_stats_unit_computes_win_rate_once_enough_samples,
+    test_lifecycle_close_records_into_hourly_stats,
+    test_hourly_stats_summary_has_no_gating_fields,
+    test_hourly_stats_survive_manager_restart,
 ]
 
 def main() -> int:

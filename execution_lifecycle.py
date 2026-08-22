@@ -14,6 +14,8 @@ from typing import Any
 
 import pandas as pd
 
+from runtime_layers.hourly_stats import HourlyStats
+
 
 BKK = timezone(timedelta(hours=7))
 
@@ -158,6 +160,7 @@ class ExecutionLifecycleManager:
         self._lock = threading.RLock()
         self._positions: dict[str, PositionState] = {}
         self._risk: dict[str, dict[str, Any]] = {}
+        self._hourly_stats: dict[str, HourlyStats] = {}
         self._state_file = Path(state_file) if state_file else None
         self._load()
 
@@ -171,9 +174,14 @@ class ExecutionLifecycleManager:
                 for symbol, state in (payload.get("positions") or {}).items()
             }
             self._risk = dict(payload.get("risk") or {})
+            self._hourly_stats = {
+                symbol: HourlyStats.from_json(buckets)
+                for symbol, buckets in (payload.get("hourly_stats") or {}).items()
+            }
         except Exception:
             self._positions = {}
             self._risk = {}
+            self._hourly_stats = {}
 
     def _save(self) -> None:
         if not self._state_file:
@@ -183,10 +191,22 @@ class ExecutionLifecycleManager:
         payload = {
             "positions": {symbol: asdict(state) for symbol, state in self._positions.items()},
             "risk": self._risk,
+            "hourly_stats": {
+                symbol: stats.to_json() for symbol, stats in self._hourly_stats.items()
+            },
             "updated_at": _iso_now(),
         }
         temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         os.replace(temporary, self._state_file)
+
+    def hourly_stats_summary(self, symbol: str, min_samples: int = 5) -> dict:
+        """Diagnostic-only win-rate-by-UTC-hour snapshot. Never gates entry
+        -- nothing in engine_v4 reads this. See runtime_layers/hourly_stats.py.
+        """
+        stats = self._hourly_stats.get(str(symbol))
+        if not stats:
+            return {}
+        return stats.summary(min_samples=min_samples)
 
     def has_active(self, symbol: str) -> bool:
         with self._lock:
@@ -286,6 +306,12 @@ class ExecutionLifecycleManager:
         elif r_multiple > 0:
             risk["consecutive_losses"] = 0
         self._risk[symbol] = risk
+
+        # Adaptive hourly stats (ported from clean v5's trade_manager.py
+        # HourlyStats): diagnostic-only, keyed by UTC hour of close.
+        stats = self._hourly_stats.get(symbol) or HourlyStats()
+        stats.record(datetime.now(timezone.utc).hour, r_multiple)
+        self._hourly_stats[symbol] = stats
 
     def _command(self, state: PositionState, action: str, reason: str, **values: Any) -> dict[str, Any]:
         if state.pending_command_id:
