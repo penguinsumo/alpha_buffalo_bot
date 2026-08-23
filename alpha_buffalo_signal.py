@@ -2665,6 +2665,78 @@ def format_telegram_diagnostic_signal(payload: Dict, *, verified_data_symbol: bo
     return "\n".join(lines)
 
 
+def format_telegram_diagnostic_watch(payload: Dict, *, verified_data_symbol: bool) -> str:
+    """Clean WATCH/WAIT-state diagnostic message -- no engine internals.
+
+    Mirrors the "public output hides engine internals" contract that
+    format_telegram_signal already follows for the production template
+    (see test_telegram_public_output_hides_engine_internals). Raw field
+    names like rr_ok/directional_levels_ok/score must never appear here --
+    a not-ready state just says WATCHING, nothing more.
+    """
+    symbol = payload.get("symbol", "")
+    ea = payload.get("ea", {}) or {}
+    entry = _safe_float(ea.get("entry"))
+    timestamp = (
+        payload.get("generated_at")
+        or _deep_get(payload, ["signal", "timestamp"], "")
+        or datetime.now(timezone.utc).isoformat()
+    )
+
+    lines = [
+        "🧪 <b>DIAGNOSTIC WATCH -- NOT LIVE</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"📌 Asset    : {_clean_text(symbol)}",
+        "📊 Status   : ⚪ WATCHING (no signal yet)",
+    ]
+    if entry:
+        lines.append(f"💰 Price    : ~{entry:,.2f}")
+    lines.append(f"⏰ {_clean_text(_format_public_trade_time(timestamp))}")
+    if not verified_data_symbol:
+        lines.append("⚠️ Data symbol unverified against provider -- confirm before trusting this feed.")
+    lines += [
+        "━━━━━━━━━━━━━━━━━━━━━",
+        "🚫 Not routed to EA -- observation only.",
+        TELEGRAM_DISCLAIMER,
+    ]
+    return "\n".join(lines)
+
+
+def maybe_broadcast_diagnostic_watch(payload: Dict, *, verified_data_symbol: bool) -> bool:
+    """Send a clean, internals-free WATCH heartbeat to the OWNER room when
+    there is no OPEN candidate. Separate from maybe_broadcast_diagnostic_signal
+    (which only fires on a real OPEN) so the two never share a dedup slot.
+    """
+    global LAST_TELEGRAM_DIAGNOSTIC_KEYS
+
+    if not ALPHA_DIAGNOSTIC_SYMBOLS_ENABLED:
+        return False
+
+    audience = "OWNER"
+    if not _telegram_market_is_open(payload) or not _telegram_enabled(audience):
+        return False
+
+    ea = payload.get("ea", {}) or {}
+    if str(ea.get("action", "WAIT")).upper() == "OPEN":
+        return False  # a real OPEN candidate uses maybe_broadcast_diagnostic_signal instead
+
+    symbol = str(payload.get("symbol", ""))
+    watch_key = f"WATCH|{symbol}"
+    with LAST_TELEGRAM_LOCK:
+        if LAST_TELEGRAM_DIAGNOSTIC_KEYS.get(watch_key) == "sent":
+            return False
+        LAST_TELEGRAM_DIAGNOSTIC_KEYS[watch_key] = "sent"
+
+    sent = send_telegram_message(
+        format_telegram_diagnostic_watch(payload, verified_data_symbol=verified_data_symbol),
+        audience=audience,
+    )
+    if not sent:
+        with LAST_TELEGRAM_LOCK:
+            LAST_TELEGRAM_DIAGNOSTIC_KEYS.pop(watch_key, None)
+    return sent
+
+
 def maybe_broadcast_diagnostic_signal(payload: Dict, *, verified_data_symbol: bool) -> bool:
     """Broadcast a diagnostic-only OPEN candidate for an expansion symbol
     (NAS100, BTC, ...) to the OWNER room only. This must never touch
@@ -3224,6 +3296,10 @@ def _diagnostic_multi_symbol_loop() -> None:
                 sent = maybe_broadcast_diagnostic_signal(
                     payload, verified_data_symbol=cfg["verified_data_symbol"]
                 )
+                if not sent:
+                    maybe_broadcast_diagnostic_watch(
+                        payload, verified_data_symbol=cfg["verified_data_symbol"]
+                    )
                 decision = payload.get("signal", {}).get("decision", {})
                 print(
                     "AlphaBuffalo diagnostic scan | "

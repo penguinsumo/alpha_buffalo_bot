@@ -112,6 +112,9 @@ TESTS = [
     test_diagnostic_unverified_symbol_carries_a_warning,
     test_diagnostic_dedup_is_isolated_from_production_signal_key,
     test_diagnostic_loop_never_calls_the_ea_command_publisher,
+    test_diagnostic_watch_message_never_leaks_engine_internals,
+    test_diagnostic_watch_broadcast_skips_when_a_real_open_exists,
+    test_diagnostic_watch_broadcast_sends_once_per_symbol,
 ]
 
 def main() -> int:
