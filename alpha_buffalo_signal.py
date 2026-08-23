@@ -174,6 +174,35 @@ TELEGRAM_OWNER_CHAT_IDS = _parse_telegram_chat_ids(
     or os.getenv("ADMIN_ID")
     or ""
 )
+# Diagnostic-only multi-symbol expansion (NAS100, BTC). This scan is fully
+# separate from the XAUUSD cloud signal loop: it never calls
+# _publish_python_entry_command, so it can never queue an EA command, and it
+# broadcasts to the OWNER audience only (never the public GROUP room) until a
+# human has watched it long enough to trust the data and the setup quality.
+# Default OFF so nothing changes on a deploy unless explicitly enabled.
+ALPHA_DIAGNOSTIC_SYMBOLS_ENABLED = os.getenv(
+    "ALPHA_DIAGNOSTIC_SYMBOLS_ENABLED", "false"
+).lower() in {"1", "true", "yes", "on"}
+ALPHA_DIAGNOSTIC_LOOP_INTERVAL_SECONDS = int(
+    os.getenv("ALPHA_DIAGNOSTIC_LOOP_INTERVAL_SECONDS", "900")
+)
+# BTC/USD is TwelveData's documented crypto ticker. The NAS100 ticker is NOT
+# independently verified from this sandbox (network egress to TwelveData is
+# blocked here) -- "NDX" is the standard Nasdaq-100 index ticker, but confirm
+# it via TwelveData's /symbol_search before trusting the NAS100 output.
+ALPHA_DIAGNOSTIC_SYMBOLS = [
+    {
+        "data_symbol": os.getenv("ALPHA_DIAGNOSTIC_BTC_SYMBOL", "BTC/USD"),
+        "public_symbol": os.getenv("ALPHA_DIAGNOSTIC_BTC_PUBLIC", "BTCUSD"),
+        "verified_data_symbol": True,
+    },
+    {
+        "data_symbol": os.getenv("ALPHA_DIAGNOSTIC_NAS100_SYMBOL", "NDX"),
+        "public_symbol": os.getenv("ALPHA_DIAGNOSTIC_NAS100_PUBLIC", "NAS100"),
+        "verified_data_symbol": False,
+    },
+]
+
 # Only the confirmed-BOS/WAIT-CF state may emit a waiting message.  The old
 # TELEGRAM_NOTIFY_WAIT flag is intentionally ignored because it represented
 # noisy generic WAIT updates in previous deployments.
@@ -207,6 +236,11 @@ TELEGRAM_MAX_OPEN_SIGNAL_AGE_SECONDS = max(
     int(os.getenv("TELEGRAM_MAX_OPEN_SIGNAL_AGE_SECONDS", "1800")),
 )
 LAST_TELEGRAM_SIGNAL_KEY = ""
+# Per-symbol dedup for the diagnostic-only NAS100/BTC scan. Kept separate
+# from LAST_TELEGRAM_SIGNAL_KEY so it can never suppress (or be suppressed
+# by) the production XAUUSD signal, and keyed per symbol so BTC and NAS100
+# don't dedup against each other.
+LAST_TELEGRAM_DIAGNOSTIC_KEYS: dict = {}
 LAST_TELEGRAM_TREND_UPDATE_KEY = ""
 LAST_TELEGRAM_TREND_UPDATE_AT: datetime | None = None
 LAST_TELEGRAM_H1_CROSS_KEY = ""
@@ -916,6 +950,7 @@ def _telegram_signal_key(payload: Dict) -> str:
     signal = payload.get("signal", {}) or {}
     return "|".join([
         _telegram_payload_source(payload),
+        str(payload.get("symbol", "")),
         str(ea.get("signal_id", "")),
         str(ea.get("action", "")),
         str(ea.get("execution_state", "")),
@@ -2592,6 +2627,91 @@ def maybe_broadcast_signal(payload: Dict) -> bool:
     return sent
 
 
+def format_telegram_diagnostic_signal(payload: Dict, *, verified_data_symbol: bool) -> str:
+    """Diagnostic-only variant of format_telegram_signal.
+
+    Must never claim the EA is executing -- this scan is never wired to
+    _publish_python_entry_command, so no EA command is ever queued from it.
+    """
+    symbol = payload.get("symbol", "")
+    ea = payload.get("ea", {}) or {}
+    signal = payload.get("signal", {}) or {}
+
+    direction = str(ea.get("direction", "NONE")).upper()
+    side_icon, side_label = _public_side(direction)
+    entry = _safe_float(ea.get("entry"))
+    sl = _safe_float(ea.get("sl"))
+    tp = _safe_float(ea.get("tp_final"))
+    score = int(_safe_float(ea.get("score") or signal.get("score") or _deep_get(signal, ["decision", "score"], 0)))
+    session = ea.get("session") or _deep_get(signal, ["gates", "session"], "-")
+
+    lines = [
+        "🧪 <b>DIAGNOSTIC ONLY -- NOT LIVE</b>",
+        "━━━━━━━━━━━━━━━━━",
+        f"📌 {_clean_text(symbol)} {_clean_text(side_label)}",
+        f"🎯 Entry  : {entry:,.2f}",
+        f"🛡️ SL     : {sl:,.2f}",
+        f"🏆 TP     : {tp:,.2f}",
+        f"{'📈' if direction == 'BUY' else '📉'} Score  : {score}/10",
+        f"🕐 Session: {_clean_text(session)}",
+    ]
+    if not verified_data_symbol:
+        lines.append("⚠️ Data symbol unverified against provider -- confirm before trusting this feed.")
+    lines += [
+        "━━━━━━━━━━━━━━━━━",
+        "🚫 Not routed to EA -- observation only, no order will be placed.",
+        TELEGRAM_DISCLAIMER,
+    ]
+    return "\n".join(lines)
+
+
+def maybe_broadcast_diagnostic_signal(payload: Dict, *, verified_data_symbol: bool) -> bool:
+    """Broadcast a diagnostic-only OPEN candidate for an expansion symbol
+    (NAS100, BTC, ...) to the OWNER room only. This must never touch
+    LAST_TELEGRAM_SIGNAL_KEY (the production XAUUSD dedup slot) and must
+    never be routed into _publish_python_entry_command / the EA command
+    queue -- see ALPHA_FUSION_CONTRACT.md and the multi-symbol proposal doc
+    for why this stays read-only until a human validates the signal quality.
+    """
+    global LAST_TELEGRAM_DIAGNOSTIC_KEYS
+
+    if not ALPHA_DIAGNOSTIC_SYMBOLS_ENABLED:
+        return False
+
+    audience = "OWNER"
+    if not _telegram_market_is_open(payload) or not _telegram_enabled(audience):
+        return False
+
+    ea = payload.get("ea", {}) or {}
+    action = str(ea.get("action", "WAIT")).upper()
+    if action != "OPEN":
+        return False
+    if not bool(ea.get("directional_levels_ok")):
+        return False
+    if not bool(ea.get("levels_ready")):
+        return False
+    if not bool(ea.get("rr_ok")):
+        return False
+
+    symbol = str(payload.get("symbol", ""))
+    signal_key = _telegram_signal_key(payload)
+    with LAST_TELEGRAM_LOCK:
+        if signal_key and LAST_TELEGRAM_DIAGNOSTIC_KEYS.get(symbol) == signal_key:
+            return False
+        previous_key = LAST_TELEGRAM_DIAGNOSTIC_KEYS.get(symbol)
+        LAST_TELEGRAM_DIAGNOSTIC_KEYS[symbol] = signal_key
+
+    sent = send_telegram_message(
+        format_telegram_diagnostic_signal(payload, verified_data_symbol=verified_data_symbol),
+        audience=audience,
+    )
+    if not sent:
+        with LAST_TELEGRAM_LOCK:
+            if LAST_TELEGRAM_DIAGNOSTIC_KEYS.get(symbol) == signal_key:
+                LAST_TELEGRAM_DIAGNOSTIC_KEYS[symbol] = previous_key
+    return sent
+
+
 def broadcast_runtime_telegram(payload: Dict) -> bool:
     """Route production Telegram output through the confirmed OPEN lane.
 
@@ -3077,6 +3197,59 @@ def _pine_monitor_loop() -> None:
                 flush=True,
             )
         time.sleep(TELEGRAM_PINE_MONITOR_INTERVAL_SECONDS)
+
+
+def _diagnostic_multi_symbol_loop() -> None:
+    """NAS100/BTC diagnostic scan -- read-only, Telegram-only, OWNER-only.
+
+    Runs run_pipeline() for each configured expansion symbol and broadcasts
+    an accepted OPEN candidate to the owner Telegram room, clearly labeled
+    as diagnostic. Deliberately never queues an EA command and never
+    overwrites the XAUUSD latest-signal cache -- this scan only ever reads
+    a pipeline result and hands it to the OWNER-only Telegram formatter.
+    See MULTI_SYMBOL_NAS100_BTC_PROPOSAL.md Phase 1.
+    """
+    print(
+        "AlphaBuffalo diagnostic multi-symbol loop started | "
+        f"symbols={[s['public_symbol'] for s in ALPHA_DIAGNOSTIC_SYMBOLS]} "
+        f"interval={ALPHA_DIAGNOSTIC_LOOP_INTERVAL_SECONDS}s",
+        flush=True,
+    )
+    while True:
+        for cfg in ALPHA_DIAGNOSTIC_SYMBOLS:
+            try:
+                payload = run_pipeline(
+                    symbol=cfg["data_symbol"], public_symbol=cfg["public_symbol"]
+                )
+                sent = maybe_broadcast_diagnostic_signal(
+                    payload, verified_data_symbol=cfg["verified_data_symbol"]
+                )
+                decision = payload.get("signal", {}).get("decision", {})
+                print(
+                    "AlphaBuffalo diagnostic scan | "
+                    f"symbol={cfg['public_symbol']} action={decision.get('action')} "
+                    f"score={decision.get('score')} telegram_sent={sent}",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    "AlphaBuffalo diagnostic scan error | "
+                    f"symbol={cfg.get('public_symbol')} {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+        time.sleep(ALPHA_DIAGNOSTIC_LOOP_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+def _start_diagnostic_multi_symbol_loop() -> None:
+    if not ALPHA_DIAGNOSTIC_SYMBOLS_ENABLED:
+        return
+    worker = threading.Thread(
+        target=_diagnostic_multi_symbol_loop,
+        name="alpha-diagnostic-multi-symbol-loop",
+        daemon=True,
+    )
+    worker.start()
 
 
 @app.on_event("startup")

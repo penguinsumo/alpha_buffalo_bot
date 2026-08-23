@@ -77,6 +77,24 @@ are directions. RR and directional price validation still decide EA readiness.
   `execution_lifecycle.py`, exposed via `GET /execution/hourly-stats`,
   persisted in the same state file as positions/risk.
 
+- **Multi-symbol diagnostic scan (NAS100, BTC)** -- `_diagnostic_multi_symbol_loop()`
+  in `alpha_buffalo_signal.py`, gated off by default
+  (`ALPHA_DIAGNOSTIC_SYMBOLS_ENABLED=false`). When enabled it runs
+  `run_pipeline()` for BTC/USD and NAS100 alongside (never instead of) the
+  XAUUSD production loop, and broadcasts an accepted OPEN candidate to the
+  **OWNER Telegram room only** via `maybe_broadcast_diagnostic_signal()`,
+  clearly labeled `🧪 DIAGNOSTIC ONLY -- NOT LIVE` / `Not routed to EA`. It
+  never calls `_publish_python_entry_command` and never touches
+  `_set_latest_signal`, so it cannot queue an MT5 command or disturb the
+  XAUUSD `/signal/latest` cache -- see the regression tests in
+  `scripts/regression_cases/diagnostic_symbols_runtime.py`. BTC/USD is a
+  confirmed TwelveData ticker; the NAS100 ticker (`ALPHA_DIAGNOSTIC_NAS100_SYMBOL`,
+  defaults to `NDX`) is **not independently verified** -- the diagnostic
+  Telegram message for it carries an explicit "unverified" warning until
+  someone confirms the correct ticker via TwelveData's `/symbol_search`.
+  See `MULTI_SYMBOL_NAS100_BTC_PROPOSAL.md` for the full phased plan; this
+  is Phase 1 only -- no bridge/EA wiring, no live execution.
+
 All three additions above are diagnostic/context only -- nothing in
 `engine_v4` reads them, so none can become a trend/EMA/BOS-style entry
 gate (see the Red Lines section of `ALPHA_FUSION_CONTRACT.md`). The BUY

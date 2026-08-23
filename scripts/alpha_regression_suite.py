@@ -17,6 +17,7 @@ from scripts.regression_cases.newday_runtime import *
 from scripts.regression_cases.session_gate_runtime import *
 from scripts.regression_cases.fundamental_runtime import *
 from scripts.regression_cases.hourly_stats_runtime import *
+from scripts.regression_cases.diagnostic_symbols_runtime import *
 
 TESTS = [
     test_upper_sell_not_blocked_by_bullish_context,
@@ -105,6 +106,12 @@ TESTS = [
     test_lifecycle_close_records_into_hourly_stats,
     test_hourly_stats_summary_has_no_gating_fields,
     test_hourly_stats_survive_manager_restart,
+    test_diagnostic_symbols_disabled_by_default,
+    test_diagnostic_broadcast_is_noop_while_feature_flag_is_off,
+    test_diagnostic_broadcast_uses_owner_audience_and_never_claims_ea_execution,
+    test_diagnostic_unverified_symbol_carries_a_warning,
+    test_diagnostic_dedup_is_isolated_from_production_signal_key,
+    test_diagnostic_loop_never_calls_the_ea_command_publisher,
 ]
 
 def main() -> int:
