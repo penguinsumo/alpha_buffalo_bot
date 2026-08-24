@@ -1031,3 +1031,94 @@ def test_v4_pattern_comparison_routes_only_to_owner() -> None:
     finally:
         runtime.TELEGRAM_OWNER_CHAT_IDS = original_owner
         runtime.TELEGRAM_CHAT_IDS = original_group
+
+def test_bos_recalculates_harmonic_prz_and_stays_context_only() -> None:
+    """Wiring test for recalculate_prz_after_bos(): when price breaks past
+    a forming pattern's C-leg (BOS) before D ever prints, the scanner must
+    cycle to a freshly projected PRZ from the post-break swing structure
+    (per the project's Dow-theory/harmonic cycle model) instead of just
+    marking the old pattern dead -- while never granting the recalculated
+    zone entry authority (Red Lines: harmonic is WHAT/context only).
+    """
+    from unittest.mock import patch
+
+    rows = []
+    for index in range(120):
+        base = 100.0 + ((index % 20) - 10) * 0.5 + index * 0.05
+        rows.append(
+            {
+                "open": base - 0.2,
+                "high": base + 1.0,
+                "low": base - 1.0,
+                "close": base + 0.2,
+            }
+        )
+    data = pd.DataFrame(rows)
+    current_price = float(data["close"].iloc[-1])
+
+    # C sits well below the actual last close, guaranteeing c_leg_broken.
+    forming_context = {
+        "found": True,
+        "pattern": "Gartley",
+        "state": "FORMING",
+        "source_tf": "1H",
+        "source": "harmonic_detector.project_xabc",
+        "direction": "BUY",
+        "x": current_price - 20.0,
+        "a": current_price - 5.0,
+        "b": current_price - 12.0,
+        "c": current_price - 8.0,
+        "prz_low": current_price - 15.0,
+        "prz_high": current_price - 13.0,
+        "d_point": current_price - 14.0,
+        "score": 3,
+    }
+
+    original_log = os.environ.get("ALPHA_SCANNER_STATE_LOG")
+    try:
+        os.environ["ALPHA_SCANNER_STATE_LOG"] = "off"
+        with patch.object(
+            ScenarioScanner, "_select_harmonic_prz", return_value=forming_context
+        ):
+            blueprint = ScenarioScanner().scan(
+                data.copy(), data.copy(), data.copy(), symbol="XAUUSD"
+            )
+    finally:
+        if original_log is None:
+            os.environ.pop("ALPHA_SCANNER_STATE_LOG", None)
+        else:
+            os.environ["ALPHA_SCANNER_STATE_LOG"] = original_log
+
+    assert_equal(
+        blueprint.harmonic_state,
+        "RECALCULATED_POST_BOS",
+        "BOS past the C-leg must cycle the PRZ, not just invalidate it",
+    )
+    assert_true(
+        blueprint.harmonic_recalculated_after_bos,
+        "the recalculation must be surfaced on the blueprint",
+    )
+    assert_true(blueprint.harmonic_tunnel_broken, "BOS marks the prior structure broken")
+    assert_true(
+        blueprint.harmonic_prz_low > 0 and blueprint.harmonic_prz_high > 0,
+        "a new PRZ must actually be projected",
+    )
+    assert_true(
+        blueprint.harmonic_prz_high >= blueprint.harmonic_prz_low,
+        "recalculated PRZ bounds must be ordered",
+    )
+    assert_true(
+        not blueprint.harmonic_execution_authority,
+        "recalculated PRZ must never gain entry authority",
+    )
+    payload = blueprint.to_dict() if hasattr(blueprint, "to_dict") else {}
+    if payload:
+        harmonic_payload = payload.get("harmonic", {})
+        assert_true(
+            harmonic_payload.get("execution_authority") is False,
+            "serialized payload must hardcode execution_authority=False",
+        )
+        assert_true(
+            harmonic_payload.get("recalculated_after_bos") is True,
+            "serialized payload must expose the recalculation flag",
+        )

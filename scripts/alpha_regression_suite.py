@@ -81,6 +81,7 @@ TESTS = [
     test_scanner_prz_ignores_forming_candle_extremes,
     test_full_scenario_scan_populates_h1_prz_a_and_b,
     test_opposite_bos_cancels_prz_memory_before_ha_flip,
+    test_bos_recalculates_harmonic_prz_and_stays_context_only,
     test_v4_pattern_comparison_routes_only_to_owner,
     test_tf_cache_defaults_follow_confirmed_candle_cadence,
     test_tf_cache_refreshes_on_candle_boundary,

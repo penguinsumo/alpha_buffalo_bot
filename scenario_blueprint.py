@@ -157,6 +157,7 @@ class ScenarioBlueprint:
     harmonic_projection_mode: str = "COMPLETED_XABCD"
     harmonic_execution_authority: bool = False
     harmonic_tunnel_broken: bool = False
+    harmonic_recalculated_after_bos: bool = False
     harmonic_selected_pattern: str = ""
     harmonic_candidate_patterns: List[Dict] = field(default_factory=list)
     harmonic_current_xad: float = 0.0
@@ -369,6 +370,7 @@ class ScenarioBlueprint:
                 "entry_authority": False,
                 "target_authority_after_bos": True,
                 "tunnel_broken": self.harmonic_tunnel_broken,
+                "recalculated_after_bos": self.harmonic_recalculated_after_bos,
                 "selected_pattern": self.harmonic_selected_pattern,
                 "candidate_patterns": self.harmonic_candidate_patterns,
                 "current_xad": self.harmonic_current_xad,

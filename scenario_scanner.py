@@ -11,10 +11,15 @@ import pandas as pd
 from scenario_blueprint import ScenarioBlueprint
 
 try:
-    from harmonic_detector import run_harmonic, scan_forming_harmonic
+    from harmonic_detector import (
+        run_harmonic,
+        scan_forming_harmonic,
+        recalculate_prz_after_bos,
+    )
 except Exception as exc:
     run_harmonic = None
     scan_forming_harmonic = None
+    recalculate_prz_after_bos = None
     HARMONIC_IMPORT_ERROR = str(exc)
 else:
     HARMONIC_IMPORT_ERROR = ""
@@ -293,6 +298,7 @@ class ScenarioScanner:
 
         bb_upper, bb_middle, bb_lower = self._bollinger(df_15m)
         swing_L, swing_H, swing_L_idx, swing_H_idx = self._swings(df_15m)
+        swing_HL = swing_L if trend_h4 == "UP" else swing_H
 
         bos_triggered = (
             current_price > swing_H if trend_h4 == "UP"
@@ -484,11 +490,50 @@ class ScenarioScanner:
                 )
             )
             if c_leg_broken or prior_channel_broken:
-                selected_harmonic = {
-                    **selected_harmonic,
-                    "state": "INVALIDATED",
-                    "tunnel_broken": True,
-                }
+                # BOS cycle: price left the forming PRZ without printing D, so
+                # the pending pattern is invalidated -- but per the project's
+                # Dow-theory/harmonic cycle model, the breakout itself becomes
+                # the new X-A-B swing structure and a fresh downstream PRZ can
+                # be projected from it (recalculate_prz_after_bos). This is
+                # still WHAT/context only: harmonic_execution_authority stays
+                # False and the serialized "harmonic" dict still hardcodes
+                # execution_authority=False regardless of this recalculation
+                # (see scenario_blueprint.py) -- it can never gain entry
+                # authority, only update the post-BOS target/context.
+                recalculated_prz = None
+                recalculated_pattern = "Unknown"
+                if recalculate_prz_after_bos is not None:
+                    try:
+                        recalculated_prz, recalculated_pattern = recalculate_prz_after_bos(
+                            L=swing_L,
+                            H=swing_H,
+                            HL=swing_HL,
+                            current_price=current_price,
+                            direction=reversal_direction
+                            if reversal_direction in ("BUY", "SELL")
+                            else "BUY",
+                        )
+                    except Exception:
+                        recalculated_prz = None
+                if recalculated_prz is not None:
+                    selected_harmonic = {
+                        **selected_harmonic,
+                        "state": "RECALCULATED_POST_BOS",
+                        "tunnel_broken": True,
+                        "recalculated_after_bos": True,
+                        "pattern": recalculated_pattern,
+                        "prz_low": float(recalculated_prz.prz_low),
+                        "prz_high": float(recalculated_prz.prz_high),
+                        "d_point": float(recalculated_prz.d_point),
+                        "source": "recalculate_prz_after_bos",
+                        "projection_mode": "POST_BOS_CYCLE",
+                    }
+                else:
+                    selected_harmonic = {
+                        **selected_harmonic,
+                        "state": "INVALIDATED",
+                        "tunnel_broken": True,
+                    }
         real_harmonic = bool(selected_harmonic.get("found"))
 
         harmonic_prz_low = float(selected_harmonic.get("prz_low", 0.0)) if real_harmonic else 0.0
@@ -684,7 +729,7 @@ class ScenarioScanner:
             golden_zone_high=gz_high,
             swing_L=swing_L,
             swing_H=swing_H,
-            swing_HL=swing_L if trend_h4 == "UP" else swing_H,
+            swing_HL=swing_HL,
             swing_L_idx=swing_L_idx,
             swing_H_idx=swing_H_idx,
             swing_HL_idx=swing_L_idx if trend_h4 == "UP" else swing_H_idx,
@@ -731,6 +776,7 @@ class ScenarioScanner:
             harmonic_projection_mode=str(selected_harmonic.get("projection_mode", "COMPLETED_XABCD")) if real_harmonic else "NONE",
             harmonic_execution_authority=False,
             harmonic_tunnel_broken=bool(selected_harmonic.get("tunnel_broken", False)) if real_harmonic else False,
+            harmonic_recalculated_after_bos=bool(selected_harmonic.get("recalculated_after_bos", False)) if real_harmonic else False,
             harmonic_selected_pattern=str(selected_harmonic.get("selected_pattern", selected_harmonic.get("pattern", ""))) if real_harmonic else "",
             harmonic_candidate_patterns=list(selected_harmonic.get("candidate_patterns") or []) if real_harmonic else [],
             harmonic_current_xad=round(float(selected_harmonic.get("current_xad", 0.0)), 6) if real_harmonic else 0.0,

@@ -114,9 +114,30 @@ are directions. RR and directional price validation still decide EA readiness.
   See `MULTI_SYMBOL_NAS100_BTC_PROPOSAL.md` for the full phased plan; this
   is Phase 1 only -- no bridge/EA wiring, no live execution.
 
-All three additions above are diagnostic/context only -- nothing in
-`engine_v4` reads them, so none can become a trend/EMA/BOS-style entry
-gate (see the Red Lines section of `ALPHA_FUSION_CONTRACT.md`). The BUY
+- **PRZ cycle after BOS** -- `recalculate_prz_after_bos()` in
+  `harmonic_detector.py` was previously dead code (defined three times in
+  the file, zero callers anywhere in the repo). It is now wired into
+  `ScenarioScanner.scan()`: when a *forming* harmonic pattern's C-leg is
+  broken, or the confirmed parallel tunnel is broken, before D ever prints
+  (the existing invalidation check), the scanner now treats that breakout
+  as a BOS and reprojects a new PRZ from the post-break swing structure
+  (`X=swing_L, A=swing_H, B=swing_HL, C=current_price`) instead of just
+  marking the pattern `INVALIDATED`. This matches the project's Dow-theory
+  cycle model: exiting a PRZ via BOS becomes the next parallel-tunnel leg,
+  which cycles to a new harmonic PRZ. `harmonic_state` becomes
+  `RECALCULATED_POST_BOS` and `ScenarioBlueprint.harmonic_recalculated_after_bos`
+  is set so any consumer (Telegram diagnostics, `/newday/map`-style
+  endpoints) can label it distinctly. This stays strictly WHAT/context: the
+  serialized `harmonic` dict still hardcodes `execution_authority: False`
+  regardless of this flag, and `harmonic_execution_authority` on the
+  blueprint is unconditionally `False` -- see
+  `test_bos_recalculates_harmonic_prz_and_stays_context_only` in
+  `scripts/regression_cases/prz_runtime.py`.
+
+All of the additions above (Newday, fundamental, hourly-stats, the
+multi-symbol diagnostic scan, and the PRZ-cycle recalculation) are
+diagnostic/context only -- nothing in `engine_v4` reads them, so none can
+become a trend/EMA/BOS-style entry gate (see the Red Lines section of `ALPHA_FUSION_CONTRACT.md`). The BUY
 off-hours policy in `engine_v4/session_gate.py` is the one gate-adjacent
 change: it now supports an opt-in soft mode
 (`ALPHA_BUY_SOFT_SESSION_GATE=true`) that trades the historical hard block
