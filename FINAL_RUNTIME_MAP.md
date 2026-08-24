@@ -71,6 +71,25 @@ are directions. RR and directional price validation still decide EA readiness.
   from clean v5's `context_engine.py`/`plugin_*.py`, exposed via
   `GET /context/fundamental`. v12-core had no fundamental layer before
   this. Every source fails closed to a neutral value on network error.
+  Each source's cache duration is now configurable
+  (`FUNDAMENTAL_DXY_CACHE_MINUTES`, `FUNDAMENTAL_FEAR_GREED_CACHE_MINUTES`,
+  `FUNDAMENTAL_NEWS_CACHE_MINUTES`, `FUNDAMENTAL_COT_CACHE_HOURS`; defaults
+  unchanged) and tiered to match the timeframe cadence table below.
+
+  **Timeframe tier cadence** (analysis + config-only pass; no loop
+  restructuring was needed -- every piece already polls near its own
+  natural timeframe, just undocumented before this):
+
+  | Tier | Cadence | What runs here |
+  |---|---|---|
+  | M5/M15 (fast) | 300-900s | main XAUUSD signal loop, diagnostic BTC/NAS100 loop, Pine Telegram monitor, M5/M15 TF fetch |
+  | H1/H2 (medium) | 3600-7200s | Telegram trend update, H1 TF fetch, DXY cache, News cache, Fear&Greed cache |
+  | H4/Daily (slow) | 14400s+ / once-per-day | H4 TF fetch, COT cache (real CFTC data is weekly), Newday map (batch script, not a loop) |
+
+  Nothing in the fast tier reads a stale slow-tier value without knowing
+  it's stale -- `fundamental_diagnostic()` and `newday_diagnostic()` both
+  report their own cache/staleness state (see `stale` field in the newday
+  payload) rather than silently presenting old context as fresh.
 - `runtime_layers/hourly_stats.py` — adaptive win-rate-by-UTC-hour
   tracker ported from clean v5's `trade_manager.py` (`HourlyStats`),
   recorded automatically on every closed trade in

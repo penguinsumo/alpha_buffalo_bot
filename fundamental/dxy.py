@@ -20,7 +20,11 @@ import requests
 
 _dxy_cache: Optional[pd.DataFrame] = None
 _cache_time: Optional[datetime] = None
-CACHE_MINUTES = 60
+# H1 tier: DXY is an H1-candle context input, so its cache should refresh no
+# slower than roughly once per H1 candle -- matches the H1 fetch cadence in
+# alpha_buffalo_signal.py's TF_FETCH_TTL_SECONDS. Configurable so a deploy
+# can retune it without a code change; default keeps prior behavior.
+CACHE_MINUTES = int(os.getenv("FUNDAMENTAL_DXY_CACHE_MINUTES", "60"))
 
 
 def fetch_dxy(api_key: str = "") -> Optional[pd.DataFrame]:

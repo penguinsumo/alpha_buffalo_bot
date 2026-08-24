@@ -101,6 +101,8 @@ TESTS = [
     test_fundamental_diagnostic_never_raises_offline,
     test_fundamental_bias_has_no_gating_fields,
     test_fundamental_bias_degrades_to_neutral_without_network,
+    test_fundamental_cache_durations_default_to_the_timeframe_tier_table,
+    test_fundamental_cache_durations_are_env_configurable,
     test_hourly_stats_unit_is_neutral_until_min_samples,
     test_hourly_stats_unit_computes_win_rate_once_enough_samples,
     test_lifecycle_close_records_into_hourly_stats,

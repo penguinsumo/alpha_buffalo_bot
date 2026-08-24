@@ -5,6 +5,7 @@ fundamental/dxy.py's module docstring for why this never gates entry.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -13,7 +14,10 @@ import requests
 _cache_value: int = 50
 _cache_label: str = "Neutral"
 _cache_time: Optional[datetime] = None
-CACHE_MINUTES = 120
+# H2 tier: the underlying alternative.me index itself only updates once a
+# day, so polling faster than this just spends API quota. Configurable --
+# default keeps prior behavior.
+CACHE_MINUTES = int(os.getenv("FUNDAMENTAL_FEAR_GREED_CACHE_MINUTES", "120"))
 
 
 def fetch_fear_greed() -> dict:

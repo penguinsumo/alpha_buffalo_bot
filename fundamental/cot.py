@@ -5,6 +5,7 @@ Context-only adjustment, see fundamental/dxy.py's module docstring.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -12,7 +13,10 @@ import requests
 
 _cot_cache: dict = {}
 _cache_time: Optional[datetime] = None
-CACHE_HOURS = 24
+# Daily tier: the CFTC report itself only updates weekly, so a 24h cache is
+# already generous rather than wasteful. Configurable -- default keeps prior
+# behavior.
+CACHE_HOURS = int(os.getenv("FUNDAMENTAL_COT_CACHE_HOURS", "24"))
 
 
 def fetch_cot_gold() -> dict:

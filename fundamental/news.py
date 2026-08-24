@@ -10,6 +10,7 @@ trend/direction gate, so it would not violate the Red Lines list).
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -19,7 +20,9 @@ UTC = timezone.utc
 
 _news_cache: list = []
 _cache_time: Optional[datetime] = None
-CACHE_MINUTES = 60
+# H1 tier: matches the H1 fetch cadence in TF_FETCH_TTL_SECONDS. Configurable
+# -- default keeps prior behavior.
+CACHE_MINUTES = int(os.getenv("FUNDAMENTAL_NEWS_CACHE_MINUTES", "60"))
 
 
 def fetch_ff_calendar() -> list:

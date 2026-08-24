@@ -76,3 +76,36 @@ def test_fundamental_bias_degrades_to_neutral_without_network():
     assert_equal(buy["total_adj"], 0, "offline BUY adjustment must degrade to neutral (0)")
     assert_equal(sell["total_adj"], 0, "offline SELL adjustment must degrade to neutral (0)")
     assert_true(buy["news_safe"], "offline news check must fail open to safe=True, never block trading")
+
+
+def test_fundamental_cache_durations_default_to_the_timeframe_tier_table():
+    """Timeframe-tier pass: defaults must match FINAL_RUNTIME_MAP.md's tier
+    table (DXY/News ~H1, Fear&Greed ~H2, COT ~daily) when no env override is
+    set -- this is a behavior-preserving regression, not a new default.
+    """
+    assert_equal(dxy_module.CACHE_MINUTES, 60, "DXY cache must default to the H1 tier (60 min)")
+    assert_equal(news_module.CACHE_MINUTES, 60, "News cache must default to the H1 tier (60 min)")
+    assert_equal(fg_module.CACHE_MINUTES, 120, "Fear&Greed cache must default to the H2 tier (120 min)")
+    assert_equal(cot_module.CACHE_HOURS, 24, "COT cache must default to the daily tier (24h)")
+
+
+def test_fundamental_cache_durations_are_env_configurable():
+    """Each source's TTL must be read from an env var (not hardcoded), so a
+    deploy can retune cadence without a code change. Verified at the source
+    level rather than via importlib.reload, so this can't corrupt the module
+    state other tests in this file depend on.
+    """
+    import inspect
+
+    checks = [
+        (dxy_module, "FUNDAMENTAL_DXY_CACHE_MINUTES"),
+        (fg_module, "FUNDAMENTAL_FEAR_GREED_CACHE_MINUTES"),
+        (news_module, "FUNDAMENTAL_NEWS_CACHE_MINUTES"),
+        (cot_module, "FUNDAMENTAL_COT_CACHE_HOURS"),
+    ]
+    for module, env_name in checks:
+        source = inspect.getsource(module)
+        assert_true(
+            f'os.getenv("{env_name}"' in source,
+            f"{module.__name__} must read its cache duration from {env_name}",
+        )
