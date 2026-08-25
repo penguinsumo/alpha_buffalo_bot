@@ -5,6 +5,7 @@ import os
 import requests
 import time
 import threading
+import traceback
 import uuid
 import pandas as pd
 from datetime import datetime, timezone, timedelta
@@ -156,6 +157,13 @@ SYMBOL          = os.getenv("TRADE_SYMBOL","XAUUSD")
 
 last_update_id = 0
 
+# Heartbeat: signal_loop updates this every time it completes one full pass
+# (success or handled failure). The watchdog thread below uses it to detect
+# a stalled/dead loop and alert the owner instead of staying silent for
+# hours -- see _signal_loop_watchdog().
+_last_loop_heartbeat: float = time.time()
+_loop_lock = threading.Lock()
+
 def log(msg): print(f"{datetime.now(BKK).strftime('%H:%M:%S')} | {msg}", flush=True)
 
 def send_telegram(msg, chat_id=None):
@@ -164,8 +172,16 @@ def send_telegram(msg, chat_id=None):
     targets = [str(chat_id)] if chat_id else NOTIFY_IDS
     for cid in targets:
         try:
-            requests.post(f"{TELEGRAM_API}/sendMessage",
+            resp = requests.post(f"{TELEGRAM_API}/sendMessage",
                 json={"chat_id":cid,"text":msg,"parse_mode":"HTML"},timeout=10)
+            body = resp.json()
+            if not body.get("ok"):
+                # Telegram accepted the HTTP request but rejected the send
+                # (bad chat_id, bot kicked/blocked, etc). requests does not
+                # raise on this, so without this check a broken destination
+                # fails completely silently -- log it so it shows up in
+                # Railway logs instead of just disappearing.
+                log(f"telegram rejected {cid}: {body.get('description')}")
         except Exception as e: log(f"telegram error {cid}: {e}")
 
 def get_ohlcv(interval="1h", bars=200):
@@ -194,12 +210,18 @@ def is_market_open():
     if now.weekday()==6: return now.hour>=22
     return True
 
+def _touch_heartbeat():
+    global _last_loop_heartbeat
+    with _loop_lock:
+        _last_loop_heartbeat = time.time()
+
 def signal_loop():
     log("📡 Signal loop started")
+    _touch_heartbeat()
     while True:
         try:
             if not is_market_open():
-                log("🔴 ตลาดปิด"); time.sleep(POLL_INTERVAL); continue
+                log("🔴 ตลาดปิด"); _touch_heartbeat(); time.sleep(POLL_INTERVAL); continue
             log("⏳ Fetching 4H/1H/15M...")
             df_4h  = get_ohlcv("4h",  100)
             df_1h  = get_ohlcv("1h",  200)
@@ -243,8 +265,48 @@ def signal_loop():
             except Exception as e:
                 log(f"⚠️ scenario_scanner error: {e}")
 
-        except Exception as e: log(f"signal_loop error: {e}")
+        except Exception as e:
+            log(f"signal_loop error: {e}")
+            log(traceback.format_exc())
+        _touch_heartbeat()
         time.sleep(POLL_INTERVAL)
+
+def _signal_loop_watchdog():
+    """
+    signal_loop() runs as a daemon thread with no supervisor: if it ever
+    hangs on a blocking call that ignores its own timeout (or dies from
+    something the broad except Exception above can't catch), the process
+    keeps serving HTTP fine -- health checks stay green -- while no new
+    signal or Telegram message goes out, silently, indefinitely. This has
+    happened in production before it was ever noticed.
+
+    This watchdog just checks the heartbeat signal_loop touches every pass.
+    If it goes stale for longer than a few missed cycles, alert the owner
+    once, then force-exit so Railway's process supervisor restarts the
+    container (a fresh process re-runs the startup hook and starts a new,
+    healthy signal_loop thread).
+    """
+    STALE_AFTER = max(POLL_INTERVAL * 3, 1800)
+    alerted = False
+    while True:
+        time.sleep(120)
+        with _loop_lock:
+            age = time.time() - _last_loop_heartbeat
+        if age > STALE_AFTER and not alerted:
+            alerted = True
+            log(f"⚠️ WATCHDOG: signal_loop heartbeat stale for {int(age)}s -- alerting owner")
+            try:
+                send_telegram(
+                    "⚠️ ALPHA BUFFALO WATCHDOG\n"
+                    f"Signal loop has not completed a cycle in {int(age/60)} min.\n"
+                    "Service will restart automatically.",
+                    chat_id=ADMIN_ID,
+                )
+            except Exception as e:
+                log(f"watchdog alert failed: {e}")
+        if age > STALE_AFTER * 2:
+            log("⚠️ WATCHDOG: signal_loop still stale after alert -- forcing restart")
+            os._exit(1)
 
 def command_loop():
     global last_update_id
@@ -266,7 +328,10 @@ def command_loop():
                     cid  = msg.get("chat",{}).get("id")
                     if text and cid: handle_cmd(text, cid)
         except requests.exceptions.Timeout: pass
-        except Exception as e: log(f"cmd error: {e}"); time.sleep(10)
+        except Exception as e:
+            log(f"cmd error: {e}")
+            log(traceback.format_exc())
+            time.sleep(10)
         time.sleep(3)
 
 def handle_cmd(text, chat_id):
@@ -343,9 +408,31 @@ def handle_cmd(text, chat_id):
         send_telegram(help_msg, chat_id)
 
 
+# ── Background thread startup ────────────────────────────────
+# IMPORTANT: Procfile runs `uvicorn alpha_buffalo_signal:app`, which
+# imports this module rather than executing it as __main__. The old
+# `if __name__ == "__main__":` block below never runs under that launch
+# path, so signal_loop()/command_loop() were never actually started by
+# the process Railway runs -- the FastAPI app still serves HTTP fine
+# (health checks stay green), but no background thread was ever alive
+# to generate a signal or send it to Telegram. Starting them from a
+# FastAPI startup event fires under both launch paths (uvicorn CLI
+# import, and `python alpha_buffalo_signal.py` via uvicorn.run below),
+# and fires exactly once per process either way.
+_background_threads_started = False
+
+@app.on_event("startup")
+def _start_background_threads():
+    global _background_threads_started
+    if _background_threads_started:
+        return
+    _background_threads_started = True
+    log("🐃 ALPHA BUFFALO v5 background threads starting")
+    threading.Thread(target=command_loop, daemon=True).start()
+    threading.Thread(target=signal_loop, daemon=True).start()
+    threading.Thread(target=_signal_loop_watchdog, daemon=True).start()
+
 if __name__ == "__main__":
     print("🐃 ALPHA BUFFALO v5 started\n")
-    threading.Thread(target=command_loop, daemon=True).start()
-    threading.Thread(target=signal_loop,  daemon=True).start()
     port = int(os.getenv("PORT",8080))
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
