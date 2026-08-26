@@ -136,9 +136,26 @@ def analyze_structure(df: pd.DataFrame, tf_name: str = "") -> str:
     resistance = float(df["high"].tail(20).max())
     near_res   = curr["close"] >= resistance * 0.998
     ema20 = float(curr["ema20"]); ema50 = float(curr["ema50"])
+
+    # [OPT-IN, default OFF] Drop the EMA20/EMA50 cross requirement for
+    # IMPULSE_UP/IMPULSE_DOWN and decide purely on structure (HH/HL vs
+    # LL/LH). Root cause: EMA50 lags a fresh reversal by design -- after a
+    # strong prior trend, EMA20 can stay on the "wrong" side of EMA50 for
+    # many bars even after price has already made a clean structural
+    # break (confirmed by BOS on M15/M5 independently). On H4 that lag can
+    # keep direction stuck at NEUTRAL for a long stretch after the market
+    # has already turned. This does NOT touch PULLBACK_UP/PULLBACK_DOWN,
+    # which still use the EMA cross to know which trend is being
+    # corrected -- only the IMPULSE (primary direction) gate changes.
+    ignore_ema = os.getenv("ALPHA_STRUCTURE_IGNORE_EMA", "false").lower() in {
+        "1", "true", "yes", "on",
+    }
+    impulse_up_ema_ok = ignore_ema or ema20 > ema50
+    impulse_down_ema_ok = ignore_ema or ema20 < ema50
+
     if vol_spike and is_bearish and near_res:  return "SELLING_PRESSURE"
-    if hh_hl and ema20 > ema50 and is_bullish: return "IMPULSE_UP"
-    if ll_lh and ema20 < ema50:                return "IMPULSE_DOWN"
+    if hh_hl and impulse_up_ema_ok and is_bullish: return "IMPULSE_UP"
+    if ll_lh and impulse_down_ema_ok:              return "IMPULSE_DOWN"
     if ema20 > ema50 and is_bearish and vol_drop: return "PULLBACK_UP"
     if ema20 < ema50 and is_bullish and vol_drop: return "PULLBACK_DOWN"
     if ema20 > ema50 and is_bearish and fib_pullback_up:   return "PULLBACK_UP"

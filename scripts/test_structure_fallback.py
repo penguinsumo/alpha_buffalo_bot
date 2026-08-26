@@ -51,6 +51,7 @@ def clear_env():
         "ALPHA_STRUCTURE_WINDOW_BARS",
         "ALPHA_STRUCTURE_FIB_PULLBACK_FALLBACK",
         "ALPHA_STRUCTURE_FIB_LOOKBACK",
+        "ALPHA_STRUCTURE_IGNORE_EMA",
     ]:
         os.environ.pop(k, None)
 
@@ -137,6 +138,49 @@ clear_env()
 implicit_default = analyze_structure(df_up)
 check("ALPHA_STRUCTURE_WINDOW_BARS=1 explicit == default (no env var)",
       explicit_one == implicit_default)
+
+# ── 4. Ignore-EMA fallback (d): OFF by default; ON drops the EMA20/EMA50
+#      cross requirement for IMPULSE_UP/IMPULSE_DOWN only. This is the exact
+#      real production case found live on 2026-08-26: H4 made a clean
+#      lower-low/lower-high break (BOS confirmed independently on M15+M5),
+#      but EMA20 was still ~53 points above EMA50 because it was catching
+#      up from a strong prior uptrend -- direction stayed NEUTRAL for
+#      hours after the market had already turned. ─────────────────────────
+clear_env()
+# Strong uptrend (EMA20 pulled well above EMA50), then a sharp multi-bar
+# reversal down that breaks structure (ll_lh) but is nowhere near enough to
+# flip the slower EMA50 yet.
+reversal_closes = [100 + i * 2.2 for i in range(20)] + [138.0, 128.0, 118.0]
+df_reversal = make_df(reversal_closes)
+default_reversal = analyze_structure(df_reversal)
+os.environ["ALPHA_STRUCTURE_IGNORE_EMA"] = "true"
+ignore_ema_reversal = analyze_structure(df_reversal)
+check("ignore_ema OFF (default): fresh structural break with lagging EMA -> stuck at SIDEWAYS",
+      default_reversal == "SIDEWAYS")
+check("ignore_ema ON: structural break alone is enough -> IMPULSE_DOWN",
+      ignore_ema_reversal == "IMPULSE_DOWN")
+clear_env()
+
+# ignore_ema must NOT manufacture a false IMPULSE out of genuinely choppy
+# data with no real structural break (hh_hl and ll_lh both false) -- it
+# only removes the EMA gate, it never lowers the structural bar itself.
+choppy_closes = [100, 102, 99, 103, 100, 104, 101, 105, 102, 106,
+                  103, 107, 104, 108, 105, 109, 106, 110, 107, 111, 108]
+df_choppy = make_df(choppy_closes)
+before_choppy = analyze_structure(df_choppy)
+os.environ["ALPHA_STRUCTURE_IGNORE_EMA"] = "true"
+after_choppy = analyze_structure(df_choppy)
+check("ignore_ema ON on genuinely choppy data (no structural break) -> stays SIDEWAYS both ways",
+      before_choppy == after_choppy == "SIDEWAYS")
+clear_env()
+
+# ignore_ema=false explicit must equal the default (no env var at all)
+os.environ["ALPHA_STRUCTURE_IGNORE_EMA"] = "false"
+explicit_false = analyze_structure(df_reversal)
+clear_env()
+implicit_default2 = analyze_structure(df_reversal)
+check("ALPHA_STRUCTURE_IGNORE_EMA=false explicit == default (no env var)",
+      explicit_false == implicit_default2)
 
 print()
 if FAILS:
