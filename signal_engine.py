@@ -564,11 +564,23 @@ def compute_signal(
     if final_score < THRESHOLD_V4: return None
 
     # BB Direction Filter (เหมือนเดิม)
+    # [OPT-IN, default OFF] ALPHA_BB_FILTER_DISABLE=true skips this block
+    # entirely. Root cause this exists for: it blocks BUY once price is
+    # already above the upper band, and SELL once price is already below
+    # the lower band -- an anti-chasing-extremes guard. Live-tested
+    # 2026-08-26/27: this was the one gate still blocking a real SELL setup
+    # (score 10, well above threshold) after the H4 cascade/EMA fixes,
+    # because price had already pushed $9.40 past the lower band. Default
+    # stays ON (current behavior unchanged) until explicitly disabled.
+    bb_filter_disabled = os.getenv("ALPHA_BB_FILTER_DISABLE", "false").lower() in {
+        "1", "true", "yes", "on",
+    }
     bb = get_bb(df_15m)
-    if direction == "BUY"  and bb["upper"] < price:
-        print("BB Filter: BUY blocked — BB bearish"); return None
-    if direction == "SELL" and bb["lower"] > price:
-        print("BB Filter: SELL blocked — BB bullish"); return None
+    if not bb_filter_disabled:
+        if direction == "BUY"  and bb["upper"] < price:
+            print("BB Filter: BUY blocked — BB bearish"); return None
+        if direction == "SELL" and bb["lower"] > price:
+            print("BB Filter: SELL blocked — BB bullish"); return None
 
     sig_type = score_result.signal_type
 
