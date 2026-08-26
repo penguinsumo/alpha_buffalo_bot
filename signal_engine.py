@@ -77,12 +77,60 @@ def analyze_structure(df: pd.DataFrame, tf_name: str = "") -> str:
     if df is None or len(df) < 20:
         return "INSUFFICIENT_DATA"
     df = add_ema(df)
-    curr = df.iloc[-1]; prev = df.iloc[-2]
-    hh_hl = (curr["high"] > prev["high"]) and (curr["low"] > prev["low"])
-    ll_lh = (curr["low"]  < prev["low"])  and (curr["high"] < prev["high"])
+    curr = df.iloc[-1]
+
+    # [OPT-IN, default OFF] Compare the current candle against the candle
+    # ALPHA_STRUCTURE_WINDOW_BARS bars back instead of only the single
+    # previous candle. A window of 1 (the default) is byte-identical to the
+    # original single-bar comparison -- this only changes behavior when the
+    # env var is explicitly set above 1. Root cause: on a feed with no
+    # volume data, comparing only against the immediately preceding H4
+    # candle means one noisy/wicked bar (a brief spike) can single-handedly
+    # block HH/HL detection even though structure over a slightly longer
+    # stretch is clearly trending -- looking a few bars further back rides
+    # through that one-bar noise instead of being decided by it.
+    window_bars = max(1, int(os.getenv("ALPHA_STRUCTURE_WINDOW_BARS", "1")))
+    if window_bars > 1 and len(df) > window_bars:
+        ref = df.iloc[-(window_bars + 1)]
+    else:
+        ref = df.iloc[-2]
+    ref_high = float(ref["high"])
+    ref_low = float(ref["low"])
+
+    hh_hl = (curr["high"] > ref_high) and (curr["low"] > ref_low)
+    ll_lh = (curr["low"]  < ref_low)  and (curr["high"] < ref_high)
+
     avg_vol   = df["volume"].tail(20).mean() if "volume" in df.columns else 0
     vol_spike = curr["volume"] > avg_vol * 1.5 if avg_vol > 0 else False
     vol_drop  = curr["volume"] < avg_vol * 0.8 if avg_vol > 0 else False
+
+    # [OPT-IN, default OFF] Fibonacci-retracement pullback fallback for feeds
+    # that never supply volume (e.g. TwelveData XAU/USD spot -- confirmed no
+    # "volume" field in the API response). vol_drop is permanently False on
+    # such feeds, so PULLBACK_UP/PULLBACK_DOWN can never fire in production
+    # even though the market genuinely corrects and resumes trend. This
+    # fallback only engages when the flag is on AND volume is genuinely
+    # unavailable/zero -- it never overrides a feed that has real volume.
+    fib_fallback_on = os.getenv(
+        "ALPHA_STRUCTURE_FIB_PULLBACK_FALLBACK", "false"
+    ).lower() in {"1", "true", "yes", "on"}
+    fib_pullback_up = False
+    fib_pullback_down = False
+    if fib_fallback_on and avg_vol <= 0:
+        fib_lookback = max(20, int(os.getenv("ALPHA_STRUCTURE_FIB_LOOKBACK", "30")))
+        fib_window = df.tail(min(len(df), fib_lookback))
+        swing_high = float(fib_window["high"].max())
+        swing_low = float(fib_window["low"].min())
+        span = swing_high - swing_low
+        if span > 0:
+            close = float(curr["close"])
+            retrace_from_high = (swing_high - close) / span
+            retrace_from_low = (close - swing_low) / span
+            # Classic 0.382-0.618 retracement band = a correction inside the
+            # existing trend, not a full reversal of it.
+            fib_pullback_up = 0.382 <= retrace_from_high <= 0.618
+            fib_pullback_down = 0.382 <= retrace_from_low <= 0.618
+
     is_bullish = curr["close"] > curr["open"]
     is_bearish = curr["close"] < curr["open"]
     resistance = float(df["high"].tail(20).max())
@@ -93,6 +141,8 @@ def analyze_structure(df: pd.DataFrame, tf_name: str = "") -> str:
     if ll_lh and ema20 < ema50:                return "IMPULSE_DOWN"
     if ema20 > ema50 and is_bearish and vol_drop: return "PULLBACK_UP"
     if ema20 < ema50 and is_bullish and vol_drop: return "PULLBACK_DOWN"
+    if ema20 > ema50 and is_bearish and fib_pullback_up:   return "PULLBACK_UP"
+    if ema20 < ema50 and is_bullish and fib_pullback_down: return "PULLBACK_DOWN"
     return "SIDEWAYS"
 
 def compute_cascade(df_4h, df_1h, df_15m) -> dict:
