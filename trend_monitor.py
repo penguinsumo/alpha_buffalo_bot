@@ -11,6 +11,7 @@ Output:
 """
 
 import logging
+import os
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
@@ -30,6 +31,66 @@ SIDEWAYS     = "Sideways ➡️"
 PRESSURE_SELL= "Selling Pressure"
 PRESSURE_BUY = "Buying Pressure"
 
+# ── Dow Theory swing-structure trend detection (opt-in) ────────────────
+# Default OFF: the original recent_highs[-1] vs recent_highs[-5] proxy
+# below (5 bars back, no real pivot confirmation) stays byte-identical
+# unless this is explicitly turned on. When enabled, HH/HL/LH/LL come from
+# CONFIRMED swing pivots instead -- a bar only counts as a swing high/low
+# once `pivot_bars` bars exist on both sides that don't exceed it (the
+# same left/right definition Pine's ta.pivothigh/ta.pivotlow use) -- i.e.
+# real Dow Theory structure (a run of higher highs + higher lows = uptrend,
+# lower highs + lower lows = downtrend), not a fixed-lookback proxy.
+DOW_THEORY_ENABLED = os.getenv("ALPHA_TREND_DOW_THEORY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+DOW_THEORY_PIVOT_BARS = int(os.getenv("ALPHA_TREND_DOW_THEORY_PIVOT_BARS", "3"))
+
+STRUCTURE_UPTREND   = "HH_HL"   # confirmed higher high AND higher low
+STRUCTURE_DOWNTREND = "LH_LL"   # confirmed lower high AND lower low
+STRUCTURE_MIXED     = "MIXED"   # confirmed swings but highs/lows disagree
+STRUCTURE_UNKNOWN   = ""        # disabled, or not enough confirmed swings yet
+
+
+def _confirmed_swing_pivots(series: "pd.Series", pivot_bars: int, is_high: bool):
+    """Return up to the last two CONFIRMED swing pivot values in `series`,
+    most-recent first. A bar at index i is a confirmed pivot only once
+    `pivot_bars` bars exist on both sides of it (so it can't repaint), and
+    it must be the highest (is_high=True) or lowest (is_high=False) value
+    in that [i-pivot_bars, i+pivot_bars] window.
+    """
+    values = series.values
+    n = len(values)
+    pivots = []
+    for i in range(n - 1 - pivot_bars, pivot_bars - 1, -1):
+        window = values[i - pivot_bars: i + pivot_bars + 1]
+        centre = values[i]
+        is_pivot = (centre == window.max()) if is_high else (centre == window.min())
+        if is_pivot:
+            pivots.append(float(centre))
+            if len(pivots) == 2:
+                break
+    return pivots  # [] , [most_recent] , or [most_recent, prior]
+
+
+def classify_dow_structure(df: "pd.DataFrame", pivot_bars: int = 3) -> str:
+    """Classify swing structure per Dow Theory using the last two CONFIRMED
+    swing pivots: higher high + higher low = uptrend, lower high + lower
+    low = downtrend. Anything else (not enough confirmed swings yet, or
+    highs/lows disagreeing) is reported as mixed/unknown rather than
+    guessed at.
+    """
+    if df is None or len(df) < pivot_bars * 2 + 3:
+        return STRUCTURE_UNKNOWN
+    highs = _confirmed_swing_pivots(df["high"], pivot_bars, is_high=True)
+    lows  = _confirmed_swing_pivots(df["low"],  pivot_bars, is_high=False)
+    if len(highs) < 2 or len(lows) < 2:
+        return STRUCTURE_UNKNOWN
+    higher_high, lower_high = highs[0] > highs[1], highs[0] < highs[1]
+    higher_low,  lower_low  = lows[0]  > lows[1],  lows[0]  < lows[1]
+    if higher_high and higher_low:
+        return STRUCTURE_UPTREND
+    if lower_high and lower_low:
+        return STRUCTURE_DOWNTREND
+    return STRUCTURE_MIXED
+
 
 @dataclass
 class TFTrend:
@@ -40,6 +101,7 @@ class TFTrend:
     ema20:     float
     ema50:     float
     price:     float
+    dow:       str = ""   # Dow Theory swing structure: HH_HL / LH_LL / MIXED / "" (disabled or unknown)
 
 
 @dataclass
@@ -70,14 +132,23 @@ def calc_tf_trend(df: pd.DataFrame, tf_name: str) -> TFTrend:
     ema50 = float(close.ewm(span=50).mean().iloc[-1])
     price = float(close.iloc[-1])
 
-    # ── Higher High / Lower Low Structure ────────────────
-    recent_highs = high.tail(10).values
-    recent_lows  = low.tail(10).values
+    dow_structure = classify_dow_structure(df, DOW_THEORY_PIVOT_BARS) if DOW_THEORY_ENABLED else STRUCTURE_UNKNOWN
 
-    hh = recent_highs[-1] > recent_highs[-5]   # Higher High
-    hl = recent_lows[-1]  > recent_lows[-5]    # Higher Low
-    lh = recent_highs[-1] < recent_highs[-5]   # Lower High
-    ll = recent_lows[-1]  < recent_lows[-5]    # Lower Low
+    if DOW_THEORY_ENABLED:
+        # Real swing-pivot Dow Theory structure instead of the 5-bar proxy below.
+        hh = dow_structure == STRUCTURE_UPTREND
+        hl = dow_structure == STRUCTURE_UPTREND
+        lh = dow_structure == STRUCTURE_DOWNTREND
+        ll = dow_structure == STRUCTURE_DOWNTREND
+    else:
+        # ── Higher High / Lower Low Structure ────────────────
+        recent_highs = high.tail(10).values
+        recent_lows  = low.tail(10).values
+
+        hh = recent_highs[-1] > recent_highs[-5]   # Higher High
+        hl = recent_lows[-1]  > recent_lows[-5]    # Higher Low
+        lh = recent_highs[-1] < recent_highs[-5]   # Lower High
+        ll = recent_lows[-1]  < recent_lows[-5]    # Lower Low
 
     # ── EMA Trend ─────────────────────────────────────────
     ema_up   = ema20 > ema50 and price > ema20
@@ -118,6 +189,7 @@ def calc_tf_trend(df: pd.DataFrame, tf_name: str) -> TFTrend:
     return TFTrend(
         tf=tf_name, state=state, emoji=emoji,
         pressure=pressure, ema20=ema20, ema50=ema50, price=price,
+        dow=dow_structure,
     )
 
 
@@ -147,6 +219,16 @@ def analyze_trend(
         bias = "SELL"
     else:
         bias = "NEUTRAL"
+
+    # Dow Theory confluence (opt-in): per-request, M15 and H4 agreeing on
+    # real swing structure is a stronger signal than the EMA/HH-proxy vote
+    # above, so when both timeframes confirm the same structure it sets
+    # the bias directly instead of just adding to the vote count.
+    if DOW_THEORY_ENABLED and m15.dow and m15.dow == h4.dow:
+        if m15.dow == STRUCTURE_UPTREND:
+            bias = "BUY"
+        elif m15.dow == STRUCTURE_DOWNTREND:
+            bias = "SELL"
 
     # ── Action ────────────────────────────────────────────
     pressures = [t.pressure for t in [m15, h1, h4] if t.pressure]
@@ -191,6 +273,16 @@ def format_trend_message(tr: TrendResult) -> str:
     if pressures:
         lines.append("")
         lines.extend(pressures)
+
+    # Dow Theory swing structure (opt-in via ALPHA_TREND_DOW_THEORY_ENABLED)
+    if DOW_THEORY_ENABLED:
+        _dow_label = {
+            STRUCTURE_UPTREND: "HH/HL ⬆️", STRUCTURE_DOWNTREND: "LH/LL ⬇️",
+            STRUCTURE_MIXED: "Mixed ➡️", STRUCTURE_UNKNOWN: "—",
+        }
+        lines.append("")
+        lines.append(f"🌊 Dow M15 : {_dow_label.get(tr.m15.dow, '—')}")
+        lines.append(f"🌊 Dow H4  : {_dow_label.get(tr.h4.dow, '—')}")
 
     lines.append("")
 
