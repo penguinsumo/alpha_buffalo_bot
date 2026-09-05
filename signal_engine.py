@@ -378,6 +378,45 @@ def validate_scenario(direction, signal_type, score, pattern,
 # MAIN SIGNAL ENGINE — PATCHED
 # ══════════════════════════════════════════════════════════
 
+def resolve_zone_based_entry_sl(direction, price, fib_zone, spike, enabled):
+    """
+    [OPT-IN helper for ALPHA_SIGNAL_ZONE_BASED_ENTRY_SL]
+
+    Given the actual Fib/PRZ zone a setup is based on (`fib_zone`, with
+    "prz_low"/"prz_high") and the structure-based reaction-candle SL found by
+    detect_h1_spike_at_kivanc() (`spike`), return (entry_price, zone_sl):
+
+      - entry_price: `price` clamped into [prz_low, prz_high] when the zone
+        is known -- i.e. unchanged if price is already inside the zone, but
+        snapped back to the nearer zone edge if price has already run past
+        it (the exact "entry chases live price" problem this flag fixes).
+      - zone_sl: spike["sl"] when it was found AND it lands on the correct
+        side of entry_price (below entry for BUY, above for SELL); otherwise
+        None, meaning the caller should fall back to the flat ATR buffer.
+
+    When `enabled` is False (default) or `fib_zone` is falsy, this always
+    returns (price, None) -- i.e. current behavior, byte-identical.
+    """
+    if not enabled or not fib_zone:
+        return price, None
+
+    entry_price = price
+    z_lo = fib_zone.get("prz_low")
+    z_hi = fib_zone.get("prz_high")
+    if z_lo is not None and z_hi is not None and z_hi > z_lo:
+        entry_price = min(max(price, z_lo), z_hi)
+
+    zone_sl = None
+    if spike.get("found") and spike.get("sl"):
+        candidate_sl = spike["sl"]
+        if direction == "BUY" and candidate_sl < entry_price:
+            zone_sl = candidate_sl
+        elif direction == "SELL" and candidate_sl > entry_price:
+            zone_sl = candidate_sl
+
+    return entry_price, zone_sl
+
+
 def compute_signal(
     df_4h: pd.DataFrame,
     df_1h: pd.DataFrame,
@@ -594,29 +633,49 @@ def compute_signal(
     # ── Step 7: Build CloudSignal (เหมือนเดิม) ──────────
     atr = max(float((df_15m["high"]-df_15m["low"]).tail(14).mean()), 1.0)
 
+    # [OPT-IN, default OFF] ALPHA_SIGNAL_ZONE_BASED_ENTRY_SL=true switches
+    # Entry/SL from "raw live price + flat ATR buffer" to "the actual Fib/PRZ
+    # zone this setup is based on". Root cause this exists for: by the time
+    # the full score/gate cascade finally clears, price has often already
+    # moved past the zone edge (fib_zone) the setup was scored against -- so
+    # the reported Entry ends up being just "wherever price was when the
+    # gates opened", and SL (Entry +/- flat ATR) lands close to where the
+    # real structural reversal actually happens instead of Entry itself.
+    # When enabled: Entry is clamped into [fib_zone.prz_low, fib_zone.prz_high]
+    # (no change if price is already inside the zone), and SL prefers the
+    # structure-based spike["sl"] (from detect_h1_spike_at_kivanc, anchored to
+    # the real reaction candle at the zone) over the flat ATR buffer, as long
+    # as it lands on the correct side of the (possibly clamped) entry.
+    # Default stays OFF (current behavior byte-identical) until enabled.
+    zone_entry_sl_enabled = os.getenv("ALPHA_SIGNAL_ZONE_BASED_ENTRY_SL", "false").lower() in {
+        "1", "true", "yes", "on",
+    }
+    entry_price, zone_sl = resolve_zone_based_entry_sl(
+        direction, price, fib_zone, spike, zone_entry_sl_enabled)
+
     if direction == "BUY":
-        sl          = round(price - atr*1.0, 2)
-        be_price    = round(price + 0.10, 2)
-        tp_main     = (prz_opposite["prz_mid"] if prz_opposite and prz_opposite["prz_mid"]>price
-                       else (pdh if pdh and pdh>price else price+atr*3.0))
-        tp_final    = round(max(tp_main, price+atr*1.5), 2)
-        tp1_price   = round(max(bb["upper"], price+atr*0.5), 2)
-        tp2_price   = round(max(bb["mid"],   price+atr*1.0), 2)
-        fallback_tp = round(price+atr*4.0, 2)
+        sl          = zone_sl if zone_sl is not None else round(entry_price - atr*1.0, 2)
+        be_price    = round(entry_price + 0.10, 2)
+        tp_main     = (prz_opposite["prz_mid"] if prz_opposite and prz_opposite["prz_mid"]>entry_price
+                       else (pdh if pdh and pdh>entry_price else entry_price+atr*3.0))
+        tp_final    = round(max(tp_main, entry_price+atr*1.5), 2)
+        tp1_price   = round(max(bb["upper"], entry_price+atr*0.5), 2)
+        tp2_price   = round(max(bb["mid"],   entry_price+atr*1.0), 2)
+        fallback_tp = round(entry_price+atr*4.0, 2)
         partial = [
             {"pct":50,"price":tp1_price,"reason":"BB_Upper"},
             {"pct":30,"price":tp2_price,"reason":"BB_Mid"},
             {"pct":20,"price":tp_final, "reason":"PDH_PRZ"},
         ]
     else:
-        sl          = round(price + atr*1.0, 2)
-        be_price    = round(price - 0.10, 2)
-        tp_main     = (prz_opposite["prz_mid"] if prz_opposite and 0<prz_opposite["prz_mid"]<price
-                       else (pdl if pdl and pdl<price else price-atr*3.0))
-        tp_final    = round(min(tp_main, price-atr*1.5), 2)
-        tp1_price   = round(min(bb["lower"], price-atr*0.5), 2)
-        tp2_price   = round(min(bb["mid"],   price-atr*1.0), 2)
-        fallback_tp = round(price-atr*4.0, 2)
+        sl          = zone_sl if zone_sl is not None else round(entry_price + atr*1.0, 2)
+        be_price    = round(entry_price - 0.10, 2)
+        tp_main     = (prz_opposite["prz_mid"] if prz_opposite and 0<prz_opposite["prz_mid"]<entry_price
+                       else (pdl if pdl and pdl<entry_price else entry_price-atr*3.0))
+        tp_final    = round(min(tp_main, entry_price-atr*1.5), 2)
+        tp1_price   = round(min(bb["lower"], entry_price-atr*0.5), 2)
+        tp2_price   = round(min(bb["mid"],   entry_price-atr*1.0), 2)
+        fallback_tp = round(entry_price-atr*4.0, 2)
         partial = [
             {"pct":50,"price":tp1_price,"reason":"BB_Lower"},
             {"pct":30,"price":tp2_price,"reason":"BB_Mid"},
@@ -633,7 +692,7 @@ def compute_signal(
 
     return CloudSignal(
         action="OPEN", direction=direction, signal_type=sig_type,
-        entry=round(price,2), sl=sl, be_price=be_price,
+        entry=round(entry_price,2), sl=sl, be_price=be_price,
         trail_from=round(bb["mid"],2), tp_final=tp_final,
         partial=partial, pattern=prz_name,
         score=score_result.bucket_a + score_result.bucket_b + score_result.bucket_c,
