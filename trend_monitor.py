@@ -217,6 +217,8 @@ def format_signal_message(
     pattern:     str = "",
     score:       int = 0,
     session:     str = "",
+    symbol:      str = "XAUUSD",
+    ea_executes: bool = True,
 ) -> str:
     """Format Signal Alert — Δ+ / Δ- แทน BUY/SELL"""
 
@@ -247,7 +249,7 @@ def format_signal_message(
     lines = [
         f"{emoji_prefix}{delta} ALPHA BUFFALO V5",
         "━━━━━━━━━━━━━━━━━━━━━",
-        "📌 Asset    : XAUUSD",
+        f"📌 Asset    : {symbol}",
         f"📊 Type     : {signal_type}",
     ]
 
@@ -264,10 +266,15 @@ def format_signal_message(
     if sniper:
         lines.append(f"📈 Score    : {score}/10")
 
+    # ea_executes=False (used for symbols the EA does not yet trade, e.g. the
+    # opt-in BTC/US100/JPN225 extra-symbol scan) must never claim an
+    # automated trade is happening when none is -- say so honestly instead.
+    exec_line = "✅ EA Executing" if ea_executes else "📋 Signal only — not wired to auto-execution yet"
+
     lines += [
         f"⏰ {now}",
         "━━━━━━━━━━━━━━━━━━━━━",
-        "✅ EA Executing",
+        exec_line,
         "⚠️ Not financial advice. Trade at your own risk.",
     ]
 

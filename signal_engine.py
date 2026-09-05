@@ -424,7 +424,15 @@ def compute_signal(
     buy_layers: int = 0,
     sell_layers: int = 0,
     spread: float = 0.0,
+    symbol_label: Optional[str] = None,
 ) -> Optional[CloudSignal]:
+    # symbol_label lets a caller running this same engine against a symbol
+    # other than the module-level SYMBOL (e.g. the opt-in BTC/US100/JPN225
+    # extra-symbol scan) get correctly-labeled early_warning Telegram alerts
+    # instead of every alert being tagged with the main SYMBOL regardless of
+    # which symbol actually triggered it. None (default) preserves old
+    # behavior exactly -- falls back to the module-level SYMBOL.
+    active_symbol = symbol_label or SYMBOL
 
     if len(df_15m) < 50: return None
     price   = float(df_15m["close"].iloc[-1])
@@ -439,7 +447,7 @@ def compute_signal(
     # ── Step 2: Early Warning Stage 1 ───────────────────
     try:
         from early_warning import check_vsa_forming
-        check_vsa_forming(df_15m, direction, SYMBOL, session)
+        check_vsa_forming(df_15m, direction, active_symbol, session)
     except Exception: pass
 
     # ── Step 3: Collect raw signals (ยังไม่บวก score) ───
@@ -449,7 +457,7 @@ def compute_signal(
     # Early Warning Stage 2
     try:
         from early_warning import check_bos_confirmed
-        check_bos_confirmed(df_15m, direction, SYMBOL, 0, "")
+        check_bos_confirmed(df_15m, direction, active_symbol, 0, "")
     except Exception: pass
 
     # PDH/PDL
@@ -686,7 +694,7 @@ def compute_signal(
 
     try:
         from early_warning import alert_signal_ready
-        alert_signal_ready(SYMBOL, direction, sig_type, final_score,
+        alert_signal_ready(active_symbol, direction, sig_type, final_score,
                            price, sl, tp_final, prz_name, session)
     except Exception: pass
 

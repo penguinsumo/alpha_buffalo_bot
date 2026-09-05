@@ -155,6 +155,59 @@ POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL","1800"))
 TWELVE_KEY      = os.getenv("TWELVE_API_KEY","")
 SYMBOL          = os.getenv("TRADE_SYMBOL","XAUUSD")
 
+# ── [OPT-IN, default OFF] Extra symbols into the same signal room ──────
+# ALPHA_EXTRA_SYMBOLS_ENABLED=true runs the exact same trend/signal engine
+# used for SYMBOL above against additional symbols (BTC/US100/JPN225) and
+# broadcasts real BUY/SELL signals for them into the signal room too.
+# Root cause this exists for: the production loop was hardcoded to one
+# module-level SYMBOL end-to-end -- this is purely additive, the main
+# SYMBOL path below is untouched byte-for-byte when this flag is off.
+#
+# Ticker verification status (checked 2026-09-05 against TwelveData):
+#   BTCUSD  -> BTC/USD  (confirmed, already used by the main sym_map below)
+#   JPN225  -> N225     (confirmed against TwelveData's own /indices list)
+#   US100   -> NDX      (NOT independently confirmed -- TwelveData's
+#     free/keyless /indices list excludes all United States indices
+#     entirely, so this could not be verified from this sandbox. NDX is
+#     the standard Nasdaq-100 ticker used elsewhere in this project's docs,
+#     kept here as the default, but VERIFY with the real TWELVE_API_KEY
+#     (e.g. .../symbol_search?symbol=NASDAQ&apikey=...) before trusting its
+#     output for real signals -- override via ALPHA_EXTRA_SYMBOL_US100_TICKER
+#     if it turns out to be wrong.
+EXTRA_SYMBOLS_ENABLED = os.getenv("ALPHA_EXTRA_SYMBOLS_ENABLED", "false").lower() in {
+    "1", "true", "yes", "on",
+}
+_extra_symbols_raw = os.getenv("ALPHA_EXTRA_SYMBOLS", "BTCUSD,US100,JPN225")
+EXTRA_SYMBOLS = [s.strip() for s in _extra_symbols_raw.split(",") if s.strip()]
+
+# Which room(s) extra-symbol signals go to. Defaults to the SAME room(s) as
+# the main SYMBOL signal (NOTIFY_IDS) -- i.e. "the signal room" the way it
+# was asked for. Override with a separate list if these should NOT be mixed
+# into the same room as the main XAUUSD signal.
+_extra_notify_raw = os.getenv("ALPHA_EXTRA_SYMBOLS_NOTIFY_IDS", _notify_raw)
+EXTRA_NOTIFY_IDS = [x.strip() for x in _extra_notify_raw.split(",") if x.strip()]
+
+# "เปิดทุก Session" -- extra symbols run every poll regardless of the main
+# is_market_open() weekend/session gate (BTC trades 24/7; gating it on
+# gold's weekend schedule would silently skip it for ~2 days every week).
+EXTRA_BYPASS_MARKET_GATE = os.getenv("ALPHA_EXTRA_SYMBOLS_BYPASS_MARKET_GATE", "true").lower() in {
+    "1", "true", "yes", "on",
+}
+
+# "ระงับสัญญาณ pine monitor หรือน้อยสุดที่ 4H/1ครั้ง" -- the periodic
+# no-signal "Trend Update" ping (as opposed to an actual BUY/SELL signal,
+# which is never throttled) defaults to fully suppressed for extra symbols.
+# If explicitly re-enabled, it is floor-capped to once per this interval
+# per symbol -- independent of the main SYMBOL's own per-session trend
+# alert in trend_monitor.py, which this does not touch at all.
+EXTRA_TREND_UPDATE_ENABLED = os.getenv("ALPHA_EXTRA_SYMBOLS_TREND_UPDATE_ENABLED", "false").lower() in {
+    "1", "true", "yes", "on",
+}
+EXTRA_TREND_UPDATE_MIN_INTERVAL_SEC = int(
+    os.getenv("ALPHA_EXTRA_SYMBOLS_TREND_UPDATE_MIN_INTERVAL_SEC", "14400")  # 4 hours
+)
+_extra_trend_last_sent: dict = {}
+
 last_update_id = 0
 
 # Heartbeat: signal_loop updates this every time it completes one full pass
@@ -184,10 +237,22 @@ def send_telegram(msg, chat_id=None):
                 log(f"telegram rejected {cid}: {body.get('description')}")
         except Exception as e: log(f"telegram error {cid}: {e}")
 
-def get_ohlcv(interval="1h", bars=200):
+EXTRA_SYMBOL_TICKERS = {
+    "BTCUSD": "BTC/USD",
+    "US100":  os.getenv("ALPHA_EXTRA_SYMBOL_US100_TICKER", "NDX"),
+    "JPN225": os.getenv("ALPHA_EXTRA_SYMBOL_JPN225_TICKER", "N225"),
+}
+
+def get_ohlcv(interval="1h", bars=200, symbol=None):
+    # symbol=None (default, all existing call sites) preserves old behavior
+    # exactly -- resolves against the module-level SYMBOL. Passing an
+    # explicit symbol is what lets the extra-symbol scan reuse this same
+    # function without touching the main SYMBOL path at all.
+    target_symbol = symbol or SYMBOL
     try:
         sym_map = {"XAUUSD":"XAU/USD","EURUSD":"EUR/USD","BTCUSD":"BTC/USD"}
-        sym = sym_map.get(SYMBOL, SYMBOL)
+        sym_map.update(EXTRA_SYMBOL_TICKERS)
+        sym = sym_map.get(target_symbol, target_symbol)
         r = requests.get("https://api.twelvedata.com/time_series",
             params={"symbol":sym,"interval":interval,"outputsize":bars,
                     "apikey":TWELVE_KEY,"format":"JSON"},timeout=15)
@@ -202,7 +267,7 @@ def get_ohlcv(interval="1h", bars=200):
             df[c] = df[c].astype(float)
         if "volume" in df.columns: df["volume"] = df["volume"].astype(float)
         return df
-    except Exception as e: log(f"ohlcv error: {e}"); return None
+    except Exception as e: log(f"ohlcv error ({target_symbol}): {e}"); return None
 
 def is_market_open():
     now = datetime.now(timezone.utc)
@@ -215,11 +280,73 @@ def _touch_heartbeat():
     with _loop_lock:
         _last_loop_heartbeat = time.time()
 
+def _extra_trend_update_allowed(symbol: str) -> bool:
+    if not EXTRA_TREND_UPDATE_ENABLED:
+        return False
+    now = time.time()
+    last = _extra_trend_last_sent.get(symbol, 0.0)
+    if now - last >= EXTRA_TREND_UPDATE_MIN_INTERVAL_SEC:
+        _extra_trend_last_sent[symbol] = now
+        return True
+    return False
+
+def run_extra_symbol_pass(symbol: str):
+    """
+    [OPT-IN, ALPHA_EXTRA_SYMBOLS_ENABLED] Run the exact same trend/signal
+    engine used for the main SYMBOL above against one additional symbol
+    (BTC/US100/JPN225) and broadcast a real signal into EXTRA_NOTIFY_IDS if
+    one fires. Mirrors the main SYMBOL block in signal_loop() below but is
+    fully independent of it -- an error here is caught and logged per
+    symbol, never able to interrupt the main gold loop.
+    """
+    try:
+        df_4h  = get_ohlcv("4h",  100, symbol=symbol)
+        df_1h  = get_ohlcv("1h",  200, symbol=symbol)
+        df_15m = get_ohlcv("15min", 96, symbol=symbol)
+        if df_4h is None or df_1h is None or df_15m is None:
+            log(f"⚠️ [{symbol}] ดึงข้อมูลไม่ครบ"); return
+
+        price = float(df_15m["close"].iloc[-1])
+        log(f"💰 [{symbol}] {price:,.2f}")
+        trend = analyze_trend(df_4h, df_1h, df_15m, symbol)
+
+        if _extra_trend_update_allowed(symbol):
+            for cid in EXTRA_NOTIFY_IDS:
+                send_telegram(format_trend_message(trend), chat_id=cid)
+            log(f"📊 [{symbol}] Trend: {trend.session} {trend.bias}")
+
+        sig = compute_signal(df_4h, df_1h, df_15m, symbol_label=symbol)
+        if sig:
+            tp1 = sig.partial[0]["price"] if sig.partial else sig.tp_final
+            tp2 = sig.partial[1]["price"] if len(sig.partial) > 1 else sig.tp_final
+            msg = format_signal_message(
+                direction=sig.direction, signal_type=sig.signal_type,
+                entry=sig.entry, sl=sig.sl, tp1=tp1, tp2=tp2,
+                pattern=sig.pattern, score=sig.score, session=trend.session,
+                symbol=symbol, ea_executes=False,
+            )
+            for cid in EXTRA_NOTIFY_IDS:
+                send_telegram(msg, chat_id=cid)
+            log(f"[{symbol}] Signal: {sig.direction} {sig.signal_type} Score:{sig.score}")
+        else:
+            log(f"⏳ [{symbol}] No signal | {price:,.2f}")
+    except Exception as e:
+        log(f"extra symbol {symbol} error: {e}")
+        log(traceback.format_exc())
+
 def signal_loop():
     log("📡 Signal loop started")
     _touch_heartbeat()
     while True:
         try:
+            # [OPT-IN] Extra symbols (BTC/US100/JPN225) run every poll,
+            # independent of the main gold market/session gate below --
+            # "เปิดทุก Session" for these three specifically.
+            if EXTRA_SYMBOLS_ENABLED:
+                for extra_symbol in EXTRA_SYMBOLS:
+                    if EXTRA_BYPASS_MARKET_GATE or is_market_open():
+                        run_extra_symbol_pass(extra_symbol)
+
             if not is_market_open():
                 log("🔴 ตลาดปิด"); _touch_heartbeat(); time.sleep(POLL_INTERVAL); continue
             log("⏳ Fetching 4H/1H/15M...")
