@@ -16,6 +16,9 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
+from typing import Optional
+
+from auto_fibo_entry import compute_auto_fibo, AutoFiboEstimate, DIRECTION_UP, DIRECTION_DOWN
 
 # ── Logging Setup ──────────────────────────────────────────
 logger = logging.getLogger(__name__)
@@ -47,6 +50,15 @@ STRUCTURE_UPTREND   = "HH_HL"   # confirmed higher high AND higher low
 STRUCTURE_DOWNTREND = "LH_LL"   # confirmed lower high AND lower low
 STRUCTURE_MIXED     = "MIXED"   # confirmed swings but highs/lows disagree
 STRUCTURE_UNKNOWN   = ""        # disabled, or not enough confirmed swings yet
+
+# ── Estimate Entry (Auto Fibo 144/1.272 style) display (opt-in) ────────
+# Default OFF: adds zero output/behavior change unless explicitly turned on.
+# Ported from the Pine multi-asset fork's Estimate Entry feature (same Auto
+# Fibo 144/1.272 methodology, not kivanc_vsaob.py's small-pivot Golden
+# Zone) -- see auto_fibo_entry.py. Display-only here: it never changes
+# `bias`/`action`, it just adds informational lines to the Telegram Trend
+# Update showing the same estimate the Pine dashboard shows.
+AUTO_FIBO_ENABLED = os.getenv("ALPHA_TREND_AUTO_FIBO_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 
 
 def _confirmed_swing_pivots(series: "pd.Series", pivot_bars: int, is_high: bool):
@@ -115,6 +127,7 @@ class TrendResult:
     bias:      str     # "BUY" / "SELL" / "NEUTRAL"
     action:    str     # "WAIT_AND_SEE" / "WATCH_SETUP" / "SIGNAL_READY"
     timestamp: str
+    auto_fibo: Optional[AutoFiboEstimate] = None   # opt-in, see AUTO_FIBO_ENABLED
 
 
 def calc_tf_trend(df: pd.DataFrame, tf_name: str) -> TFTrend:
@@ -230,6 +243,16 @@ def analyze_trend(
         elif m15.dow == STRUCTURE_DOWNTREND:
             bias = "SELL"
 
+    # Estimate Entry (Auto Fibo 144/1.272 style, opt-in, display-only) —
+    # computed on M15 (the same trigger TF the Pine version uses). Wrapped
+    # in try/except so a computation issue can never break the Trend Update.
+    auto_fibo = None
+    if AUTO_FIBO_ENABLED:
+        try:
+            auto_fibo = compute_auto_fibo(df_15m)
+        except Exception:
+            auto_fibo = None
+
     # ── Action ────────────────────────────────────────────
     pressures = [t.pressure for t in [m15, h1, h4] if t.pressure]
     if len(pressures) >= 2:
@@ -244,6 +267,7 @@ def analyze_trend(
         m15=m15, h1=h1, h4=h4,
         bias=bias, action=action,
         timestamp=now.strftime("%a %d %b %Y | %H:%M"),
+        auto_fibo=auto_fibo,
     )
 
 
@@ -283,6 +307,14 @@ def format_trend_message(tr: TrendResult) -> str:
         lines.append("")
         lines.append(f"🌊 Dow M15 : {_dow_label.get(tr.m15.dow, '—')}")
         lines.append(f"🌊 Dow H4  : {_dow_label.get(tr.h4.dow, '—')}")
+
+    # Estimate Entry (Auto Fibo 144/1.272, opt-in via ALPHA_TREND_AUTO_FIBO_ENABLED)
+    if AUTO_FIBO_ENABLED and tr.auto_fibo:
+        af = tr.auto_fibo
+        dir_label = "UP-SWING (BUY zone)" if af.direction == DIRECTION_UP else "DOWN-SWING (SELL zone)"
+        lines.append("")
+        lines.append(f"🧭 Est. Entry (Auto Fibo) : {dir_label}")
+        lines.append(f"    Zone : {af.zone_lo:,.2f} - {af.zone_hi:,.2f}  |  Ext : {af.ext_target:,.2f}")
 
     lines.append("")
 

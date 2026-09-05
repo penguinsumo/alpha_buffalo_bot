@@ -18,6 +18,7 @@ from typing import Optional
 
 # ── Score Manager (ใหม่) ──────────────────────────────────
 from score_manager import calculate_score, THRESHOLD_V4, THRESHOLD_V5
+from auto_fibo_entry import compute_auto_fibo, AutoFiboEstimate, DIRECTION_UP, DIRECTION_DOWN
 
 BKK = timezone(timedelta(hours=7))
 SYMBOL         = os.getenv("TRADE_SYMBOL", "XAUUSD")
@@ -57,6 +58,14 @@ class CloudSignal:
     st_15m:         str = ""
     # [NEW] bucket breakdown สำหรับ debug
     score_breakdown: dict = field(default_factory=dict)
+    # [NEW] Estimate Entry (Auto Fibo 144/1.272 style) -- always computed
+    # (best-effort) and attached for display, regardless of whether the
+    # opt-in ALPHA_SIGNAL_AUTO_FIBO_FILTER_ENABLED filter is on. Empty
+    # string / 0.0 when there wasn't enough history to compute it.
+    auto_fibo_direction:     str = ""
+    auto_fibo_entry_zone_lo: float = 0.0
+    auto_fibo_entry_zone_hi: float = 0.0
+    auto_fibo_ext_target:    float = 0.0
 
 
 # ── Helper functions (เหมือนเดิมทุกบรรทัด) ───────────────
@@ -417,6 +426,47 @@ def resolve_zone_based_entry_sl(direction, price, fib_zone, spike, enabled):
     return entry_price, zone_sl
 
 
+def resolve_auto_fibo_filter(
+    direction: str,
+    price: float,
+    auto_fibo: Optional[AutoFiboEstimate],
+    atr: float,
+    enabled: bool,
+    tolerance_atr: float,
+) -> bool:
+    """
+    [OPT-IN helper for ALPHA_SIGNAL_AUTO_FIBO_FILTER_ENABLED]
+
+    Estimate Entry (Auto Fibo 144/1.272 style, see auto_fibo_entry.py) as an
+    extra confirmation filter -- same idea as the Pine multi-asset fork's
+    `estimateEntryFilterEnabled` (opt-in, default OFF, zero change to
+    existing signals unless explicitly turned on).
+
+    Returns True if the signal should proceed, False if it should be
+    blocked. When `enabled` is False (default) or `auto_fibo` is None
+    (not enough history yet), always returns True -- i.e. current behavior,
+    unchanged.
+
+    When enabled: a BUY only proceeds if the Auto Fibo swing is an
+    up-swing pullback (auto_fibo.direction == DIRECTION_UP) with price
+    inside the near/deep retracement zone (widened by `tolerance_atr` * atr
+    on each side); a SELL requires a down-swing bounce (DIRECTION_DOWN)
+    under the same zone check.
+    """
+    if not enabled or auto_fibo is None:
+        return True
+
+    dir_ok = (
+        (direction == "BUY"  and auto_fibo.direction == DIRECTION_UP) or
+        (direction == "SELL" and auto_fibo.direction == DIRECTION_DOWN)
+    )
+    if not dir_ok:
+        return False
+
+    tolerance = max(atr, 0.0) * tolerance_atr
+    return auto_fibo.in_zone(price, tolerance=tolerance)
+
+
 def compute_signal(
     df_4h: pd.DataFrame,
     df_1h: pd.DataFrame,
@@ -438,6 +488,9 @@ def compute_signal(
     price   = float(df_15m["close"].iloc[-1])
     dt      = df_15m.index[-1]
     session = get_session(dt if hasattr(dt,"hour") else datetime.now(timezone.utc))
+    # Hoisted from Step 7 (unchanged formula, same df_15m) so Estimate Entry
+    # filter tolerance below can reuse the same ATR value.
+    atr = max(float((df_15m["high"]-df_15m["low"]).tail(14).mean()), 1.0)
 
     # ── Step 1: Cascade ──────────────────────────────────
     cascade   = compute_cascade(df_4h, df_1h, df_15m)
@@ -629,6 +682,27 @@ def compute_signal(
         if direction == "SELL" and bb["lower"] > price:
             print("BB Filter: SELL blocked — BB bullish"); return None
 
+    # ── Estimate Entry (Auto Fibo 144/1.272 style) ──────
+    # Same methodology as the Pine multi-asset fork's Estimate Entry
+    # feature (auto_fibo_entry.py), NOT kivanc_vsaob.py's small-pivot
+    # Golden Zone. Always computed (best-effort) below so it can be
+    # attached to the returned CloudSignal for display -- it only gates
+    # the signal when ALPHA_SIGNAL_AUTO_FIBO_FILTER_ENABLED is explicitly
+    # turned on (default OFF = current behavior, byte-identical).
+    try:
+        auto_fibo = compute_auto_fibo(df_15m)
+    except Exception:
+        auto_fibo = None
+
+    auto_fibo_filter_enabled = os.getenv(
+        "ALPHA_SIGNAL_AUTO_FIBO_FILTER_ENABLED", "false"
+    ).lower() in {"1", "true", "yes", "on"}
+    auto_fibo_tolerance_atr = float(os.getenv("ALPHA_SIGNAL_AUTO_FIBO_TOLERANCE_ATR", "0.5"))
+    if not resolve_auto_fibo_filter(
+        direction, price, auto_fibo, atr, auto_fibo_filter_enabled, auto_fibo_tolerance_atr
+    ):
+        print("Auto Fibo filter: blocked — price not in Estimate Entry zone"); return None
+
     sig_type = score_result.signal_type
 
     # ── Step 6: Scenario Validation (เหมือนเดิม) ────────
@@ -639,7 +713,7 @@ def compute_signal(
         print("Scenario blocked: " + val_reason); return None
 
     # ── Step 7: Build CloudSignal (เหมือนเดิม) ──────────
-    atr = max(float((df_15m["high"]-df_15m["low"]).tail(14).mean()), 1.0)
+    # atr computed earlier (Step 1) -- reused here unchanged.
 
     # [OPT-IN, default OFF] ALPHA_SIGNAL_ZONE_BASED_ENTRY_SL=true switches
     # Entry/SL from "raw live price + flat ATR buffer" to "the actual Fib/PRZ
@@ -710,6 +784,10 @@ def compute_signal(
         fallback_sl=sl, fallback_tp=fallback_tp,
         st_h4=cascade["st_h4"], st_1h=cascade["st_1h"], st_15m=cascade["st_15m"],
         score_breakdown=score_result.breakdown,
+        auto_fibo_direction=(auto_fibo.direction if auto_fibo else ""),
+        auto_fibo_entry_zone_lo=(round(auto_fibo.zone_lo, 2) if auto_fibo else 0.0),
+        auto_fibo_entry_zone_hi=(round(auto_fibo.zone_hi, 2) if auto_fibo else 0.0),
+        auto_fibo_ext_target=(round(auto_fibo.ext_target, 2) if auto_fibo else 0.0),
     )
 
 
@@ -737,4 +815,8 @@ def signal_to_dict(sig: CloudSignal) -> dict:
         "st_1h":           sig.st_1h,
         "st_15m":          sig.st_15m,
         "score_breakdown": sig.score_breakdown,  # [NEW] debug field
+        "auto_fibo_direction":     sig.auto_fibo_direction,
+        "auto_fibo_entry_zone_lo": sig.auto_fibo_entry_zone_lo,
+        "auto_fibo_entry_zone_hi": sig.auto_fibo_entry_zone_hi,
+        "auto_fibo_ext_target":    sig.auto_fibo_ext_target,
     }
