@@ -16,7 +16,8 @@ import uvicorn
 from signal_engine import compute_signal, signal_to_dict
 from trend_monitor import (analyze_trend, format_trend_message,
                             format_signal_message, format_welcome_message,
-                            should_send_trend_alert)
+                            should_send_trend_alert,
+                            format_multi_symbol_trend_digest)
 import binance_feed
 from binance_feed import get_ohlcv_binance
 
@@ -243,6 +244,29 @@ EXTRA_TREND_UPDATE_MIN_INTERVAL_SEC = int(
 )
 _extra_trend_last_sent: dict = {}
 
+# "จัดการเรื่อง Trend update ให้อยู่ชุดเดียวกัน จะได้ไม่มีการส่งเยอะ อาจจะเป็น
+# 2H/ครั้ง ส่วนสัญญาณเข้าซื้อแยกได้" -- opt-in digest mode: instead of each
+# extra symbol sending its own independently-timed Trend Update ping (per
+# EXTRA_TREND_UPDATE_ENABLED/_MIN_INTERVAL_SEC above), batch all of them into
+# ONE combined message per poll pass, throttled by a single shared timer.
+# When this is on, it REPLACES the per-symbol trend-update send in
+# run_extra_symbol_pass() below (EXTRA_TREND_UPDATE_ENABLED/_MIN_INTERVAL_SEC
+# are then unused) -- signal_loop() collects each symbol's TrendResult and
+# sends the digest itself. Default OFF: with this off, behavior is
+# byte-for-byte identical to before (per-symbol trend updates, still
+# default-suppressed via EXTRA_TREND_UPDATE_ENABLED=false).
+#
+# This never touches BUY/SELL signal messages -- compute_signal() results
+# are still sent per symbol, immediately, with no throttling, regardless of
+# this setting ("สัญญาณเข้าซื้อแยกได้").
+EXTRA_TREND_DIGEST_ENABLED = os.getenv("ALPHA_EXTRA_SYMBOLS_TREND_DIGEST_ENABLED", "false").lower() in {
+    "1", "true", "yes", "on",
+}
+EXTRA_TREND_DIGEST_INTERVAL_SEC = int(
+    os.getenv("ALPHA_EXTRA_SYMBOLS_TREND_DIGEST_INTERVAL_SEC", "7200")  # 2 hours
+)
+_extra_trend_digest_last_sent = 0.0
+
 last_update_id = 0
 
 # Heartbeat: signal_loop updates this every time it completes one full pass
@@ -358,6 +382,18 @@ def _extra_trend_update_allowed(symbol: str) -> bool:
         return True
     return False
 
+def _extra_trend_digest_allowed() -> bool:
+    """Shared (not per-symbol) throttle gate for digest mode -- see
+    EXTRA_TREND_DIGEST_ENABLED/_INTERVAL_SEC above."""
+    global _extra_trend_digest_last_sent
+    if not EXTRA_TREND_DIGEST_ENABLED:
+        return False
+    now = time.time()
+    if now - _extra_trend_digest_last_sent >= EXTRA_TREND_DIGEST_INTERVAL_SEC:
+        _extra_trend_digest_last_sent = now
+        return True
+    return False
+
 def run_extra_symbol_pass(symbol: str):
     """
     [OPT-IN, ALPHA_EXTRA_SYMBOLS_ENABLED] Run the exact same trend/signal
@@ -366,19 +402,29 @@ def run_extra_symbol_pass(symbol: str):
     one fires. Mirrors the main SYMBOL block in signal_loop() below but is
     fully independent of it -- an error here is caught and logged per
     symbol, never able to interrupt the main gold loop.
+
+    Returns this symbol's TrendResult (or None if data wasn't available /
+    an error occurred), so signal_loop() can batch it into a single
+    combined Trend Update digest across all extra symbols when
+    EXTRA_TREND_DIGEST_ENABLED is on -- see format_multi_symbol_trend_digest()
+    in trend_monitor.py. When digest mode is OFF (default), this still sends
+    its own independently-timed per-symbol Trend Update exactly as before;
+    the return value is simply unused by callers in that case. Either way,
+    the BUY/SELL signal message below is completely unaffected -- always
+    sent here, per symbol, immediately, with no throttling.
     """
     try:
         df_4h  = get_ohlcv("4h",  100, symbol=symbol)
         df_1h  = get_ohlcv("1h",  200, symbol=symbol)
         df_15m = get_ohlcv("15min", 96, symbol=symbol)
         if df_4h is None or df_1h is None or df_15m is None:
-            log(f"⚠️ [{symbol}] ดึงข้อมูลไม่ครบ"); return
+            log(f"⚠️ [{symbol}] ดึงข้อมูลไม่ครบ"); return None
 
         price = float(df_15m["close"].iloc[-1])
         log(f"💰 [{symbol}] {price:,.2f}")
         trend = analyze_trend(df_4h, df_1h, df_15m, symbol)
 
-        if _extra_trend_update_allowed(symbol):
+        if not EXTRA_TREND_DIGEST_ENABLED and _extra_trend_update_allowed(symbol):
             for cid in EXTRA_NOTIFY_IDS:
                 send_telegram(format_trend_message(trend), chat_id=cid)
             log(f"📊 [{symbol}] Trend: {trend.session} {trend.bias}")
@@ -398,9 +444,11 @@ def run_extra_symbol_pass(symbol: str):
             log(f"[{symbol}] Signal: {sig.direction} {sig.signal_type} Score:{sig.score}")
         else:
             log(f"⏳ [{symbol}] No signal | {price:,.2f}")
+        return trend
     except Exception as e:
         log(f"extra symbol {symbol} error: {e}")
         log(traceback.format_exc())
+        return None
 
 def signal_loop():
     log("📡 Signal loop started")
@@ -411,9 +459,22 @@ def signal_loop():
             # independent of the main gold market/session gate below --
             # "เปิดทุก Session" for these three specifically.
             if EXTRA_SYMBOLS_ENABLED:
+                _extra_trends_this_pass = []
                 for extra_symbol in EXTRA_SYMBOLS:
                     if EXTRA_BYPASS_MARKET_GATE or is_market_open():
-                        run_extra_symbol_pass(extra_symbol)
+                        trend_result = run_extra_symbol_pass(extra_symbol)
+                        if trend_result is not None:
+                            _extra_trends_this_pass.append((extra_symbol, trend_result))
+                # [OPT-IN, ALPHA_EXTRA_SYMBOLS_TREND_DIGEST_ENABLED] One
+                # combined Trend Update for all extra symbols instead of
+                # each sending its own -- see format_multi_symbol_trend_digest().
+                # BUY/SELL signals above are already sent per symbol,
+                # immediately, unaffected by this.
+                if _extra_trends_this_pass and _extra_trend_digest_allowed():
+                    digest_msg = format_multi_symbol_trend_digest(_extra_trends_this_pass)
+                    for cid in EXTRA_NOTIFY_IDS:
+                        send_telegram(digest_msg, chat_id=cid)
+                    log(f"📊 [DIGEST] Trend update sent for {len(_extra_trends_this_pass)} symbol(s)")
 
             if not is_market_open():
                 log("🔴 ตลาดปิด"); _touch_heartbeat(); time.sleep(POLL_INTERVAL); continue

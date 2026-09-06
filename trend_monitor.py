@@ -331,6 +331,45 @@ def format_trend_message(tr: TrendResult) -> str:
     return "\n".join(lines)
 
 
+def format_multi_symbol_trend_digest(results) -> str:
+    """
+    [OPT-IN, ALPHA_EXTRA_SYMBOLS_TREND_DIGEST_ENABLED] One combined Telegram
+    message covering the Trend Update for several symbols at once (BTC/
+    US100/JPN225 today) instead of sending format_trend_message() once per
+    symbol on that symbol's own independent timer. This is purely a
+    presentation change to reduce message volume in the room -- it carries
+    the same per-symbol facts (session/price/bias, per-TF state, Pressure
+    flags) as format_trend_message() does, just condensed into one message.
+
+    Does NOT touch BUY/SELL signal messages at all: those are formatted by
+    format_signal_message() and sent separately, per symbol, immediately,
+    with no throttling, exactly as before -- digest mode only ever affects
+    the no-signal "Trend Update" ping.
+
+    `results` is a list of (symbol, TrendResult) pairs, in the order they
+    were computed (normally ALPHA_EXTRA_SYMBOLS order). Symbols whose pass
+    failed this cycle (data fetch error, etc.) are simply absent from the
+    list -- the digest just covers whichever symbols came back.
+    """
+    lines = [
+        "📊 TREND UPDATE (Multi-Symbol)",
+        "━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for symbol, tr in results:
+        bias_emoji = "📈" if tr.bias == "BUY" else ("📉" if tr.bias == "SELL" else "➡️")
+        lines.append(f"{bias_emoji} {symbol}  {tr.price:,.2f}  |  {tr.session}  |  Bias: {tr.bias}")
+        tf_line = "  ".join(f"{tf.tf}:{tf.state}" for tf in [tr.m15, tr.h1, tr.h4])
+        lines.append(f"    {tf_line}")
+        pressures = [f"⚡{tf.pressure} {tf.tf}" for tf in [tr.m15, tr.h1, tr.h4] if tf.pressure]
+        if pressures:
+            lines.append("    " + "  ".join(pressures))
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("⚠️ Not financial advice. Trade at your own risk.")
+    return "\n".join(lines)
+
+
 def format_signal_message(
     direction:   str,
     signal_type: str,
