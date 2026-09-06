@@ -159,7 +159,16 @@ class ScoreManager:
             return pts
 
         # Priority 2: Kivanc Golden Zone
-        if kivanc_in_golden and kivanc_score >= 3:
+        # kivanc_score comes from signal_engine's H1(+2)/H4(+3) pinbar
+        # confluence check inside the golden zone (achievable values: 0, 2,
+        # 3, or 5 when both fire, min-capped at 5). The old ">= 3" threshold
+        # gave a real H1-only pinbar (score=2) exactly the same 0 points as
+        # having NO pinbar confluence at all -- a hard cliff that discarded
+        # genuine, if weaker, evidence instead of scoring it proportionately.
+        # Lowering to ">= 2" leaves the H4-only (3) and both (5) cases
+        # unchanged -- they already cleared the old threshold -- and only
+        # changes the H1-only case from 0 points to a proportionate 2.
+        if kivanc_in_golden and kivanc_score >= 2:
             pts = min(kivanc_score, 4)   # max +4 จาก kivanc
             breakdown["Kivanc Golden Zone"] = pts
             return pts
