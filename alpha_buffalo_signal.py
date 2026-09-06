@@ -17,6 +17,8 @@ from signal_engine import compute_signal, signal_to_dict
 from trend_monitor import (analyze_trend, format_trend_message,
                             format_signal_message, format_welcome_message,
                             should_send_trend_alert)
+import binance_feed
+from binance_feed import get_ohlcv_binance
 
 BKK = timezone(timedelta(hours=7))
 
@@ -61,6 +63,39 @@ def head(): return Response(status_code=200)
 @app.get("/health")
 def health():
     return {"status":"ok","version":"v5","latest_signal":latest_signal.get("direction","none")}
+
+@app.get("/debug/binance_check")
+def debug_binance_check():
+    """
+    [DIAGNOSTIC, read-only, no side effects] Lets anyone with the deployed
+    URL confirm THIS Railway service's own outbound network can actually
+    reach Binance's public market-data mirror -- not just whatever sandbox
+    happened to be used to develop/test the ALPHA_BTC_BINANCE_VOLUME_ENABLED
+    feature. Root cause this exists for: api.binance.com returned HTTP 451
+    "restricted location" when tested from one environment, so before
+    trusting this feature in production it's worth being able to check
+    Railway's own egress directly via a simple GET request, rather than
+    only inferring it from logs after enabling the main feature flag.
+    Exposes zero secrets (no API keys/tokens) -- just connectivity + a
+    couple of real numbers proving live data came back.
+    """
+    df = get_ohlcv_binance("1h", 5, symbol="BTCUSD")
+    if df is None:
+        return {
+            "ok": False,
+            "base_url": binance_feed.BINANCE_API_BASE,
+            "note": "get_ohlcv_binance() returned None -- see Railway logs for the "
+                    "underlying error. get_ohlcv() would fall back to TwelveData "
+                    "automatically in this case when ALPHA_BTC_BINANCE_VOLUME_ENABLED=true.",
+        }
+    return {
+        "ok": True,
+        "base_url": binance_feed.BINANCE_API_BASE,
+        "rows": len(df),
+        "last_close": float(df["close"].iloc[-1]),
+        "last_volume": float(df["volume"].iloc[-1]),
+        "has_volume": True,
+    }
 
 @app.post("/webhook/signal")
 async def recv(p: SP):
@@ -243,12 +278,25 @@ EXTRA_SYMBOL_TICKERS = {
     "JPN225": os.getenv("ALPHA_EXTRA_SYMBOL_JPN225_TICKER", "N225"),
 }
 
-def get_ohlcv(interval="1h", bars=200, symbol=None):
-    # symbol=None (default, all existing call sites) preserves old behavior
-    # exactly -- resolves against the module-level SYMBOL. Passing an
-    # explicit symbol is what lets the extra-symbol scan reuse this same
-    # function without touching the main SYMBOL path at all.
-    target_symbol = symbol or SYMBOL
+# ── [OPT-IN, default OFF] Source BTC's OHLCV from Binance instead of ───
+# TwelveData. Root cause: TwelveData's BTC/USD feed has NO volume column,
+# so the Volume Analysis / Pressure detection already built into
+# trend_monitor.calc_tf_trend() (vol_spike -> Selling/Buying Pressure,
+# already shown in the Trend Update message) is a silent no-op for BTC
+# today. Binance needs no API key and returns real traded volume per bar
+# in the exact same OHLCV shape -- see binance_feed.py. This flag changes
+# ONLY where BTC's bars come from; every other symbol (XAUUSD/EURUSD/
+# GBPJPY/US100/JPN225) is completely untouched, and BTC itself keeps using
+# TwelveData with no volume, exactly as before, unless this is explicitly
+# turned on.
+BTC_BINANCE_VOLUME_ENABLED = os.getenv("ALPHA_BTC_BINANCE_VOLUME_ENABLED", "false").lower() in {
+    "1", "true", "yes", "on",
+}
+
+def _get_ohlcv_twelvedata(target_symbol, interval, bars):
+    # Original TwelveData path, unchanged -- pulled into its own function so
+    # get_ohlcv() below can also use it as a fallback if the opt-in Binance
+    # path fails, instead of just returning None outright.
     try:
         sym_map = {"XAUUSD":"XAU/USD","EURUSD":"EUR/USD","BTCUSD":"BTC/USD"}
         sym_map.update(EXTRA_SYMBOL_TICKERS)
@@ -268,6 +316,26 @@ def get_ohlcv(interval="1h", bars=200, symbol=None):
         if "volume" in df.columns: df["volume"] = df["volume"].astype(float)
         return df
     except Exception as e: log(f"ohlcv error ({target_symbol}): {e}"); return None
+
+def get_ohlcv(interval="1h", bars=200, symbol=None):
+    # symbol=None (default, all existing call sites) preserves old behavior
+    # exactly -- resolves against the module-level SYMBOL. Passing an
+    # explicit symbol is what lets the extra-symbol scan reuse this same
+    # function without touching the main SYMBOL path at all.
+    target_symbol = symbol or SYMBOL
+    if BTC_BINANCE_VOLUME_ENABLED and target_symbol == "BTCUSD":
+        df = get_ohlcv_binance(interval, bars, symbol=target_symbol)
+        if df is not None:
+            return df
+        # Binance failed (rate limit, outage, a region getting geo-blocked
+        # again, etc) -- fall back to TwelveData instead of returning None
+        # outright. Without this, a Binance hiccup would silently kill
+        # BTC's entire signal pipeline (not just its volume) the moment
+        # this flag is on, which is a strictly worse outcome than today's
+        # no-volume-but-reliable TwelveData path.
+        log(f"binance ohlcv failed for {target_symbol}, falling back to TwelveData (no volume)")
+        return _get_ohlcv_twelvedata(target_symbol, interval, bars)
+    return _get_ohlcv_twelvedata(target_symbol, interval, bars)
 
 def is_market_open():
     now = datetime.now(timezone.utc)
