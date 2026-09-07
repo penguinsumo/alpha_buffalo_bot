@@ -184,6 +184,44 @@ async def reentry(p: RP):
         "reason":    "Zone valid + VSA " + sig.get("vsa_bias",""),
     }
 
+# ── Execution-only EA contract (7 ก.ย. 2026) ────────────────────────
+# Separate from /signal/* above (that older contract has never actually
+# been called by any real EA -- confirmed via a Railway HTTP-log audit
+# spanning several days of live Stage-3 signals with zero hits on any
+# /signal/* path). This is the real bridge: the EA polls /execution/command
+# for what to do, and reports back via /execution/fill and /execution/ack.
+# All decision-making (direction/SL/TP/lot) lives in execution_bridge.py --
+# this app just authenticates the request and hands off.
+class ExecFillPayload(BaseModel):
+    key: str; symbol: str = "XAUUSD"; signal_id: str
+    ticket: str; fill_price: float
+
+class ExecAckPayload(BaseModel):
+    key: str; symbol: str = "XAUUSD"; command_id: str; success: bool
+    remaining_pct: float = 100.0; r_multiple: float = 0.0
+
+@app.get("/execution/command")
+def execution_command(key: str = "", symbol: str = "", account_id: str = "",
+                       balance: float = 0.0, equity: float = 0.0,
+                       day_start_equity: float = 0.0):
+    if not chk(key): raise HTTPException(403, "Invalid license")
+    from execution_bridge import get_command
+    return {"command": get_command(day_start_equity=day_start_equity)}
+
+@app.post("/execution/fill")
+async def execution_fill(p: ExecFillPayload):
+    if not chk(p.key): raise HTTPException(403, "Invalid license")
+    from execution_bridge import record_fill
+    ok = record_fill(p.signal_id, p.ticket, p.fill_price)
+    return {"ok": ok}
+
+@app.post("/execution/ack")
+async def execution_ack(p: ExecAckPayload):
+    if not chk(p.key): raise HTTPException(403, "Invalid license")
+    from execution_bridge import record_ack
+    ok = record_ack(p.command_id, p.success, p.remaining_pct, p.r_multiple)
+    return {"ok": ok}
+
 # ── Config ────────────────────────────────────────────────
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID        = os.getenv("ADMIN_ID","0")
@@ -522,6 +560,11 @@ def signal_loop():
                 log("⚠️ ดึงข้อมูลไม่ครบ"); time.sleep(POLL_INTERVAL); continue
             price = float(df_15m["close"].iloc[-1])
             log(f"💰 {SYMBOL}: {price:,.2f}")
+            try:
+                from execution_bridge import check_tp1_and_queue_be
+                check_tp1_and_queue_be(price)
+            except Exception as e:
+                log(f"⚠️ execution_bridge check_tp1_and_queue_be error: {e}")
             trend = analyze_trend(df_4h, df_1h, df_15m, SYMBOL)
             if should_send_trend_alert(trend.session):
                 send_telegram(format_trend_message(trend))
@@ -545,6 +588,21 @@ def signal_loop():
                 )
                 send_telegram(msg)
                 log(f"Signal: {sig.direction} {sig.signal_type} Score:{sig.score}")
+
+                # [NOT opt-in, 7 ก.ย. 2026] Hand this real, just-alerted
+                # XAUUSD signal to execution_bridge so the execution-only EA
+                # has something to poll on its next /execution/command call.
+                # This is the ONLY place a real OPEN command gets queued --
+                # mirrors ea_executes=True's own "main SYMBOL only" scope.
+                try:
+                    from execution_bridge import queue_open_command
+                    queue_open_command(
+                        direction=sig.direction, entry=sig.entry, sl=sig.sl,
+                        tp_final=sig.tp_final, be_price=sig.be_price,
+                        partial=sig.partial, reason=sig.signal_type,
+                    )
+                except Exception as e:
+                    log(f"⚠️ execution_bridge queue_open_command error: {e}")
 
                 # [OPT-IN, ALPHA_SIGNAL_SWEEP_REENTRY_ENABLED] Arm a Round-2
                 # watch ONLY off a real sweep-wick entry (sig.sweep_wick_entry_used)
@@ -740,8 +798,22 @@ def handle_cmd(text, chat_id):
         except Exception as e:
             msg = f"Session error: {e}"
         send_telegram(msg, chat_id)
+    elif t == "/closeea":
+        if str(chat_id) != str(ADMIN_ID):
+            send_telegram("Unauthorized", chat_id)
+        else:
+            try:
+                from execution_bridge import queue_close_all
+                queue_close_all(reason="admin /closeea")
+                send_telegram("🛑 CLOSE_ALL queued -- the EA will close the XAUUSD "
+                               "position on its next poll (up to PollSeconds delay).",
+                               chat_id)
+            except Exception as e:
+                send_telegram(f"execution_bridge error: {e}", chat_id)
     elif t in ("/help", "/?"):
-        help_msg = "/status /price /health /context /setup\n/quota /newlicense /newtrial /revoke /extend /licenses"
+        help_msg = ("/status /price /health /context /setup\n"
+                     "/quota /newlicense /newtrial /revoke /extend /licenses\n"
+                     "/closeea (admin only -- force-close the live XAUUSD position)")
         send_telegram(help_msg, chat_id)
 
 
