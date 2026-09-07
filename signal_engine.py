@@ -467,6 +467,107 @@ def resolve_auto_fibo_filter(
     return auto_fibo.in_zone(price, tolerance=tolerance)
 
 
+# Named Fibonacci ratios that bound the Kivanc Golden Zone -- 61.8% and
+# 78.6%, the two "golden numbers" this project has always used for that
+# zone (not the whole ratio family). Kept as a module-level constant so the
+# golden-number filter and any future caller stay in sync with the same
+# two levels the zone itself is built from.
+FIBO_GOLDEN_ZONE_LEVELS = (0.618, 0.786)
+
+
+def resolve_fibo_golden_number(price, swing_high, swing_low, direction,
+                                tolerance_pct=0.02, levels=FIBO_GOLDEN_ZONE_LEVELS):
+    """
+    [OPT-IN helper for ALPHA_SIGNAL_FIBO_GOLDEN_MODE]
+
+    Check whether `price` sits close to one of `levels` (fractions of the
+    swing range, measured down from swing_high for SELL / up from
+    swing_low for BUY) -- a real named Fibonacci ratio -- rather than just
+    "somewhere between the two levels" the way plain band membership does.
+
+    tolerance_pct is a fraction of the swing range (default 0.02 = 2%),
+    so the effective price tolerance scales with how big the swing is
+    instead of being a fixed dollar amount.
+
+    Returns (matched: bool, level: float | None, level_price: float | None)
+    -- level/level_price describe whichever of `levels` matched, or
+    (False, None, None) if none did or the swing is degenerate (range <= 0).
+    """
+    rng = swing_high - swing_low
+    if rng <= 0:
+        return False, None, None
+    tolerance = rng * tolerance_pct
+    for lv in levels:
+        level_price = (swing_high - rng * lv) if direction == "SELL" else (swing_low + rng * lv)
+        if abs(price - level_price) <= tolerance:
+            return True, lv, level_price
+    return False, None, None
+
+
+def resolve_fibo_sl_tp(direction, swing_high, swing_low):
+    """
+    [OPT-IN helper for ALPHA_SIGNAL_FIBO_GOLDEN_MODE]
+
+    Once entry is confirmed at a real golden-ratio level (61.8% or 78.6%
+    down from swing_high for SELL / up from swing_low for BUY), derive SL
+    and TP from the SAME swing's other named ratios instead of a flat ATR
+    buffer or BB/PDH targets that have nothing to do with this swing:
+
+      - SL at 50% -- the golden zone represents a SHALLOW pullback (only
+        21.4%-38.2% of the swing reclaimed) that is expected to fail and
+        resume in the trade's direction. That thesis is invalidated if the
+        pullback turns out NOT to be shallow -- i.e. if price keeps moving
+        BACK PAST the zone's near edge (61.8%) toward the swing's origin
+        (swing_high for SELL, swing_low for BUY) instead of reversing. 50%
+        is the next standard Fibonacci level on that (shallower-pullback)
+        side of 61.8%, so that is where the setup should be proven wrong --
+        not an arbitrary ATR distance from wherever price is, and NOT a
+        deeper level like 88.6% (that is the continuation direction the
+        trade is betting FOR, not against).
+      - TP1/TP2 at the 127.2%/161.8% (Golden Ratio) extensions beyond the
+        swing, continuing in the trade's direction -- the classic
+        Fibonacci continuation targets for this swing.
+
+    Returns (sl, tp1, tp2), all rounded to 2 decimals.
+    """
+    rng = swing_high - swing_low
+    if direction == "SELL":
+        sl  = swing_high - rng * 0.5
+        tp1 = swing_high - rng * 1.272
+        tp2 = swing_high - rng * 1.618
+    else:
+        sl  = swing_low + rng * 0.5
+        tp1 = swing_low + rng * 1.272
+        tp2 = swing_low + rng * 1.618
+    return round(sl, 2), round(tp1, 2), round(tp2, 2)
+
+
+def resolve_sweep_wick_entry(direction, sweep_valid, curr_high, curr_low, buffer=0.30):
+    """
+    [OPT-IN helper for ALPHA_SIGNAL_SWEEP_WICK_ENTRY]
+
+    When the setup's own qualifying evidence is a liquidity sweep
+    (sweep_valid -- price wicked through session/PDH-PDL liquidity on the
+    current M15 candle and closed back inside it), that candle's wick tip
+    IS the real point where liquidity was taken -- a far more meaningful
+    entry anchor than wherever price has drifted to by the time every
+    later gate (score/BB/scenario) finally clears. This mirrors the same
+    "anchor to the real reaction point, not the chased price" idea already
+    used for detect_h1_spike_at_kivanc's SL (the H1 reaction candle there),
+    applied here to the M15 sweep candle's entry instead.
+
+    Returns (entry, sl) anchored at the wick tip with `buffer` beyond it
+    for SL, or (None, None) if there is no valid sweep to anchor to (caller
+    should fall back to its normal entry/SL resolution in that case).
+    """
+    if not sweep_valid:
+        return None, None
+    if direction == "SELL":
+        return round(curr_high, 2), round(curr_high + buffer, 2)
+    else:
+        return round(curr_low, 2), round(curr_low - buffer, 2)
+
+
 def compute_signal(
     df_4h: pd.DataFrame,
     df_1h: pd.DataFrame,
@@ -549,6 +650,14 @@ def compute_signal(
     # Kivanc Zone
     fib_zone = None
     kivanc_in_golden = False
+    # swing_high_for_fibo/swing_low_for_fibo: the swing this fib_zone was
+    # measured against, kept around (regardless of which branch below ran)
+    # so the opt-in Fibonacci Golden Number filter further down can check
+    # price against the swing's *named* ratios (61.8%/78.6%), not just band
+    # membership. None for the harmonic-PRZ branch -- that zone already
+    # comes from a named harmonic pattern ratio, not this swing.
+    swing_high_for_fibo = None
+    swing_low_for_fibo  = None
     if prz_match:
         fib_zone = prz_match
         kivanc_in_golden = True
@@ -564,6 +673,7 @@ def compute_signal(
                 fib_hi = swing_high - h1_rng * 0.618
             fib_zone = {"prz_low": fib_lo, "prz_high": fib_hi}
             kivanc_in_golden = fib_lo <= price <= fib_hi
+            swing_high_for_fibo, swing_low_for_fibo = swing_high, swing_low
         else:
             h1_high = float(df_1h["high"].tail(50).max())
             h1_low  = float(df_1h["low"].tail(50).min())
@@ -576,6 +686,32 @@ def compute_signal(
                 fib_hi = h1_high - h1_rng * 0.618
             fib_zone = {"prz_low": fib_lo, "prz_high": fib_hi}
             kivanc_in_golden = fib_lo <= price <= fib_hi
+            swing_high_for_fibo, swing_low_for_fibo = h1_high, h1_low
+
+    # ── [OPT-IN] Fibonacci Golden Number filter (ALPHA_SIGNAL_FIBO_GOLDEN_MODE) ──
+    # Root cause this exists for: kivanc_in_golden above accepts price
+    # ANYWHERE inside the 61.8%-78.6% band (16.8% of the swing wide) as
+    # "golden zone" evidence -- but a real Fibonacci "golden number" is a
+    # specific ratio (61.8% or 78.6%), not an arbitrary band between them.
+    # When enabled, kivanc_in_golden instead requires price to sit within
+    # ALPHA_SIGNAL_FIBO_GOLDEN_TOLERANCE_PCT (default 2% of the swing range)
+    # of one of those two exact levels. Does not touch the harmonic-PRZ
+    # branch (prz_match) -- that already comes from named harmonic ratios.
+    # Default OFF -- current band-based behavior byte-identical until
+    # explicitly enabled.
+    fibo_golden_mode = os.getenv("ALPHA_SIGNAL_FIBO_GOLDEN_MODE", "false").lower() in {
+        "1", "true", "yes", "on",
+    }
+    fibo_golden_level = None
+    if fibo_golden_mode and not prz_match and swing_high_for_fibo and swing_low_for_fibo:
+        fibo_golden_tolerance_pct = float(
+            os.getenv("ALPHA_SIGNAL_FIBO_GOLDEN_TOLERANCE_PCT", "0.02")
+        )
+        matched, fibo_golden_level, _ = resolve_fibo_golden_number(
+            price, swing_high_for_fibo, swing_low_for_fibo, direction,
+            fibo_golden_tolerance_pct,
+        )
+        kivanc_in_golden = matched
 
     # H1 Spike
     spike = {"found": False, "sl": 0, "tp1": 0, "volume_confirmed": False}
@@ -732,36 +868,86 @@ def compute_signal(
     zone_entry_sl_enabled = os.getenv("ALPHA_SIGNAL_ZONE_BASED_ENTRY_SL", "false").lower() in {
         "1", "true", "yes", "on",
     }
-    entry_price, zone_sl = resolve_zone_based_entry_sl(
-        direction, price, fib_zone, spike, zone_entry_sl_enabled)
+
+    # [OPT-IN, default OFF] ALPHA_SIGNAL_SWEEP_WICK_ENTRY=true anchors Entry
+    # (and SL) to the M15 sweep candle's own wick tip whenever the setup's
+    # qualifying evidence is a liquidity sweep (sweep_valid) -- the wick tip
+    # is the actual point liquidity was taken, a more meaningful anchor than
+    # wherever price has drifted to once every later gate finally clears.
+    # Takes priority over zone_entry_sl_enabled/fibo_golden_mode below when
+    # both a sweep and a zone/golden-number match are present, since the
+    # sweep is the more immediate, already-happened structural event.
+    # Default OFF -- current behavior byte-identical until enabled.
+    sweep_wick_entry_enabled = os.getenv("ALPHA_SIGNAL_SWEEP_WICK_ENTRY", "false").lower() in {
+        "1", "true", "yes", "on",
+    }
+    sweep_entry, sweep_sl = resolve_sweep_wick_entry(direction, sweep_valid, curr_high, curr_low)
+
+    fibo_tp_pair = None   # (tp1, tp2) from resolve_fibo_sl_tp, set below when it applies
+
+    if sweep_wick_entry_enabled and sweep_entry is not None:
+        entry_price, zone_sl = sweep_entry, sweep_sl
+    else:
+        entry_price, zone_sl = resolve_zone_based_entry_sl(
+            direction, price, fib_zone, spike, zone_entry_sl_enabled)
+        # [OPT-IN] ALPHA_SIGNAL_FIBO_GOLDEN_MODE: once a real golden-ratio
+        # level matched above (fibo_golden_level), replace the flat-ATR/
+        # spike SL and the BB/PDH-derived TPs with levels drawn from the
+        # SAME swing's other named Fibonacci ratios (see resolve_fibo_sl_tp)
+        # instead. Skipped entirely when the sweep-wick entry above already
+        # took priority.
+        if fibo_golden_mode and fibo_golden_level is not None and swing_high_for_fibo and swing_low_for_fibo:
+            fib_sl, fib_tp1, fib_tp2 = resolve_fibo_sl_tp(direction, swing_high_for_fibo, swing_low_for_fibo)
+            zone_sl = fib_sl
+            fibo_tp_pair = (fib_tp1, fib_tp2)
 
     if direction == "BUY":
         sl          = zone_sl if zone_sl is not None else round(entry_price - atr*1.0, 2)
         be_price    = round(entry_price + 0.10, 2)
-        tp_main     = (prz_opposite["prz_mid"] if prz_opposite and prz_opposite["prz_mid"]>entry_price
-                       else (pdh if pdh and pdh>entry_price else entry_price+atr*3.0))
-        tp_final    = round(max(tp_main, entry_price+atr*1.5), 2)
-        tp1_price   = round(max(bb["upper"], entry_price+atr*0.5), 2)
-        tp2_price   = round(max(bb["mid"],   entry_price+atr*1.0), 2)
-        fallback_tp = round(entry_price+atr*4.0, 2)
-        partial = [
-            {"pct":50,"price":tp1_price,"reason":"BB_Upper"},
-            {"pct":30,"price":tp2_price,"reason":"BB_Mid"},
-            {"pct":20,"price":tp_final, "reason":"PDH_PRZ"},
-        ]
+        if fibo_tp_pair:
+            fib_tp1, fib_tp2 = fibo_tp_pair
+            tp1_price   = fib_tp1
+            tp_final    = round(max(fib_tp2, entry_price+atr*1.5), 2)
+            fallback_tp = tp_final
+            partial = [
+                {"pct":50,"price":tp1_price,"reason":"Fibo_1.272ext"},
+                {"pct":50,"price":tp_final, "reason":"Fibo_1.618ext"},
+            ]
+        else:
+            tp_main     = (prz_opposite["prz_mid"] if prz_opposite and prz_opposite["prz_mid"]>entry_price
+                           else (pdh if pdh and pdh>entry_price else entry_price+atr*3.0))
+            tp_final    = round(max(tp_main, entry_price+atr*1.5), 2)
+            tp1_price   = round(max(bb["upper"], entry_price+atr*0.5), 2)
+            tp2_price   = round(max(bb["mid"],   entry_price+atr*1.0), 2)
+            fallback_tp = round(entry_price+atr*4.0, 2)
+            partial = [
+                {"pct":50,"price":tp1_price,"reason":"BB_Upper"},
+                {"pct":30,"price":tp2_price,"reason":"BB_Mid"},
+                {"pct":20,"price":tp_final, "reason":"PDH_PRZ"},
+            ]
     else:
         sl          = zone_sl if zone_sl is not None else round(entry_price + atr*1.0, 2)
         be_price    = round(entry_price - 0.10, 2)
-        tp_main     = (prz_opposite["prz_mid"] if prz_opposite and 0<prz_opposite["prz_mid"]<entry_price
-                       else (pdl if pdl and pdl<entry_price else entry_price-atr*3.0))
-        tp_final    = round(min(tp_main, entry_price-atr*1.5), 2)
-        tp1_price   = round(min(bb["lower"], entry_price-atr*0.5), 2)
-        tp2_price   = round(min(bb["mid"],   entry_price-atr*1.0), 2)
-        fallback_tp = round(entry_price-atr*4.0, 2)
-        partial = [
-            {"pct":50,"price":tp1_price,"reason":"BB_Lower"},
-            {"pct":30,"price":tp2_price,"reason":"BB_Mid"},
-            {"pct":20,"price":tp_final, "reason":"PDL_PRZ"},
+        if fibo_tp_pair:
+            fib_tp1, fib_tp2 = fibo_tp_pair
+            tp1_price   = fib_tp1
+            tp_final    = round(min(fib_tp2, entry_price-atr*1.5), 2)
+            fallback_tp = tp_final
+            partial = [
+                {"pct":50,"price":tp1_price,"reason":"Fibo_1.272ext"},
+                {"pct":50,"price":tp_final, "reason":"Fibo_1.618ext"},
+            ]
+        else:
+            tp_main     = (prz_opposite["prz_mid"] if prz_opposite and 0<prz_opposite["prz_mid"]<entry_price
+                           else (pdl if pdl and pdl<entry_price else entry_price-atr*3.0))
+            tp_final    = round(min(tp_main, entry_price-atr*1.5), 2)
+            tp1_price   = round(min(bb["lower"], entry_price-atr*0.5), 2)
+            tp2_price   = round(min(bb["mid"],   entry_price-atr*1.0), 2)
+            fallback_tp = round(entry_price-atr*4.0, 2)
+            partial = [
+                {"pct":50,"price":tp1_price,"reason":"BB_Lower"},
+                {"pct":30,"price":tp2_price,"reason":"BB_Mid"},
+                {"pct":20,"price":tp_final, "reason":"PDL_PRZ"},
         ]
 
     now = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
