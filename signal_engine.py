@@ -964,8 +964,16 @@ def compute_signal(
 
     try:
         from early_warning import alert_signal_ready
+        # [FIX, not opt-in -- confirmed bug, 2026-09-07] Only the main
+        # traded SYMBOL is actually EA-executed -- active_symbol differs
+        # from it ONLY when this call came from the extra-symbol scan
+        # (symbol_label set, e.g. BTCUSD/US100/JPN225 via
+        # run_extra_symbol_pass()), none of which are wired to
+        # auto-execution. See alert_signal_ready()'s ea_executes docstring
+        # for the exact contradiction this fixes.
         alert_signal_ready(active_symbol, direction, sig_type, final_score,
-                           price, sl, tp_final, prz_name, session)
+                           price, sl, tp_final, prz_name, session,
+                           ea_executes=(active_symbol == SYMBOL))
     except Exception: pass
 
     return CloudSignal(

@@ -197,9 +197,21 @@ def alert_signal_ready(
     tp:         float,
     pattern:    str = "",
     session:    str = "",
+    ea_executes: bool = True,
 ) -> None:
     """
     Score threshold hit → Alert ก่อนยิง EA
+
+    ea_executes: [FIX, not opt-in -- confirmed bug, 2026-09-07] MUST be
+    passed as False for any symbol the EA is not actually wired to trade
+    (today: the opt-in BTC/US100/JPN225 extra-symbol scan). Before this
+    fix, this message hardcoded "🤖 EA executing..." for every symbol
+    unconditionally -- so a US100 signal claimed the EA was executing a
+    trade that never happens, directly contradicting the very next
+    message for the same signal (format_signal_message's correctly-set
+    "Signal only — not wired to auto-execution yet"). Default True
+    preserves the original wording for the one caller that always meant
+    it (the main traded SYMBOL).
     """
     if not _can_alert(symbol, STAGE_READY):
         return
@@ -211,6 +223,7 @@ def alert_signal_ready(
     emoji   = "🟢" if direction == "BUY" else "🔴"
     sniper  = signal_type == "V5_SNIPER"
     pat_str = f"\n🦋 Pattern : {pattern}" if pattern else ""
+    status_line = "🤖 EA executing..." if ea_executes else "📋 Signal only — not wired to auto-execution yet"
 
     msg = (
         f"{'🎯' if sniper else emoji} {'SNIPER' if sniper else 'SESSION'} SIGNAL FIRING\n"
@@ -222,7 +235,7 @@ def alert_signal_ready(
         f"📈 Score  : {score}/10{pat_str}\n"
         f"🕐 Session: {session}\n"
         f"━━━━━━━━━━━━━━━━━\n"
-        f"🤖 EA executing..."
+        f"{status_line}"
     )
     send_telegram(msg)
     _mark_alert(symbol, STAGE_READY)
