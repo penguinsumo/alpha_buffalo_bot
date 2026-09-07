@@ -305,6 +305,29 @@ EXTRA_SYMBOL_TICKERS = {
     "JPN225": os.getenv("ALPHA_EXTRA_SYMBOL_JPN225_TICKER", "N225"),
 }
 
+# [FIX, not opt-in -- confirmed bug, 2026-09-07] Whatever ticker TwelveData
+# actually resolves "US100" to (configured above as "NDX") returns QQQ's
+# ETF price, not the real Nasdaq-100 index/futures level -- confirmed by
+# comparing a live signal (US100 @ 719.06) against real quotes: NQ=F was
+# ~29,565 and QQQ closed at 718.96 the same day, an exact match to the
+# signal price. The two are related by a near-constant scale factor (QQQ
+# tracks NDX at roughly 1/41st) since TwelveData's free-tier US-indices
+# access was never independently confirmed (see the ticker-verification
+# comment above) -- this was flagged as unverified back then and has now
+# been confirmed wrong.
+#
+# US100_QQQ_SCALE approximates the real NDX/NQ level from QQQ's price:
+#   real_NDX ≈ QQQ_price × US100_QQQ_SCALE
+# Calculated 2026-09-07 from live quotes: NQ=F ≈ 29,565.25 / QQQ ≈ 718.96
+#   = ~41.1. This DRIFTS over time (QQQ pays a quarterly dividend that
+# lowers its price a little each time without a matching adjustment to
+# the index), so re-check and update this env var every few months rather
+# than trusting it indefinitely -- and replace this scaling workaround
+# entirely with a real, verified NDX/NQ ticker on TwelveData when one is
+# found; this is a stopgap for correct-scale price levels, not a fix for
+# the underlying missing real Nasdaq-100 data source.
+US100_QQQ_SCALE = float(os.getenv("ALPHA_EXTRA_SYMBOL_US100_QQQ_SCALE", "41.1"))
+
 # ── [OPT-IN, default OFF] Source BTC's OHLCV from Binance instead of ───
 # TwelveData. Root cause: TwelveData's BTC/USD feed has NO volume column,
 # so the Volume Analysis / Pressure detection already built into
@@ -341,6 +364,15 @@ def _get_ohlcv_twelvedata(target_symbol, interval, bars):
         for c in ["open","high","low","close"]:
             df[c] = df[c].astype(float)
         if "volume" in df.columns: df["volume"] = df["volume"].astype(float)
+        # [FIX, not opt-in] scale "US100" from QQQ's ETF price up to a real
+        # NDX/NQ-comparable level -- see US100_QQQ_SCALE above. Applied to
+        # every OHLC column uniformly so ATR/BB/swing-structure math further
+        # downstream stay internally consistent (all of it is just linear
+        # in price), not only the value shown to the user. Every other
+        # symbol (XAUUSD/EURUSD/BTCUSD/JPN225/GBPJPY) is untouched.
+        if target_symbol == "US100":
+            for c in ["open","high","low","close"]:
+                df[c] = df[c] * US100_QQQ_SCALE
         return df
     except Exception as e: log(f"ohlcv error ({target_symbol}): {e}"); return None
 
