@@ -281,7 +281,54 @@ check("check_tp1_and_queue_be(): never overwrites an unrelated already-pending c
 
 
 # ═══════════════════════════════════════════════════════════
-# 7. Source guards
+# 7. expire_stale_command() -- the wall-clock backstop for a dead EA
+# ═══════════════════════════════════════════════════════════
+
+reset()
+check("expire_stale_command(): no-op when nothing pending",
+      eb.expire_stale_command() is False)
+
+# Fresh command (just queued) -- not stale yet
+eb.queue_open_command(direction="BUY", entry=4400.0, sl=4390.0, tp_final=4420.0,
+                       be_price=4400.10, partial=[])
+check("expire_stale_command(): a freshly queued command is not expired",
+      eb.expire_stale_command() is False and eb._pending_command is not None)
+
+# Force it stale by backdating queued_at past the threshold
+eb._pending_command["queued_at"] = eb._pending_command["queued_at"] - eb.COMMAND_STALE_AFTER_SEC - 1
+check("expire_stale_command(): stale OPEN (never filled) drops BOTH pending command "
+      "and position tracking -- nothing real was ever opened on the broker",
+      eb.expire_stale_command() is True and eb._pending_command is None
+      and eb._open_position is None)
+
+# Stale command, but the position WAS confirmed filled -> keep position tracking
+reset()
+eb.queue_open_command(direction="BUY", entry=4400.0, sl=4390.0, tp_final=4420.0,
+                       be_price=4400.10, partial=[{"pct": 50, "price": 4410.0, "reason": "x"}])
+eb.record_fill(eb._open_position["signal_id"], "1", 4400.5)
+eb.record_ack(eb._pending_command["command_id"], True)  # OPEN acked, position now live
+eb.check_tp1_and_queue_be(4410.0)  # queues a PARTIAL_CLOSE_MOVE_BE
+eb._pending_command["queued_at"] = eb._pending_command["queued_at"] - eb.COMMAND_STALE_AFTER_SEC - 1
+check("expire_stale_command(): stale BE command drops the pending command but KEEPS "
+      "position tracking -- a real filled position must not be forgotten",
+      eb.expire_stale_command() is True and eb._pending_command is None
+      and eb._open_position is not None)
+
+# Once dropped, a fresh signal can queue again (this is the actual bug this fixes:
+# 7 ก.ย. 2026 production incident -- two real signals were skipped for 3+ hours
+# because a dead EA never ACKed the one stuck command)
+reset()
+eb.queue_open_command(direction="BUY", entry=4400.0, sl=4390.0, tp_final=4420.0,
+                       be_price=4400.10, partial=[])
+eb._pending_command["queued_at"] = eb._pending_command["queued_at"] - eb.COMMAND_STALE_AFTER_SEC - 1
+eb.expire_stale_command()
+check("expire_stale_command(): after expiry, a brand-new signal can queue again",
+      eb.queue_open_command(direction="SELL", entry=4400.0, sl=4410.0, tp_final=4380.0,
+                             be_price=4399.90, partial=[]) is True)
+
+
+# ═══════════════════════════════════════════════════════════
+# 8. Source guards
 # ═══════════════════════════════════════════════════════════
 
 import alpha_buffalo_signal as runtime
@@ -289,6 +336,8 @@ import alpha_buffalo_signal as runtime
 src = inspect.getsource(runtime.signal_loop)
 check("signal_loop() calls check_tp1_and_queue_be() on every price tick",
       "check_tp1_and_queue_be(price)" in src)
+check("signal_loop() calls expire_stale_command() every pass (the dead-EA backstop)",
+      "expire_stale_command()" in src)
 check("signal_loop() calls queue_open_command() right after the main XAUUSD Telegram alert",
       "queue_open_command(" in src)
 

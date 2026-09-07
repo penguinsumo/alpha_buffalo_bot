@@ -561,8 +561,9 @@ def signal_loop():
             price = float(df_15m["close"].iloc[-1])
             log(f"💰 {SYMBOL}: {price:,.2f}")
             try:
-                from execution_bridge import check_tp1_and_queue_be
+                from execution_bridge import check_tp1_and_queue_be, expire_stale_command
                 check_tp1_and_queue_be(price)
+                expire_stale_command()
             except Exception as e:
                 log(f"⚠️ execution_bridge check_tp1_and_queue_be error: {e}")
             trend = analyze_trend(df_4h, df_1h, df_15m, SYMBOL)

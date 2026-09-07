@@ -31,6 +31,7 @@ handlers in alpha_buffalo_signal.py -- every public function catches its
 own exceptions and returns a safe default.
 """
 import os
+import time
 import uuid
 
 # ── Position sizing ──────────────────────────────────────────────
@@ -46,6 +47,17 @@ XAUUSD_CONTRACT_SIZE = float(os.getenv("ALPHA_XAUUSD_CONTRACT_SIZE", "100"))  # 
 MIN_LOT              = float(os.getenv("ALPHA_EXEC_MIN_LOT", "0.01"))
 MAX_LOT              = float(os.getenv("ALPHA_EXEC_MAX_LOT", "5.0"))  # hard safety ceiling
 MAX_COMMAND_RETRIES  = int(os.getenv("ALPHA_EXEC_MAX_RETRIES", "20"))
+
+# Wall-clock backstop (2026-09-07): MAX_COMMAND_RETRIES only counts
+# consecutive ACKed failures -- if the EA stops polling entirely (MT5
+# closed, computer asleep, network dropped, WebRequest blocked) no ACK
+# ever arrives, so a command can otherwise sit "pending" forever and
+# silently block every future signal (queue_open_command() refuses to
+# queue a new OPEN while _open_position is still tracked). This observed
+# in production 7 ก.ย. 2026: the EA polled successfully for ~1 minute,
+# then stopped -- two real XAUUSD signals over the next 3+ hours were
+# skipped because the first command never got resolved either way.
+COMMAND_STALE_AFTER_SEC = int(os.getenv("ALPHA_EXEC_STALE_AFTER_SEC", "900"))  # 15 min
 
 
 def compute_lot(day_start_equity: float, sl_distance: float) -> float:
@@ -100,6 +112,7 @@ def queue_open_command(direction, entry, sl, tp_final, be_price, partial, reason
             "reason": reason or "signal", "symbol": "XAUUSD",
             "signal_id": signal_id, "direction": direction,
             "entry": entry, "sl": sl, "tp1": tp1, "tp_final": tp_final,
+            "queued_at": time.time(),
         }
         _open_position = {
             "signal_id": signal_id, "direction": direction, "entry": entry,
@@ -123,7 +136,7 @@ def queue_close_all(reason="manual"):
     try:
         _pending_command = {
             "command_id": _new_command_id(), "action": "CLOSE_ALL",
-            "reason": reason, "symbol": "XAUUSD",
+            "reason": reason, "symbol": "XAUUSD", "queued_at": time.time(),
         }
         print(f"📤 execution_bridge: queued CLOSE_ALL ({reason})")
         return True
@@ -158,6 +171,7 @@ def check_tp1_and_queue_be(current_price: float) -> bool:
             "command_id": _new_command_id(), "action": "PARTIAL_CLOSE_MOVE_BE",
             "reason": "TP1 hit", "symbol": "XAUUSD",
             "close_pct": pos["close_pct"], "new_sl": pos["be_price"],
+            "queued_at": time.time(),
         }
         pos["be_issued"] = True
         print(f"📤 execution_bridge: TP1 hit @ {current_price} -> queued "
@@ -165,6 +179,42 @@ def check_tp1_and_queue_be(current_price: float) -> bool:
         return True
     except Exception as e:
         print(f"⚠️ execution_bridge check_tp1_and_queue_be error: {e}")
+        return False
+
+
+def expire_stale_command() -> bool:
+    """Call every signal_loop() pass (cheap -- in-memory only, no network).
+    MAX_COMMAND_RETRIES only counts consecutive ACKed failures -- if the EA
+    stops polling entirely (MT5 closed, computer asleep, network dropped,
+    WebRequest blocked) no ACK ever arrives, so a command would otherwise
+    sit "pending" forever, silently blocking every future signal
+    (queue_open_command() refuses to queue a new OPEN while _open_position
+    is still tracked). This is the wall-clock backstop: after
+    COMMAND_STALE_AFTER_SEC with no ACK either way, drop the command.
+
+    Position tracking is dropped too ONLY if nothing was ever confirmed
+    filled on the broker -- nothing real exists to lose track of in that
+    case. A position already confirmed filled stays tracked (so TP1/BE
+    monitoring keeps working once the EA reconnects); the EA's own
+    existing-position recovery (FindMagicPositionTicket) is the backstop
+    against ever double-opening if backend and broker state disagree."""
+    global _pending_command, _open_position
+    try:
+        cmd = _pending_command
+        if cmd is None:
+            return False
+        age = time.time() - cmd.get("queued_at", time.time())
+        if age < COMMAND_STALE_AFTER_SEC:
+            return False
+        print(f"🛑 execution_bridge: command_id={cmd.get('command_id')} "
+              f"action={cmd.get('action')} stale for {int(age)}s with no ACK "
+              f"-- EA likely disconnected, dropping so new signals aren't blocked")
+        _pending_command = None
+        if _open_position is not None and not _open_position.get("filled"):
+            _open_position = None
+        return True
+    except Exception as e:
+        print(f"⚠️ execution_bridge expire_stale_command error: {e}")
         return False
 
 
@@ -177,7 +227,7 @@ def get_command(day_start_equity: float = 0.0) -> dict:
         cmd = _pending_command
         if cmd is None:
             return {"action": "HOLD", "reason": "no pending command"}
-        out = {k: v for k, v in cmd.items() if k != "fail_count"}
+        out = {k: v for k, v in cmd.items() if k not in ("fail_count", "queued_at")}
         if cmd["action"] == "OPEN":
             sl_distance = abs(float(cmd["entry"]) - float(cmd["sl"]))
             out["lot"] = compute_lot(day_start_equity, sl_distance)
