@@ -17,9 +17,12 @@ from signal_engine import compute_signal, signal_to_dict
 from trend_monitor import (analyze_trend, format_trend_message,
                             format_signal_message, format_welcome_message,
                             should_send_trend_alert,
-                            format_multi_symbol_trend_digest)
+                            format_multi_symbol_trend_digest,
+                            format_reentry_message)
 import binance_feed
 from binance_feed import get_ohlcv_binance
+from sweep_reentry import (sweep_reentry_enabled, sweep_reentry_watcher,
+                            fib_618_reference)
 
 BKK = timezone(timedelta(hours=7))
 
@@ -509,8 +512,37 @@ def signal_loop():
                 )
                 send_telegram(msg)
                 log(f"Signal: {sig.direction} {sig.signal_type} Score:{sig.score}")
+
+                # [OPT-IN, ALPHA_SIGNAL_SWEEP_REENTRY_ENABLED] Arm a Round-2
+                # watch ONLY off a real sweep-wick entry (sig.sweep_wick_entry_used)
+                # -- see sweep_reentry.py. Registering here (not inside
+                # compute_signal()) is what lets the watch persist and get
+                # re-checked across future poll cycles, since compute_signal()
+                # only ever sees one snapshot per call.
+                if sweep_reentry_enabled() and sig.sweep_wick_entry_used:
+                    fib_ref = fib_618_reference(sig.direction, sig.swing_high_ref, sig.swing_low_ref)
+                    sweep_reentry_watcher.register(
+                        direction=sig.direction, trade1_entry=sig.entry,
+                        trade1_tp=sig.tp_final, fib_ref_price=fib_ref,
+                        formed_bar=len(df_15m),
+                    )
+                    log(f"👁️ Round-2 watch armed for {sig.direction} @ {sig.entry:,.2f}")
             else:
                 log(f"⏳ No signal | {price:,.2f}")
+
+            # [OPT-IN, ALPHA_SIGNAL_SWEEP_REENTRY_ENABLED] Check every pending
+            # Round-2 watch against this pass's M15 data, regardless of
+            # whether compute_signal() fired a new Trade 1 signal this pass --
+            # a watch armed several polls ago is checked here every time.
+            if sweep_reentry_enabled():
+                for r in sweep_reentry_watcher.check(df_15m):
+                    reentry_msg = format_reentry_message(
+                        direction=r["direction"], entry=r["entry"], sl=r["sl"],
+                        tp=r["tp"], trade1_entry=r["trade1_entry"],
+                    )
+                    send_telegram(reentry_msg)
+                    log(f"🔁 Round-2 re-entry: {r['direction']} @ {r['entry']:,.2f} "
+                        f"(Trade 1 @ {r['trade1_entry']:,.2f} -> move SL to breakeven)")
 
             # ── Scenario Scanner (Mode B — Telegram alert) ──
             try:

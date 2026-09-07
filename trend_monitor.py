@@ -444,6 +444,43 @@ def format_signal_message(
     return "\n".join(lines)
 
 
+def format_reentry_message(
+    direction:    str,
+    entry:        float,
+    sl:           float,
+    tp:           float,
+    trade1_entry: float,
+    symbol:       str = "XAUUSD",
+) -> str:
+    """
+    [OPT-IN, ALPHA_SIGNAL_SWEEP_REENTRY_ENABLED] Round-2 re-entry alert
+    after a confirmed Sweep Wick Entry (see sweep_reentry.py). Carries
+    Trade 1's own final TP forward as this trade's target (same
+    directional thesis), and always includes the breakeven instruction
+    for Trade 1 -- the Round-2 confirmation is what validates moving
+    Trade 1's SL there, so the two are never split into separate messages.
+    """
+    now   = datetime.now(BKK).strftime("%a %d %b %Y | %H:%M")
+    delta = "Δ+" if direction == "BUY" else "Δ-"
+
+    lines = [
+        f"🔁 {delta} ALPHA BUFFALO V5 — ROUND 2 RE-ENTRY",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"📌 Asset    : {symbol}",
+        f"📊 Type     : SWEEP_REENTRY",
+        f"🎯 Entry    : ~{entry:,.2f}",
+        f"🛡️ SL       : {sl:,.2f}",
+        f"🎯 TP       : {tp:,.2f}  (Trade 1's target, unchanged)",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"🔒 Trade 1 (Entry {trade1_entry:,.2f}): move SL to breakeven "
+        f"({trade1_entry:,.2f}) now — this reversal confirms it.",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"⏰ {now}",
+        "⚠️ Not financial advice. Trade at your own risk.",
+    ]
+    return "\n".join(lines)
+
+
 def format_welcome_message() -> str:
     """ข้อความ /start พร้อม Disclaimer เต็ม"""
     return (

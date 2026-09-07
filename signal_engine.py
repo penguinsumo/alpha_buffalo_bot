@@ -66,6 +66,16 @@ class CloudSignal:
     auto_fibo_entry_zone_lo: float = 0.0
     auto_fibo_entry_zone_hi: float = 0.0
     auto_fibo_ext_target:    float = 0.0
+    # [NEW, for sweep_reentry.py] whether THIS entry actually used the
+    # sweep-wick anchor (ALPHA_SIGNAL_SWEEP_WICK_ENTRY) rather than
+    # zone/fibo/ATR -- the Round-2 re-entry watcher only ever arms itself
+    # off a real sweep-wick entry, per owner's design. swing_high_ref/
+    # swing_low_ref carry the same swing this setup's Kivanc zone was
+    # measured against (0.0 when unavailable, e.g. harmonic PRZ match), so
+    # the watcher can derive a 61.8% reference price for Round 2's SL.
+    sweep_wick_entry_used: bool = False
+    swing_high_ref:        float = 0.0
+    swing_low_ref:         float = 0.0
 
 
 # ── Helper functions (เหมือนเดิมทุกบรรทัด) ───────────────
@@ -974,6 +984,9 @@ def compute_signal(
         auto_fibo_entry_zone_lo=(round(auto_fibo.zone_lo, 2) if auto_fibo else 0.0),
         auto_fibo_entry_zone_hi=(round(auto_fibo.zone_hi, 2) if auto_fibo else 0.0),
         auto_fibo_ext_target=(round(auto_fibo.ext_target, 2) if auto_fibo else 0.0),
+        sweep_wick_entry_used=bool(sweep_wick_entry_enabled and sweep_entry is not None),
+        swing_high_ref=(round(swing_high_for_fibo, 2) if swing_high_for_fibo else 0.0),
+        swing_low_ref=(round(swing_low_for_fibo, 2) if swing_low_for_fibo else 0.0),
     )
 
 
@@ -1005,4 +1018,7 @@ def signal_to_dict(sig: CloudSignal) -> dict:
         "auto_fibo_entry_zone_lo": sig.auto_fibo_entry_zone_lo,
         "auto_fibo_entry_zone_hi": sig.auto_fibo_entry_zone_hi,
         "auto_fibo_ext_target":    sig.auto_fibo_ext_target,
+        "sweep_wick_entry_used":   sig.sweep_wick_entry_used,
+        "swing_high_ref":          sig.swing_high_ref,
+        "swing_low_ref":           sig.swing_low_ref,
     }
