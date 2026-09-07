@@ -976,6 +976,25 @@ def compute_signal(
                            ea_executes=(active_symbol == SYMBOL))
     except Exception: pass
 
+    try:
+        # [NEW, not opt-in -- persistence for historical stats, 2026-09-07]
+        # Same call site as alert_signal_ready() above, so this captures
+        # EVERY signal actually sent to Telegram -- both the main traded
+        # SYMBOL (source="main_loop") and the opt-in extra-symbol scan
+        # (source="extra_symbol", whenever active_symbol != SYMBOL). Never
+        # raises on its own (see signal_log.log_signal's docstring); wrapped
+        # here too so a missing signal_log module/table can never affect
+        # signal firing.
+        from signal_log import log_signal
+        log_signal(
+            symbol=active_symbol, direction=direction, category=sig_type,
+            entry=price, sl=sl, tp=tp_final, score=final_score,
+            pattern=prz_name, session=session,
+            ea_executes=(active_symbol == SYMBOL),
+            source=("main_loop" if active_symbol == SYMBOL else "extra_symbol"),
+        )
+    except Exception: pass
+
     return CloudSignal(
         action="OPEN", direction=direction, signal_type=sig_type,
         entry=round(entry_price,2), sl=sl, be_price=be_price,

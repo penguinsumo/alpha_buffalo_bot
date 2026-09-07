@@ -23,6 +23,7 @@ import binance_feed
 from binance_feed import get_ohlcv_binance
 from sweep_reentry import (sweep_reentry_enabled, sweep_reentry_watcher,
                             fib_618_reference)
+from signal_log import log_signal
 
 BKK = timezone(timedelta(hours=7))
 
@@ -575,6 +576,22 @@ def signal_loop():
                     send_telegram(reentry_msg)
                     log(f"🔁 Round-2 re-entry: {r['direction']} @ {r['entry']:,.2f} "
                         f"(Trade 1 @ {r['trade1_entry']:,.2f} -> move SL to breakeven)")
+                    try:
+                        # [NEW, not opt-in -- persistence for historical
+                        # stats, 2026-09-07] Round-2 re-entries never go
+                        # through compute_signal()/alert_signal_ready(), so
+                        # they need their own log_signal() call here. Always
+                        # the main traded SYMBOL (Round-2 is armed only off
+                        # signal_loop()'s own Trade 1, never the extra-symbol
+                        # scan) -> ea_executes=True, same as Trade 1 itself.
+                        log_signal(
+                            symbol=SYMBOL, direction=r["direction"],
+                            category="SWEEP_REENTRY", entry=r["entry"],
+                            sl=r["sl"], tp=r["tp"], session=trend.session,
+                            ea_executes=True, trade1_entry=r["trade1_entry"],
+                            source="reentry",
+                        )
+                    except Exception: pass
 
             # ── Scenario Scanner (Mode B — Telegram alert) ──
             try:
