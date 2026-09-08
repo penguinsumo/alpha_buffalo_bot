@@ -436,6 +436,50 @@ def resolve_zone_based_entry_sl(direction, price, fib_zone, spike, enabled):
     return entry_price, zone_sl
 
 
+def resolve_kivanc_minor_sl_fallback(
+    direction, entry_price, flat_sl, swing_high, swing_low, atr,
+    enabled=True, buffer=0.30, max_atr_mult=2.5,
+):
+    """
+    [Default ON, kill-switch: ALPHA_SIGNAL_KIVANC_MINOR_SL_FIX=false]
+
+    Only called when the caller has no structure-based zone_sl already
+    (i.e. ALPHA_SIGNAL_ZONE_BASED_ENTRY_SL is off, or on but found no
+    qualifying H1 spike/zone for this setup), so `flat_sl` is the plain
+    Entry +/- ATR*1.0 buffer.
+
+    Given the minor Kivanc swing (M15, pivot_n=5 -- swing_high/swing_low
+    from get_kivanc_swing_zone(df_15m, pivot_n=5)), widen flat_sl to sit
+    just beyond that swing (+/- `buffer`) whenever the swing is FURTHER
+    from entry_price than flat_sl already is -- i.e. flat_sl currently
+    sits in FRONT of that minor support/resistance, so a routine sweep of
+    it would stop the trade out before any real reversal has a chance to
+    happen. Never tightens flat_sl, only ever widens it, and never widens
+    past `max_atr_mult` * atr from entry_price, so a stale or far-away
+    swing can never blow the stop out to something unreasonable.
+
+    Returns flat_sl unchanged when: disabled, atr<=0, no swing on the
+    correct side, the swing is not actually further out than flat_sl, or
+    widening to it would exceed the max_atr_mult cap.
+    """
+    if not enabled or atr <= 0:
+        return flat_sl
+    if direction == "BUY":
+        if not swing_low:
+            return flat_sl
+        candidate = round(swing_low - buffer, 2)
+        if candidate < flat_sl and (entry_price - candidate) <= atr * max_atr_mult:
+            return candidate
+        return flat_sl
+    else:
+        if not swing_high:
+            return flat_sl
+        candidate = round(swing_high + buffer, 2)
+        if candidate > flat_sl and (candidate - entry_price) <= atr * max_atr_mult:
+            return candidate
+        return flat_sl
+
+
 def resolve_auto_fibo_filter(
     direction: str,
     price: float,
@@ -753,13 +797,19 @@ def compute_signal(
     except Exception: pass
 
     # FVG verdict
+    # [NOTE] kivanc_minor_swing_high/low (M15, pivot_n=5 -- the "minor
+    # Kivanc" swing, smaller pivot count than the pivot_n=10 zone used
+    # elsewhere) is pulled out of the try/except below so it's reliably
+    # available even if fvg_detector itself fails to import -- it is ALSO
+    # reused further down for the SL fallback widening fix (see
+    # "Kivanc-minor-aware SL fallback" near Step 7).
+    kivanc_minor_swing_high, kivanc_minor_swing_low = get_kivanc_swing_zone(df_15m, pivot_n=5)
     fvg_verdict = "NONE"
     try:
         from fvg_detector import FVGDetector
         _fvg = FVGDetector()
-        swing_h, swing_l = get_kivanc_swing_zone(df_15m, pivot_n=5)
-        if swing_h and swing_l:
-            fvg_res = _fvg.analyze(df_15m, swing_h, swing_l)
+        if kivanc_minor_swing_high and kivanc_minor_swing_low:
+            fvg_res = _fvg.analyze(df_15m, kivanc_minor_swing_high, kivanc_minor_swing_low)
             fvg_verdict = fvg_res.verdict
     except Exception: pass
 
@@ -911,8 +961,46 @@ def compute_signal(
             zone_sl = fib_sl
             fibo_tp_pair = (fib_tp1, fib_tp2)
 
+    # [NEW, default ON, 2026-09-08] Kivanc-minor-aware SL fallback widening.
+    # Root cause: the flat ATR*1.0 buffer fallback below (used whenever
+    # zone_sl above is None -- i.e. ALPHA_SIGNAL_ZONE_BASED_ENTRY_SL is off,
+    # or on but found no qualifying H1 spike/zone for this particular setup)
+    # ignores nearby M15 structure entirely. When the minor Kivanc swing
+    # (M15, pivot_n=5 -- same one used for the FVG check above) sits FURTHER
+    # from entry than that flat ATR SL, price sweeping that minor
+    # support/resistance on its way to reversing (a very common false-break
+    # pattern) stops the trade out before the real move happens. Reported
+    # live 2026-09-08: XAUUSD BUY, entry 4423.68, flat-ATR SL landed at
+    # 4419.6 -- in front of a minor swing low around 4415.7 -- so a sweep
+    # down to that low would take out the SL first. This widens the SL just
+    # beyond the minor swing instead, capped at
+    # ALPHA_SIGNAL_KIVANC_MINOR_SL_MAX_ATR (default 2.5x ATR from entry) so
+    # a stale/far-away swing can never blow the stop out to something
+    # unreasonable -- and it only ever widens, never tightens, the flat-ATR
+    # SL. Position size (execution_bridge.compute_lot) is computed from the
+    # actual entry/SL distance, so a wider SL here automatically produces a
+    # smaller lot for the same 2% account risk -- no separate change needed
+    # there. Kill switch: ALPHA_SIGNAL_KIVANC_MINOR_SL_FIX=false reverts to
+    # the old flat-ATR-only fallback.
+    kivanc_minor_sl_fix_enabled = os.getenv("ALPHA_SIGNAL_KIVANC_MINOR_SL_FIX", "true").lower() in {
+        "1", "true", "yes", "on",
+    }
+    kivanc_minor_sl_buffer  = float(os.getenv("ALPHA_SIGNAL_KIVANC_MINOR_SL_BUFFER", "0.30"))
+    kivanc_minor_sl_max_atr = float(os.getenv("ALPHA_SIGNAL_KIVANC_MINOR_SL_MAX_ATR", "2.5"))
+
     if direction == "BUY":
-        sl          = zone_sl if zone_sl is not None else round(entry_price - atr*1.0, 2)
+        _flat_sl = round(entry_price - atr*1.0, 2)
+        if zone_sl is not None:
+            sl = zone_sl
+        else:
+            sl = resolve_kivanc_minor_sl_fallback(
+                "BUY", entry_price, _flat_sl,
+                kivanc_minor_swing_high, kivanc_minor_swing_low, atr,
+                enabled=kivanc_minor_sl_fix_enabled,
+                buffer=kivanc_minor_sl_buffer, max_atr_mult=kivanc_minor_sl_max_atr,
+            )
+            if sl != _flat_sl:
+                print(f"🛡️ SL widened past minor Kivanc low: {_flat_sl} -> {sl}")
         be_price    = round(entry_price + 0.10, 2)
         if fibo_tp_pair:
             fib_tp1, fib_tp2 = fibo_tp_pair
@@ -936,7 +1024,18 @@ def compute_signal(
                 {"pct":20,"price":tp_final, "reason":"PDH_PRZ"},
             ]
     else:
-        sl          = zone_sl if zone_sl is not None else round(entry_price + atr*1.0, 2)
+        _flat_sl = round(entry_price + atr*1.0, 2)
+        if zone_sl is not None:
+            sl = zone_sl
+        else:
+            sl = resolve_kivanc_minor_sl_fallback(
+                "SELL", entry_price, _flat_sl,
+                kivanc_minor_swing_high, kivanc_minor_swing_low, atr,
+                enabled=kivanc_minor_sl_fix_enabled,
+                buffer=kivanc_minor_sl_buffer, max_atr_mult=kivanc_minor_sl_max_atr,
+            )
+            if sl != _flat_sl:
+                print(f"🛡️ SL widened past minor Kivanc high: {_flat_sl} -> {sl}")
         be_price    = round(entry_price - 0.10, 2)
         if fibo_tp_pair:
             fib_tp1, fib_tp2 = fibo_tp_pair
