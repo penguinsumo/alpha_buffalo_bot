@@ -218,6 +218,12 @@ void PollAndExecute()
       return;
    }
 
+   if(action == "UPDATE_SL")
+   {
+      ExecuteUpdateSL(command, command_id);
+      return;
+   }
+
    Print("AlphaBuffalo command rejected: unsupported action=", action);
    PostAck(command_id, false, 100.0, 0.0);
 }
@@ -298,14 +304,22 @@ void ExecuteOpen(string command, string command_id)
       Print("AlphaBuffalo WARNING: server did not send a valid lot, using FallbackLot=",
             DoubleToString(FallbackLot, 2));
 
+   // No broker-side TP is set (8 ก.ย. 2026, owner's explicit design): once
+   // trailing stop is live, the position must keep running past the
+   // original TP_final instead of being auto-closed there by the broker.
+   // tp_final above is still used for the directional sanity check
+   // (levels_ok) and is still reported to Telegram/Supabase as the
+   // original target -- it just no longer arms MT5's own TP field.
+   // TP1 partial-close is unaffected: it's driven by check_tp1_and_queue_be()
+   // comparing live price to tp1 server-side, not by this broker TP.
    string comment = "AB|" + StringSubstr(signal_id, 0, 24);
    bool sent = false;
    if(direction == "BUY")
       sent = trade.Buy(lot, _Symbol, ask, NormalizeDouble(sl, _Digits),
-                       NormalizeDouble(tp_final, _Digits), comment);
+                       0.0, comment);
    else
       sent = trade.Sell(lot, _Symbol, bid, NormalizeDouble(sl, _Digits),
-                        NormalizeDouble(tp_final, _Digits), comment);
+                        0.0, comment);
 
    if(!sent)
    {
@@ -344,7 +358,7 @@ void ExecuteOpen(string command, string command_id)
          " ticket=", ticket, " lot=", DoubleToString(lot, 2),
          " fill=", DoubleToString(fill_price, _Digits),
          " SL=", DoubleToString(sl, _Digits),
-         " TP=", DoubleToString(tp_final, _Digits));
+         " target(no broker TP, trailing-managed)=", DoubleToString(tp_final, _Digits));
 }
 
 void ExecutePartialCloseMoveBE(string command, string command_id)
@@ -449,6 +463,75 @@ void ExecutePartialCloseMoveBE(string command, string command_id)
       LastAckedCommandId = command_id;
       Print("AlphaBuffalo TP1/BE ACKed | remaining=",
             DoubleToString(remaining_pct, 2), "% SL=",
+            DoubleToString(new_sl, _Digits));
+   }
+}
+
+void ExecuteUpdateSL(string command, string command_id)
+{
+   // Trailing stop (8 ก.ย. 2026): the backend has already decided the new
+   // SL (BB middle band, only ever sent when it's more favorable than what
+   // it believes is live -- see execution_bridge.check_trailing_stop()).
+   // This EA does not recompute or second-guess the level, only validates
+   // it against live broker price before applying it, same pattern as the
+   // BE move above. TP is (re)cleared to 0.0 on every trailing update too,
+   // since ExecuteOpen() no longer arms a broker TP and nothing else here
+   // should ever re-introduce one.
+   double new_sl = ParseDbl(command, "new_sl");
+   if(new_sl <= 0.0)
+   {
+      Print("AlphaBuffalo UPDATE_SL rejected: invalid new_sl");
+      PostAck(command_id, false, 100.0, 0.0);
+      return;
+   }
+
+   ulong ticket = FindMagicPositionTicket();
+   if(ticket == 0 || !pos.SelectByTicket(ticket))
+   {
+      Print("AlphaBuffalo UPDATE_SL delayed: managed position not found");
+      PostAck(command_id, false, 100.0, 0.0);
+      return;
+   }
+
+   double current_sl = pos.StopLoss();
+   if(MathAbs(current_sl - new_sl) <= (_Point * 2.0))
+   {
+      // Already at (or effectively at) this level -- likely a retry of an
+      // already-applied update. ACK success as a no-op rather than fail.
+      if(PostAck(command_id, true, 100.0, 0.0))
+      {
+         LastAckedCommandId = command_id;
+         Print("AlphaBuffalo UPDATE_SL: already at target level | SL=",
+               DoubleToString(new_sl, _Digits));
+      }
+      return;
+   }
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   ENUM_POSITION_TYPE side = pos.PositionType();
+   bool valid = (side == POSITION_TYPE_BUY && new_sl < bid) ||
+                (side == POSITION_TYPE_SELL && new_sl > ask);
+   if(!valid)
+   {
+      Print("AlphaBuffalo UPDATE_SL delayed: candidate SL on wrong side of live price | new_sl=",
+            DoubleToString(new_sl, _Digits));
+      PostAck(command_id, false, 100.0, 0.0);
+      return;
+   }
+
+   if(!trade.PositionModify(ticket, NormalizeDouble(new_sl, _Digits), 0.0))
+   {
+      Print("AlphaBuffalo UPDATE_SL failed | retcode=", trade.ResultRetcode(),
+            " | ", trade.ResultRetcodeDescription());
+      PostAck(command_id, false, 100.0, 0.0);
+      return;
+   }
+
+   if(PostAck(command_id, true, 100.0, 0.0))
+   {
+      LastAckedCommandId = command_id;
+      Print("AlphaBuffalo UPDATE_SL executed and ACKed | new_SL=",
             DoubleToString(new_sl, _Digits));
    }
 }

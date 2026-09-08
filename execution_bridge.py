@@ -59,6 +59,20 @@ MAX_COMMAND_RETRIES  = int(os.getenv("ALPHA_EXEC_MAX_RETRIES", "20"))
 # skipped because the first command never got resolved either way.
 COMMAND_STALE_AFTER_SEC = int(os.getenv("ALPHA_EXEC_STALE_AFTER_SEC", "900"))  # 15 min
 
+# ── Trailing stop (8 ก.ย. 2026) ──────────────────────────────────────
+# Owner's explicit design, locked in via 3 questions: (1) trails from the
+# moment the position opens -- NOT gated on TP1/BE having fired first;
+# (2) the trailing level is the live BB(20) middle band, recomputed fresh
+# every signal_loop() pass on df_15m; (3) once price reaches the original
+# TP_final, the position must NOT close there -- it keeps running, with
+# the trailing SL as the only exit mechanism from that point on. To make
+# (3) actually true, ExecuteOpen() in the EA no longer sets a broker-side
+# TP at all (0.0 = no TP) -- TP1 partial-close is a separate, existing
+# server-side check (check_tp1_and_queue_be) that never depended on the
+# broker TP field, so it is unaffected by this.
+TRAILING_STOP_ENABLED    = os.getenv("ALPHA_TRAILING_STOP_ENABLED", "true").lower() == "true"
+TRAILING_MIN_DISTANCE    = float(os.getenv("ALPHA_TRAILING_MIN_DISTANCE", "0.50"))
+
 
 def compute_lot(day_start_equity: float, sl_distance: float) -> float:
     """Risk-% position sizing: the lot such that a full SL hit loses
@@ -182,6 +196,66 @@ def check_tp1_and_queue_be(current_price: float) -> bool:
         return False
 
 
+def check_trailing_stop(current_price: float, bb_mid: float,
+                         enabled: bool = None, min_distance: float = None) -> bool:
+    """Call every signal_loop() pass, right after check_tp1_and_queue_be().
+    Trails the SL to the live BB(20) middle band from the moment the
+    position opens (not gated on TP1/BE) -- owner's explicit design,
+    8 ก.ย. 2026. Only ever tightens: a candidate is queued only when it is
+    strictly more favorable than the SL this module is already tracking,
+    and only when it sits at least min_distance away from current price
+    on the correct side (so the EA's own bid/ask validity check, and the
+    broker itself, don't reject it as already-breached). Defers naturally
+    to a same-pass TP1/BE move via the existing _pending_command guard --
+    at most one command is ever in flight at a time."""
+    global _pending_command
+    try:
+        if enabled is None:
+            enabled = TRAILING_STOP_ENABLED
+        if not enabled:
+            return False
+        if min_distance is None:
+            min_distance = TRAILING_MIN_DISTANCE
+        pos = _open_position
+        if pos is None or not pos.get("filled"):
+            return False
+        if current_price is None or bb_mid is None:
+            return False
+        if _pending_command is not None:
+            # Don't stomp an unrelated pending command (e.g. a just-queued
+            # TP1/BE move, CLOSE_ALL, or the OPEN itself not yet ACKed).
+            return False
+        current_price = float(current_price)
+        candidate = round(float(bb_mid), 2)
+        direction = pos["direction"]
+        current_sl = float(pos["sl"])
+
+        if direction == "BUY":
+            if candidate >= current_price - min_distance:
+                return False  # too close to / past live price -- unsafe
+            if candidate <= current_sl:
+                return False  # not more favorable than the tracked SL
+        elif direction == "SELL":
+            if candidate <= current_price + min_distance:
+                return False
+            if candidate >= current_sl:
+                return False
+        else:
+            return False
+
+        _pending_command = {
+            "command_id": _new_command_id(), "action": "UPDATE_SL",
+            "reason": "trailing stop (BB mid)", "symbol": "XAUUSD",
+            "new_sl": candidate, "queued_at": time.time(),
+        }
+        print(f"📤 execution_bridge: trailing stop -> queued UPDATE_SL "
+              f"new_sl={candidate} (bb_mid={bb_mid}, prev_sl={current_sl})")
+        return True
+    except Exception as e:
+        print(f"⚠️ execution_bridge check_trailing_stop error: {e}")
+        return False
+
+
 def expire_stale_command() -> bool:
     """Call every signal_loop() pass (cheap -- in-memory only, no network).
     MAX_COMMAND_RETRIES only counts consecutive ACKed failures -- if the EA
@@ -294,6 +368,12 @@ def record_ack(command_id: str, success: bool, remaining_pct: float = 100.0,
         elif action == "PARTIAL_CLOSE_MOVE_BE":
             if _open_position is not None:
                 _open_position["be_done"] = True
+                if cmd.get("new_sl") is not None:
+                    _open_position["sl"] = cmd["new_sl"]
+            _pending_command = None
+        elif action == "UPDATE_SL":
+            if _open_position is not None and cmd.get("new_sl") is not None:
+                _open_position["sl"] = cmd["new_sl"]
             _pending_command = None
         elif action == "CLOSE_ALL":
             _pending_command = None

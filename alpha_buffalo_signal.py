@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 import uvicorn
-from signal_engine import compute_signal, signal_to_dict
+from signal_engine import compute_signal, signal_to_dict, get_bb
 from trend_monitor import (analyze_trend, format_trend_message,
                             format_signal_message, format_welcome_message,
                             should_send_trend_alert,
@@ -561,8 +561,15 @@ def signal_loop():
             price = float(df_15m["close"].iloc[-1])
             log(f"💰 {SYMBOL}: {price:,.2f}")
             try:
-                from execution_bridge import check_tp1_and_queue_be, expire_stale_command
+                from execution_bridge import (
+                    check_tp1_and_queue_be, check_trailing_stop, expire_stale_command,
+                )
                 check_tp1_and_queue_be(price)
+                try:
+                    bb_mid = get_bb(df_15m)["mid"]
+                    check_trailing_stop(price, bb_mid)
+                except Exception as e:
+                    log(f"⚠️ execution_bridge check_trailing_stop error: {e}")
                 expire_stale_command()
             except Exception as e:
                 log(f"⚠️ execution_bridge check_tp1_and_queue_be error: {e}")

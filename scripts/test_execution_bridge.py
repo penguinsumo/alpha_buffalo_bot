@@ -190,6 +190,21 @@ be_cid = eb._pending_command["command_id"]
 check("record_ack(): PARTIAL_CLOSE_MOVE_BE success marks be_done, clears pending",
       eb.record_ack(be_cid, True, 50.0, 0.0) is True
       and eb._pending_command is None and eb._open_position["be_done"] is True)
+check("record_ack(): PARTIAL_CLOSE_MOVE_BE success also updates the tracked SL to the "
+      "new (BE) price -- needed so trailing stop has an accurate baseline afterwards",
+      eb._open_position["sl"] == 4400.10)
+
+# UPDATE_SL (trailing stop) success -> tracked sl updated, pending cleared
+reset()
+eb.queue_open_command(direction="BUY", entry=4400.0, sl=4390.0, tp_final=4420.0,
+                       be_price=4400.10, partial=[])
+eb.record_fill(eb._open_position["signal_id"], "1", 4400.5)
+eb.record_ack(eb._pending_command["command_id"], True)  # OPEN itself ACKed first
+eb.check_trailing_stop(4415.0, bb_mid=4405.0)  # candidate more favorable than sl=4390.0
+trail_cid = eb._pending_command["command_id"]
+check("record_ack(): UPDATE_SL success updates the tracked SL to the new trailing level",
+      eb.record_ack(trail_cid, True) is True
+      and eb._pending_command is None and eb._open_position["sl"] == 4405.0)
 
 # CLOSE_ALL success -> both pending and position cleared
 reset()
@@ -341,6 +356,11 @@ check("signal_loop() calls expire_stale_command() every pass (the dead-EA backst
 check("signal_loop() calls queue_open_command() right after the main XAUUSD Telegram alert",
       "queue_open_command(" in src)
 
+check("signal_loop() calls check_trailing_stop() every pass (trailing stop, 8 ก.ย. 2026)",
+      "check_trailing_stop(" in src)
+check("signal_loop()/module imports get_bb from signal_engine for the live trailing level",
+      "get_bb" in inspect.getsource(runtime))
+
 app_src = inspect.getsource(runtime)
 check("alpha_buffalo_signal.py exposes GET /execution/command",
       '@app.get("/execution/command")' in app_src)
@@ -402,6 +422,92 @@ reset()
 _build_testopen_command("BUY", 4400.0)
 check("/testopen: second call skipped while a position is still tracked open",
       _build_testopen_command("BUY", 4405.0) is False)
+
+
+# ═══════════════════════════════════════════════════════════
+# 10. check_trailing_stop() -- trailing SL to the live BB middle band
+#     (owner's 3 locked-in decisions, 8 ก.ย. 2026: starts from the moment
+#     the position opens; based on BB middle; never closes at TP_final --
+#     that last part is a broker/.mq5-side change (no TP armed at OPEN),
+#     not testable from this module, but the "only ever tightens, only
+#     ever queues UPDATE_SL" contract here is what feeds it).
+# ═══════════════════════════════════════════════════════════
+
+reset()
+check("check_trailing_stop(): no-op when nothing tracked open",
+      eb.check_trailing_stop(4500.0, bb_mid=4490.0) is False)
+
+eb.queue_open_command(direction="BUY", entry=4400.0, sl=4390.0, tp_final=4420.0,
+                       be_price=4400.10, partial=[])
+check("check_trailing_stop(): no-op while still unfilled (OPEN not ACKed/filled yet)",
+      eb.check_trailing_stop(4415.0, bb_mid=4405.0) is False)
+
+eb.record_fill(eb._open_position["signal_id"], "1", 4400.5)
+eb.record_ack(eb._pending_command["command_id"], True)  # OPEN itself ACKed first
+
+# BUY: bb_mid well above the tracked sl and safely below live price -> fires
+check("check_trailing_stop(): BUY fires and queues UPDATE_SL when bb_mid is more "
+      "favorable than the tracked SL and safely clear of live price",
+      eb.check_trailing_stop(4415.0, bb_mid=4405.0) is True
+      and eb._pending_command["action"] == "UPDATE_SL"
+      and eb._pending_command["new_sl"] == 4405.0)
+eb.record_ack(eb._pending_command["command_id"], True)  # apply it, as the EA would
+
+# Never tightens: a worse (lower) bb_mid than the now-tracked sl=4405.0 does nothing
+check("check_trailing_stop(): BUY never LOOSENS -- a worse candidate than the tracked "
+      "SL is ignored",
+      eb.check_trailing_stop(4420.0, bb_mid=4402.0) is False
+      and eb._open_position["sl"] == 4405.0)
+
+# A better candidate but too close to live price (inside min_distance) is rejected
+check("check_trailing_stop(): BUY rejects a candidate too close to live price "
+      "(would likely be an instant stop-out / rejected by the EA's own bid/ask check)",
+      eb.check_trailing_stop(4406.0, bb_mid=4405.90, min_distance=0.50) is False)
+
+# SELL mirror
+reset()
+eb.queue_open_command(direction="SELL", entry=4400.0, sl=4410.0, tp_final=4380.0,
+                       be_price=4399.90, partial=[])
+eb.record_fill(eb._open_position["signal_id"], "2", 4400.5)
+eb.record_ack(eb._pending_command["command_id"], True)
+check("check_trailing_stop(): SELL fires and queues UPDATE_SL when bb_mid is more "
+      "favorable (lower) than the tracked SL and safely clear of live price",
+      eb.check_trailing_stop(4390.0, bb_mid=4398.0) is True
+      and eb._pending_command["new_sl"] == 4398.0)
+eb.record_ack(eb._pending_command["command_id"], True)
+check("check_trailing_stop(): SELL never LOOSENS -- a worse (higher) candidate is ignored",
+      eb.check_trailing_stop(4385.0, bb_mid=4399.0) is False
+      and eb._open_position["sl"] == 4398.0)
+
+# Defers to an already-pending command (e.g. a same-pass TP1/BE move) --
+# never stomps it, exactly like check_tp1_and_queue_be()'s own guard.
+reset()
+eb.queue_open_command(direction="BUY", entry=4400.0, sl=4390.0, tp_final=4420.0,
+                       be_price=4400.10, partial=[{"pct": 50, "price": 4410.0, "reason": "x"}])
+eb.record_fill(eb._open_position["signal_id"], "3", 4400.5)
+eb.record_ack(eb._pending_command["command_id"], True)
+eb.check_tp1_and_queue_be(4410.0)  # queues PARTIAL_CLOSE_MOVE_BE
+before = dict(eb._pending_command)
+check("check_trailing_stop(): defers to an already-pending command from the same pass "
+      "(e.g. TP1/BE just queued) instead of stomping it",
+      eb.check_trailing_stop(4410.0, bb_mid=4408.0) is False
+      and eb._pending_command == before)
+
+# Disabled via kill switch -> never fires regardless of how favorable the candidate is
+reset()
+eb.queue_open_command(direction="BUY", entry=4400.0, sl=4390.0, tp_final=4420.0,
+                       be_price=4400.10, partial=[])
+eb.record_fill(eb._open_position["signal_id"], "4", 4400.5)
+eb.record_ack(eb._pending_command["command_id"], True)
+check("check_trailing_stop(): disabled (kill switch) -> never fires",
+      eb.check_trailing_stop(4415.0, bb_mid=4405.0, enabled=False) is False)
+
+# Missing inputs -> never raises
+reset()
+check("check_trailing_stop(): current_price=None never raises, returns False",
+      eb.check_trailing_stop(None, bb_mid=4405.0) is False)
+check("check_trailing_stop(): bb_mid=None never raises, returns False",
+      eb.check_trailing_stop(4415.0, bb_mid=None) is False)
 
 
 print()
