@@ -352,6 +352,56 @@ check("alpha_buffalo_signal.py exposes POST /execution/ack",
 cmd_src = inspect.getsource(runtime.handle_cmd)
 check("/closeea admin command wired to execution_bridge.queue_close_all()",
       "queue_close_all(" in cmd_src and 'ADMIN_ID' in cmd_src)
+check("/testopen admin command wired to execution_bridge.queue_open_command()",
+      '"/testopen"' in cmd_src and "queue_open_command(" in cmd_src
+      and 'ADMIN_ID' in cmd_src)
+
+
+# ═══════════════════════════════════════════════════════════
+# 9. /testopen manual smoke-test logic (arithmetic + queuing, no network)
+# ═══════════════════════════════════════════════════════════
+# Mirrors the SL/TP/be_price formulas inside the /testopen handler so the
+# arithmetic and its handoff into queue_open_command() are covered without
+# needing a live TwelveData call or a real Telegram send.
+
+def _build_testopen_command(direction, price):
+    if direction == "BUY":
+        sl, tp1, tp_final, be_price = (round(price-2.0,2), round(price+1.0,2),
+                                        round(price+3.0,2), round(price+0.10,2))
+    else:
+        sl, tp1, tp_final, be_price = (round(price+2.0,2), round(price-1.0,2),
+                                        round(price-3.0,2), round(price-0.10,2))
+    partial = [{"pct":50,"price":tp1,"reason":"test_tp1"},
+               {"pct":50,"price":tp_final,"reason":"test_tp_final"}]
+    return eb.queue_open_command(direction=direction, entry=price, sl=sl,
+                                  tp_final=tp_final, be_price=be_price, partial=partial,
+                                  reason="admin /testopen manual smoke test")
+
+reset()
+check("/testopen BUY at 4400.0 queues correctly",
+      _build_testopen_command("BUY", 4400.0) is True)
+check("/testopen BUY: SL is 2.0 below entry",
+      eb._pending_command["sl"] == 4398.0)
+check("/testopen BUY: TP1 is 1.0 above entry",
+      eb._pending_command["tp1"] == 4401.0)
+check("/testopen BUY: TP final is 3.0 above entry",
+      eb._pending_command["tp_final"] == 4403.0)
+
+reset()
+check("/testopen SELL at 4400.0 queues correctly",
+      _build_testopen_command("SELL", 4400.0) is True)
+check("/testopen SELL: SL is 2.0 above entry",
+      eb._pending_command["sl"] == 4402.0)
+check("/testopen SELL: TP1 is 1.0 below entry",
+      eb._pending_command["tp1"] == 4399.0)
+check("/testopen SELL: TP final is 3.0 below entry",
+      eb._pending_command["tp_final"] == 4397.0)
+
+# ── Skips cleanly (same as a real signal) if a position is already open ──
+reset()
+_build_testopen_command("BUY", 4400.0)
+check("/testopen: second call skipped while a position is still tracked open",
+      _build_testopen_command("BUY", 4405.0) is False)
 
 
 print()

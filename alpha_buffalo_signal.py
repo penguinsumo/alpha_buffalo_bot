@@ -811,10 +811,71 @@ def handle_cmd(text, chat_id):
                                chat_id)
             except Exception as e:
                 send_telegram(f"execution_bridge error: {e}", chat_id)
+    elif t == "/testopen" or t.startswith("/testopen "):
+        # [NEW, 2026-09-08] Admin-only manual smoke test -- owner asked to
+        # actually SEE the EA open a real order end-to-end (queue -> EA
+        # polls -> OPEN -> /execution/fill -> /execution/ack) instead of
+        # waiting for a real V4_SESSION signal to fire naturally. Queues a
+        # real OPEN command at the current live XAUUSD price with a small,
+        # fixed SL/TP -- NOT derived from any signal/score, purely a
+        # connectivity/pipeline test. This executes on whichever MT5
+        # account the EA is currently connected to -- the backend has no
+        # way to know if that's a demo or live account, so the warning
+        # below is the only safeguard beyond ADMIN_ID gating.
+        if str(chat_id) != str(ADMIN_ID):
+            send_telegram("Unauthorized", chat_id)
+        else:
+            try:
+                arg = t.split(" ", 1)[1].strip() if " " in t else "buy"
+                direction = "SELL" if arg == "sell" else "BUY"
+                df = get_ohlcv("15min", 2)
+                price = float(df["close"].iloc[-1]) if df is not None and len(df) else None
+                if price is None:
+                    send_telegram("testopen error: could not fetch a live XAUUSD price", chat_id)
+                else:
+                    from execution_bridge import queue_open_command
+                    if direction == "BUY":
+                        sl        = round(price - 2.0, 2)
+                        tp1       = round(price + 1.0, 2)
+                        tp_final  = round(price + 3.0, 2)
+                        be_price  = round(price + 0.10, 2)
+                    else:
+                        sl        = round(price + 2.0, 2)
+                        tp1       = round(price - 1.0, 2)
+                        tp_final  = round(price - 3.0, 2)
+                        be_price  = round(price - 0.10, 2)
+                    partial = [
+                        {"pct": 50, "price": tp1,      "reason": "test_tp1"},
+                        {"pct": 50, "price": tp_final,  "reason": "test_tp_final"},
+                    ]
+                    ok = queue_open_command(
+                        direction=direction, entry=price, sl=sl, tp_final=tp_final,
+                        be_price=be_price, partial=partial,
+                        reason="admin /testopen manual smoke test",
+                    )
+                    if ok:
+                        send_telegram(
+                            f"🧪 TEST OPEN queued: {direction} XAUUSD @ ~{price:,.2f} "
+                            f"SL={sl} TP1={tp1} TPfinal={tp_final}\n"
+                            f"⚠️ This is a REAL order on whichever MT5 account your EA "
+                            f"is currently connected to -- confirm that's your DEMO "
+                            f"account before running this. The EA will pick it up on "
+                            f"its next poll (up to PollSeconds delay). Use /closeea to "
+                            f"close it manually once you've confirmed it worked.",
+                            chat_id)
+                    else:
+                        send_telegram(
+                            "testopen skipped -- a position is already tracked open "
+                            "(use /closeea first, then retry).", chat_id)
+            except Exception as e:
+                send_telegram(f"testopen error: {e}", chat_id)
     elif t in ("/help", "/?"):
         help_msg = ("/status /price /health /context /setup\n"
                      "/quota /newlicense /newtrial /revoke /extend /licenses\n"
-                     "/closeea (admin only -- force-close the live XAUUSD position)")
+                     "/closeea (admin only -- force-close the live XAUUSD position)\n"
+                     "/testopen [buy|sell] (admin only -- manual smoke test: queues a "
+                     "real OPEN at the current price, small fixed SL/TP, to verify the "
+                     "EA pipeline end-to-end -- use on a DEMO account)")
         send_telegram(help_msg, chat_id)
 
 
