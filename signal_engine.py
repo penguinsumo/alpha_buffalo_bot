@@ -917,15 +917,27 @@ def compute_signal(
         if direction == "SELL" and bb["lower"] > price:
             print("BB Filter: SELL blocked — BB bullish"); return None
 
-    # ── Estimate Entry (Auto Fibo 144/1.272 style) ──────
+    # ── Estimate Entry / big-picture PRZ zone (Auto Fibo 144/1.272 style) ──
     # Same methodology as the Pine multi-asset fork's Estimate Entry
     # feature (auto_fibo_entry.py), NOT kivanc_vsaob.py's small-pivot
     # Golden Zone. Always computed (best-effort) below so it can be
     # attached to the returned CloudSignal for display -- it only gates
     # the signal when ALPHA_SIGNAL_AUTO_FIBO_FILTER_ENABLED is explicitly
-    # turned on (default OFF = current behavior, byte-identical).
+    # turned on (default OFF -- owner confirmed 9 ก.ย. 2026 that V4_SESSION's
+    # existing zone-agnostic gating is correct as-is and should stay that way;
+    # V5_SNIPER already requires a real harmonic PRZ via validate_scenario()'s
+    # "V5 needs pattern" check, independent of this flag).
+    #
+    # [FIX 9 ก.ย. 2026] Was fed df_15m (144 M15 bars ~= 1.5 days) -- nowhere
+    # near the "big picture" window the Pine indicator's PRZ/harmonic zones
+    # are drawn from (owner: "ในภาพใหญ่ เราต้องเน้นที่ prz zone ... แต่เราไม่มี
+    # สัญญาณระดับภาพใหญ่"). Now fed df_4h (144 confirmed 4H bars ~= 24 days),
+    # matching the ~1-month window visible in the Pine screenshot. df_4h is
+    # already fetched at 150 bars by both call sites (alpha_buffalo_signal.py)
+    # specifically so 144 confirmed bars remain after compute_auto_fibo()
+    # drops the live/forming candle.
     try:
-        auto_fibo = compute_auto_fibo(df_15m)
+        auto_fibo = compute_auto_fibo(df_4h)
     except Exception:
         auto_fibo = None
 

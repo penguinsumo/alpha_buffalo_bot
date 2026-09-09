@@ -51,14 +51,23 @@ STRUCTURE_DOWNTREND = "LH_LL"   # confirmed lower high AND lower low
 STRUCTURE_MIXED     = "MIXED"   # confirmed swings but highs/lows disagree
 STRUCTURE_UNKNOWN   = ""        # disabled, or not enough confirmed swings yet
 
-# ── Estimate Entry (Auto Fibo 144/1.272 style) display (opt-in) ────────
-# Default OFF: adds zero output/behavior change unless explicitly turned on.
-# Ported from the Pine multi-asset fork's Estimate Entry feature (same Auto
-# Fibo 144/1.272 methodology, not kivanc_vsaob.py's small-pivot Golden
-# Zone) -- see auto_fibo_entry.py. Display-only here: it never changes
+# ── Estimate Entry / big-picture PRZ zone (Auto Fibo 144/1.272 style) ──
+# display. Ported from the Pine multi-asset fork's Estimate Entry feature
+# (same Auto Fibo 144/1.272 methodology, not kivanc_vsaob.py's small-pivot
+# Golden Zone) -- see auto_fibo_entry.py. Display-only: it never changes
 # `bias`/`action`, it just adds informational lines to the Telegram Trend
-# Update showing the same estimate the Pine dashboard shows.
-AUTO_FIBO_ENABLED = os.getenv("ALPHA_TREND_AUTO_FIBO_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+# Update showing the same big-picture PRZ zone the Pine dashboard shows.
+#
+# [CHANGED 9 ก.ย. 2026] Default flipped OFF -> ON. Root cause this exists
+# for: the owner asked for the bot to actually show/track the big-picture
+# PRZ zone AHEAD of a V5 signal firing ("แต่เป้า prz ต้องทราบเพื่อเตรียม v5
+# ต้องมี"), so it needs to be visible in the routine Trend Update, not just
+# computed silently. Paired with the same-day fix feeding this off df_4h
+# instead of df_15m below -- before that fix this was a ~1.5-day M15 window
+# that didn't match the Pine indicator's ~1-month view, so turning it on
+# alone would have shown the wrong zone. Set
+# ALPHA_TREND_AUTO_FIBO_ENABLED=false to restore the old display-off behavior.
+AUTO_FIBO_ENABLED = os.getenv("ALPHA_TREND_AUTO_FIBO_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 
 
 def _confirmed_swing_pivots(series: "pd.Series", pivot_bars: int, is_high: bool):
@@ -243,13 +252,15 @@ def analyze_trend(
         elif m15.dow == STRUCTURE_DOWNTREND:
             bias = "SELL"
 
-    # Estimate Entry (Auto Fibo 144/1.272 style, opt-in, display-only) —
-    # computed on M15 (the same trigger TF the Pine version uses). Wrapped
-    # in try/except so a computation issue can never break the Trend Update.
+    # Big-picture PRZ zone (Auto Fibo 144/1.272 style, display-only) —
+    # [FIX 9 ก.ย. 2026] computed on df_4h (144 confirmed 4H bars ~= 24 days),
+    # not df_15m (was ~1.5 days -- far too short to be the "big picture" the
+    # Pine indicator's ~1-month chart shows). Wrapped in try/except so a
+    # computation issue can never break the Trend Update.
     auto_fibo = None
     if AUTO_FIBO_ENABLED:
         try:
-            auto_fibo = compute_auto_fibo(df_15m)
+            auto_fibo = compute_auto_fibo(df_4h)
         except Exception:
             auto_fibo = None
 
@@ -308,12 +319,12 @@ def format_trend_message(tr: TrendResult) -> str:
         lines.append(f"🌊 Dow M15 : {_dow_label.get(tr.m15.dow, '—')}")
         lines.append(f"🌊 Dow H4  : {_dow_label.get(tr.h4.dow, '—')}")
 
-    # Estimate Entry (Auto Fibo 144/1.272, opt-in via ALPHA_TREND_AUTO_FIBO_ENABLED)
+    # Big-picture PRZ zone (Auto Fibo 144/1.272 on 4H, via ALPHA_TREND_AUTO_FIBO_ENABLED)
     if AUTO_FIBO_ENABLED and tr.auto_fibo:
         af = tr.auto_fibo
         dir_label = "UP-SWING (BUY zone)" if af.direction == DIRECTION_UP else "DOWN-SWING (SELL zone)"
         lines.append("")
-        lines.append(f"🧭 Est. Entry (Auto Fibo) : {dir_label}")
+        lines.append(f"🧭 PRZ Zone (Big Picture 4H) : {dir_label}")
         lines.append(f"    Zone : {af.zone_lo:,.2f} - {af.zone_hi:,.2f}  |  Ext : {af.ext_target:,.2f}")
 
     lines.append("")

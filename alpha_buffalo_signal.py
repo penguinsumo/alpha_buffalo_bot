@@ -512,7 +512,12 @@ def run_extra_symbol_pass(symbol: str):
     sent here, per symbol, immediately, with no throttling.
     """
     try:
-        df_4h  = get_ohlcv("4h",  100, symbol=symbol)
+        # 150 4H bars (not 100): compute_auto_fibo()'s big-picture PRZ zone
+        # needs a full 144-bar confirmed window (it drops the live/forming
+        # candle first) to match the Pine indicator's ~144-bar view -- see
+        # the 9 ก.ย. 2026 Auto Fibo timeframe fix in signal_engine.py/
+        # trend_monitor.py.
+        df_4h  = get_ohlcv("4h",  150, symbol=symbol)
         df_1h  = get_ohlcv("1h",  200, symbol=symbol)
         df_15m = get_ohlcv("15min", 96, symbol=symbol)
         if df_4h is None or df_1h is None or df_15m is None:
@@ -590,7 +595,9 @@ def signal_loop():
             if not is_market_open():
                 log("🔴 ตลาดปิด"); _touch_heartbeat(); time.sleep(POLL_INTERVAL); continue
             log("⏳ Fetching 4H/1H/15M...")
-            df_4h  = get_ohlcv("4h",  100)
+            # 150 4H bars -- see the matching comment in run_extra_symbol_pass()
+            # above (compute_auto_fibo() needs a full 144-bar confirmed window).
+            df_4h  = get_ohlcv("4h",  150)
             df_1h  = get_ohlcv("1h",  200)
             df_15m = get_ohlcv("15min",96)
             if df_4h is None or df_1h is None or df_15m is None:

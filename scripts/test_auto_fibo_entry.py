@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
 """
-Regression tests for the Auto Fibo (144, 1.272) style Estimate Entry
-feature (auto_fibo_entry.py) and its two opt-in call sites:
+Regression tests for the Auto Fibo (144, 1.272) style big-picture PRZ zone
+/ Estimate Entry feature (auto_fibo_entry.py) and its two call sites:
 
-  - trend_monitor.py: ALPHA_TREND_AUTO_FIBO_ENABLED (default OFF) --
-    display-only lines in the Telegram Trend Update.
-  - signal_engine.py: ALPHA_SIGNAL_AUTO_FIBO_FILTER_ENABLED (default OFF) --
-    resolve_auto_fibo_filter() as an extra confirmation gate in
-    compute_signal(); the Estimate Entry fields on CloudSignal are always
-    computed/attached regardless of the filter flag.
+  - trend_monitor.py: ALPHA_TREND_AUTO_FIBO_ENABLED (default ON as of
+    9 ก.ย. 2026 -- owner asked to actually see/track the big-picture PRZ
+    zone ahead of a V5 signal firing) -- display-only lines in the Telegram
+    Trend Update, fed off df_4h (144 confirmed 4H bars ~= 24 days, matching
+    the Pine indicator's ~1-month view).
+  - signal_engine.py: ALPHA_SIGNAL_AUTO_FIBO_FILTER_ENABLED (default OFF,
+    UNCHANGED -- owner confirmed 9 ก.ย. 2026 that V4_SESSION's existing
+    zone-agnostic gating is already correct and should not be tightened;
+    V5_SNIPER already requires a real harmonic PRZ independently via
+    validate_scenario()) -- resolve_auto_fibo_filter() as an extra opt-in
+    confirmation gate in compute_signal(), also now fed off df_4h; the
+    Estimate Entry fields on CloudSignal are always computed/attached
+    regardless of the filter flag.
+
+Both call sites were fixed 9 ก.ย. 2026 to feed df_4h instead of df_15m --
+see test_auto_fibo_big_picture_timeframe.py for the source guards + default
+pinning that lock this in specifically.
 
 This is the same Auto Fibo methodology already delivered in the Pine
 multi-asset fork (AlphaBuff_v2.5.4R3_MultiAsset.pine's `f_auto_fibo()`) --
@@ -127,16 +138,16 @@ tr_off = tm.analyze_trend(BIG_UP_DF, BIG_UP_DF, BIG_UP_DF, symbol="TEST")
 check("trend_monitor: flag OFF -> TrendResult.auto_fibo is None",
       tr_off.auto_fibo is None)
 msg_off = tm.format_trend_message(tr_off)
-check("trend_monitor: flag OFF -> message omits Est. Entry lines",
-      "Est. Entry" not in msg_off)
+check("trend_monitor: flag OFF -> message omits PRZ Zone lines",
+      "PRZ Zone" not in msg_off)
 
 tm.AUTO_FIBO_ENABLED = True
 tr_on = tm.analyze_trend(BIG_UP_DF, BIG_UP_DF, BIG_UP_DF, symbol="TEST")
 check("trend_monitor: flag ON -> TrendResult.auto_fibo is populated",
       tr_on.auto_fibo is not None)
 msg_on = tm.format_trend_message(tr_on)
-check("trend_monitor: flag ON -> message includes Est. Entry line",
-      "Est. Entry" in msg_on)
+check("trend_monitor: flag ON -> message includes PRZ Zone line",
+      "PRZ Zone" in msg_on)
 check("trend_monitor: flag ON -> UP-swing fixture labeled BUY zone",
       "BUY zone" in msg_on)
 check("trend_monitor: flag ON does not change bias/action computation",
