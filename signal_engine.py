@@ -1070,8 +1070,22 @@ def compute_signal(
         # run_extra_symbol_pass()), none of which are wired to
         # auto-execution. See alert_signal_ready()'s ea_executes docstring
         # for the exact contradiction this fixes.
+        # [FIX, not opt-in -- confirmed bug, 9 ก.ย. 2026] Must be entry_price
+        # (the possibly zone/sweep-clamped Entry actually used to compute sl
+        # below and actually sent to the EA), NOT the raw price captured at
+        # the top of this function. They only ever differ once an entry-
+        # adjustment feature is enabled (ALPHA_SIGNAL_ZONE_BASED_ENTRY_SL --
+        # live in production since 8 ก.ย. 2026 -- or
+        # ALPHA_SIGNAL_SWEEP_WICK_ENTRY), but when they do, this early
+        # "SESSION SIGNAL FIRING" alert showed the stale raw price next to
+        # an SL computed relative to the real (different) entry -- e.g. a
+        # live BUY where the correct SL sat below the real entry (4420.02)
+        # but appeared to sit ABOVE the displayed raw-price "Entry"
+        # (4404.01), looking like a broken/backwards SL even though the
+        # real signal (entry_price+sl, used for execution) was consistent
+        # throughout. Reported live 9 ก.ย. 2026.
         alert_signal_ready(active_symbol, direction, sig_type, final_score,
-                           price, sl, tp_final, prz_name, session,
+                           entry_price, sl, tp_final, prz_name, session,
                            ea_executes=(active_symbol == SYMBOL))
     except Exception: pass
 
@@ -1085,9 +1099,13 @@ def compute_signal(
         # here too so a missing signal_log module/table can never affect
         # signal firing.
         from signal_log import log_signal
+        # Same fix as alert_signal_ready() above (entry_price, not the raw
+        # price) -- otherwise historical stats would persist a mismatched
+        # entry/SL pair for every signal an entry-adjustment feature
+        # actually touched.
         log_signal(
             symbol=active_symbol, direction=direction, category=sig_type,
-            entry=price, sl=sl, tp=tp_final, score=final_score,
+            entry=entry_price, sl=sl, tp=tp_final, score=final_score,
             pattern=prz_name, session=session,
             ea_executes=(active_symbol == SYMBOL),
             source=("main_loop" if active_symbol == SYMBOL else "extra_symbol"),
