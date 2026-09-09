@@ -37,6 +37,18 @@ PIVOT_N        = 3
 # data), so behavior never breaks, it just stops being the normal case.
 PRZ_BUFFER          = 3.0
 PRZ_BUFFER_ATR_MULT = float(os.getenv("ALPHA_PRZ_BUFFER_ATR_MULT", "0.5"))
+# [CHANGED 9 ก.ย. 2026, owner's request] SL buffer for detect_h1_spike_at_
+# kivanc()'s sweep-candle SL -- "จุด Stoploss อยู่ใต้เส้นคาดการณ์ sweep บน
+# kivanc ไป 2-3 usd" (SL should sit below the sweep-prediction line at the
+# Kivanc zone by 2-3 USD). Was a flat 0.30 -- too tight, sat almost right on
+# the sweep candle's own wick tip with near-zero room, so a routine bit of
+# noise beyond the sweep wick could stop the trade out before the real
+# reversal off that zone had a chance to play out. Owner asked this be
+# configurable rather than hardcoded. Scoped to ONLY this one call site --
+# resolve_sweep_wick_entry()'s M15 session-sweep buffer and
+# resolve_kivanc_minor_sl_fallback()'s minor-Kivanc-swing buffer are
+# separate, unrelated 0.30 buffers the owner confirmed should NOT change.
+H1_SPIKE_SL_BUFFER = float(os.getenv("ALPHA_H1_SPIKE_SL_BUFFER", "2.5"))
 BB_PERIOD      = 20
 BB_STD         = 2.0
 
@@ -268,7 +280,14 @@ def get_kivanc_swing_zone(df_1h: pd.DataFrame, pivot_n: int = 10):
             break
     return swing_high, swing_low
 
-def detect_h1_spike_at_kivanc(df_1h, direction, fib_zone_high, fib_zone_low, current_price=0.0) -> dict:
+def detect_h1_spike_at_kivanc(df_1h, direction, fib_zone_high, fib_zone_low,
+                               current_price=0.0, sl_buffer=None) -> dict:
+    """sl_buffer: dollars beyond the sweep candle's wick tip the returned SL
+    sits at (H1_SPIKE_SL_BUFFER / ALPHA_H1_SPIKE_SL_BUFFER by default, 2.5).
+    None (default) reads the module-level H1_SPIKE_SL_BUFFER so env-var
+    overrides apply automatically; pass an explicit float to override just
+    one call (e.g. tests)."""
+    buf = H1_SPIKE_SL_BUFFER if sl_buffer is None else sl_buffer
     if df_1h is None or len(df_1h) < 3:
         return {"found": False, "sl": 0, "tp1": 0, "volume_confirmed": False}
     c = df_1h.iloc[-2]
@@ -288,7 +307,7 @@ def detect_h1_spike_at_kivanc(df_1h, direction, fib_zone_high, fib_zone_low, cur
         if spike and at_kivanc:
             tp1_raw = round(min(c["open"], c["close"]), 2)
             tp1 = tp1_raw if tp1_raw > ref_price else round(ref_price + atr_h1 * 1.5, 2)
-            return {"found": True, "sl": round(c["low"]-0.30, 2), "tp1": tp1,
+            return {"found": True, "sl": round(c["low"]-buf, 2), "tp1": tp1,
                     "volume_confirmed": vol_confirmed}
     else:
         spike     = wick_up > 0.60
@@ -296,7 +315,7 @@ def detect_h1_spike_at_kivanc(df_1h, direction, fib_zone_high, fib_zone_low, cur
         if spike and at_kivanc:
             tp1_raw = round(max(c["open"], c["close"]), 2)
             tp1 = tp1_raw if tp1_raw < ref_price else round(ref_price - atr_h1 * 1.5, 2)
-            return {"found": True, "sl": round(c["high"]+0.30, 2), "tp1": tp1,
+            return {"found": True, "sl": round(c["high"]+buf, 2), "tp1": tp1,
                     "volume_confirmed": vol_confirmed}
     return {"found": False, "sl": 0, "tp1": 0, "volume_confirmed": False}
 
