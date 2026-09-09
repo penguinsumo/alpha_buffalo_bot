@@ -265,6 +265,30 @@ EXTRA_SYMBOLS = [s.strip() for s in _extra_symbols_raw.split(",") if s.strip()]
 _extra_notify_raw = os.getenv("ALPHA_EXTRA_SYMBOLS_NOTIFY_IDS", _notify_raw)
 EXTRA_NOTIFY_IDS = [x.strip() for x in _extra_notify_raw.split(",") if x.strip()]
 
+# [NEW, not opt-in, 9 ก.ย. 2026] Owner's explicit request: US100 still uses
+# the unverified QQQ x US100_QQQ_SCALE stopgap for its price data (see
+# US100_QQQ_SCALE below -- a real TwelveData-confirmed NDX/NQ ticker never
+# got confirmed), so broadcasting US100 signals into shared/other rooms
+# risks people acting on a price basis that isn't independently verified
+# yet. Restrict US100 messages to ADMIN_ID (the bot owner's own room) only,
+# until that's resolved properly -- every other extra symbol (BTCUSD,
+# JPN225) is completely unaffected and keeps broadcasting to the full
+# EXTRA_NOTIFY_IDS list exactly as before. ADMIN_ID always gets US100
+# content regardless of whether it's separately listed in
+# ALPHA_EXTRA_SYMBOLS_NOTIFY_IDS. Kill switch:
+# ALPHA_EXTRA_SYMBOL_US100_RESTRICT_TO_ADMIN=false restores broadcasting
+# US100 to every room again.
+US100_RESTRICT_TO_ADMIN = os.getenv(
+    "ALPHA_EXTRA_SYMBOL_US100_RESTRICT_TO_ADMIN", "true"
+).lower() in {"1", "true", "yes", "on"}
+
+
+def _extra_notify_targets(symbol: str) -> list:
+    """Which chat_id(s) a given extra symbol's messages should go to."""
+    if symbol == "US100" and US100_RESTRICT_TO_ADMIN:
+        return [str(ADMIN_ID)]
+    return EXTRA_NOTIFY_IDS
+
 # "เปิดทุก Session" -- extra symbols run every poll regardless of the main
 # is_market_open() weekend/session gate (BTC trades 24/7; gating it on
 # gold's weekend schedule would silently skip it for ~2 days every week).
@@ -499,7 +523,7 @@ def run_extra_symbol_pass(symbol: str):
         trend = analyze_trend(df_4h, df_1h, df_15m, symbol)
 
         if not EXTRA_TREND_DIGEST_ENABLED and _extra_trend_update_allowed(symbol):
-            for cid in EXTRA_NOTIFY_IDS:
+            for cid in _extra_notify_targets(symbol):
                 send_telegram(format_trend_message(trend), chat_id=cid)
             log(f"📊 [{symbol}] Trend: {trend.session} {trend.bias}")
 
@@ -513,7 +537,7 @@ def run_extra_symbol_pass(symbol: str):
                 pattern=sig.pattern, score=sig.score, session=trend.session,
                 symbol=symbol, ea_executes=False,
             )
-            for cid in EXTRA_NOTIFY_IDS:
+            for cid in _extra_notify_targets(symbol):
                 send_telegram(msg, chat_id=cid)
             log(f"[{symbol}] Signal: {sig.direction} {sig.signal_type} Score:{sig.score}")
         else:
@@ -545,9 +569,22 @@ def signal_loop():
                 # BUY/SELL signals above are already sent per symbol,
                 # immediately, unaffected by this.
                 if _extra_trends_this_pass and _extra_trend_digest_allowed():
+                    # US100 restriction applies here too (9 ก.ย. 2026) -- the
+                    # digest mixes multiple symbols into ONE message, so it's
+                    # split: ADMIN_ID always gets the full digest (every
+                    # symbol, including US100); every other room gets a
+                    # digest with US100 left out, or no digest at all this
+                    # pass if US100 was the only symbol with a trend result.
                     digest_msg = format_multi_symbol_trend_digest(_extra_trends_this_pass)
-                    for cid in EXTRA_NOTIFY_IDS:
-                        send_telegram(digest_msg, chat_id=cid)
+                    send_telegram(digest_msg, chat_id=ADMIN_ID)
+                    other_room_ids = [cid for cid in EXTRA_NOTIFY_IDS if str(cid) != str(ADMIN_ID)]
+                    if other_room_ids:
+                        non_us100_trends = [(s, t) for s, t in _extra_trends_this_pass
+                                             if not (s == "US100" and US100_RESTRICT_TO_ADMIN)]
+                        if non_us100_trends:
+                            digest_msg_other = format_multi_symbol_trend_digest(non_us100_trends)
+                            for cid in other_room_ids:
+                                send_telegram(digest_msg_other, chat_id=cid)
                     log(f"📊 [DIGEST] Trend update sent for {len(_extra_trends_this_pass)} symbol(s)")
 
             if not is_market_open():
