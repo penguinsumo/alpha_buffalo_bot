@@ -913,13 +913,66 @@ def handle_cmd(text, chat_id):
                             "(use /closeea first, then retry).", chat_id)
             except Exception as e:
                 send_telegram(f"testopen error: {e}", chat_id)
+    elif t == "/testalert" or t.startswith("/testalert "):
+        # [NEW, 9 ก.ย. 2026] Admin-only manual smoke test for the
+        # entry-consistency fix -- owner asked to SEE the "SESSION SIGNAL
+        # FIRING" alert (early_warning.alert_signal_ready()) actually show a
+        # correct/consistent Entry+SL pair in Telegram, not just trust the
+        # code-level fix. Deliberately offsets the simulated Entry away from
+        # the live price the same way ALPHA_SIGNAL_ZONE_BASED_ENTRY_SL
+        # clamps a real Entry into its scored Fib/PRZ zone -- exactly the
+        # scenario that exposed the bug (entry_price vs raw price mismatch).
+        # This calls alert_signal_ready() DIRECTLY -- it never touches
+        # compute_signal(), execution_bridge, or signal_log, so it queues no
+        # order and pollutes no historical stats. Message-format/consistency
+        # test only, unrelated to /testopen (which tests real order
+        # execution).
+        if str(chat_id) != str(ADMIN_ID):
+            send_telegram("Unauthorized", chat_id)
+        else:
+            try:
+                arg = t.split(" ", 1)[1].strip() if " " in t else "buy"
+                direction = "SELL" if arg == "sell" else "BUY"
+                df = get_ohlcv("15min", 2)
+                price = float(df["close"].iloc[-1]) if df is not None and len(df) else None
+                if price is None:
+                    send_telegram("testalert error: could not fetch a live XAUUSD price", chat_id)
+                else:
+                    offset = 5.0
+                    if direction == "BUY":
+                        entry_price = round(price + offset, 2)
+                        sl = round(entry_price - 2.0, 2)
+                        tp = round(entry_price + 6.0, 2)
+                        side_word = "below"
+                    else:
+                        entry_price = round(price - offset, 2)
+                        sl = round(entry_price + 2.0, 2)
+                        tp = round(entry_price - 6.0, 2)
+                        side_word = "above"
+                    from early_warning import alert_signal_ready
+                    alert_signal_ready(
+                        "XAUUSD", direction, "V4_SESSION", 0, entry_price, sl, tp,
+                        "TEST_ALERT", "manual /testalert", ea_executes=False,
+                    )
+                    send_telegram(
+                        f"🧪 testalert sent | live_price={price:,.2f} (simulated zone "
+                        f"offset, entry deliberately != live price) entry={entry_price:,.2f} "
+                        f"sl={sl:,.2f}\nCheck the SESSION SIGNAL FIRING message above -- SL "
+                        f"should sit {side_word} Entry (not the raw live price shown here). "
+                        f"No order was queued, no stats logged -- message-format test only.",
+                        chat_id)
+            except Exception as e:
+                send_telegram(f"testalert error: {e}", chat_id)
     elif t in ("/help", "/?"):
         help_msg = ("/status /price /health /context /setup\n"
                      "/quota /newlicense /newtrial /revoke /extend /licenses\n"
                      "/closeea (admin only -- force-close the live XAUUSD position)\n"
                      "/testopen [buy|sell] (admin only -- manual smoke test: queues a "
                      "real OPEN at the current price, small fixed SL/TP, to verify the "
-                     "EA pipeline end-to-end -- use on a DEMO account)")
+                     "EA pipeline end-to-end -- use on a DEMO account)\n"
+                     "/testalert [buy|sell] (admin only -- fires a simulated SESSION "
+                     "SIGNAL FIRING alert with Entry deliberately offset from live price, "
+                     "to verify Entry/SL now display consistently -- no order queued)")
         send_telegram(help_msg, chat_id)
 
 
