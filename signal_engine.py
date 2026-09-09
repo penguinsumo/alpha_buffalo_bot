@@ -622,6 +622,45 @@ def resolve_sweep_wick_entry(direction, sweep_valid, curr_high, curr_low, buffer
         return round(curr_low, 2), round(curr_low - buffer, 2)
 
 
+def passes_rrr_min_filter(symbol, entry_price, sl, tp1_price, enabled=True,
+                           min_ratio=2.0, symbols=None):
+    """
+    [NEW, not opt-in for BTC/NAS100 only, 9 ก.ย. 2026] Owner's explicit
+    request: "ตอนราคา BTC/NAS100 เป้า TP ต่ำกว่า RRR ไม่เอา" -- for the
+    symbols in `symbols` (default {"BTCUSD", "US100"}), reject a setup
+    outright when TP1 (the first/nearest partial target, the level the
+    owner confirmed the check should use out of TP1/TP2/TP final) offers
+    less reward than `min_ratio` x the SL's risk. Originally asked for as
+    a 1:1 floor, then raised to 2:1 (default) after reviewing a real live
+    example that passed 1:1 (RRR ~1.34:1, entry 29525.44 / sl 29487.1 /
+    tp1 29576.7 on US100) but the owner still judged it too tight. Exactly
+    at the floor (reward == risk * min_ratio) still passes -- "below" is
+    what gets rejected, not "not above". XAUUSD (the main traded SYMBOL)
+    and JPN225/GBPJPY/EURUSD are unaffected by default, since they're not
+    in the symbol set.
+
+    Never raises, and any missing/degenerate input (None values, SL equal
+    to entry) passes through True -- a data problem should never silently
+    block a signal that would otherwise have fired; it should surface as
+    whatever error handling already exists further up the call chain.
+    """
+    try:
+        if not enabled:
+            return True
+        target_symbols = symbols if symbols is not None else {"BTCUSD", "US100"}
+        if symbol not in target_symbols:
+            return True
+        if entry_price is None or sl is None or tp1_price is None:
+            return True
+        risk = abs(float(entry_price) - float(sl))
+        reward = abs(float(tp1_price) - float(entry_price))
+        if risk <= 0:
+            return True
+        return reward >= risk * min_ratio
+    except Exception:
+        return True
+
+
 def compute_signal(
     df_4h: pd.DataFrame,
     df_1h: pd.DataFrame,
@@ -1058,6 +1097,32 @@ def compute_signal(
                 {"pct":30,"price":tp2_price,"reason":"BB_Mid"},
                 {"pct":20,"price":tp_final, "reason":"PDL_PRZ"},
         ]
+
+    # [NEW, not opt-in for BTC/NAS100 only, 9 ก.ย. 2026] Owner's explicit
+    # request: block a BTC/NAS100 setup outright (before any alert/log/
+    # order, same standing as validate_scenario() above) when TP1 offers
+    # less reward than min_ratio x the SL's risk. Asked for as 1:1 first,
+    # then raised to 2:1 (default) after a real live example passed 1:1
+    # but was still judged too tight -- see passes_rrr_min_filter()'s
+    # docstring for the exact numbers. XAUUSD/JPN225/GBPJPY/EURUSD are
+    # unaffected by default. Kill switch: ALPHA_RRR_MIN_FILTER_ENABLED=
+    # false. Configurable symbol set (ALPHA_RRR_MIN_FILTER_SYMBOLS,
+    # default "BTCUSD,US100") and minimum ratio (ALPHA_RRR_MIN_RATIO,
+    # default 2.0).
+    rrr_min_filter_enabled = os.getenv("ALPHA_RRR_MIN_FILTER_ENABLED", "true").lower() in {
+        "1", "true", "yes", "on",
+    }
+    rrr_min_ratio = float(os.getenv("ALPHA_RRR_MIN_RATIO", "2.0"))
+    rrr_min_symbols = {s.strip() for s in os.getenv(
+        "ALPHA_RRR_MIN_FILTER_SYMBOLS", "BTCUSD,US100").split(",") if s.strip()}
+    if not passes_rrr_min_filter(active_symbol, entry_price, sl, tp1_price,
+                                  enabled=rrr_min_filter_enabled,
+                                  min_ratio=rrr_min_ratio, symbols=rrr_min_symbols):
+        risk = abs(entry_price - sl)
+        reward = abs(tp1_price - entry_price)
+        print(f"RRR filter blocked ({active_symbol}): TP1 reward {reward:.2f} < "
+              f"SL risk {risk:.2f} x {rrr_min_ratio} (need >= {rrr_min_ratio}:1)")
+        return None
 
     now = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
 
