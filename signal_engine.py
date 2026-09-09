@@ -27,7 +27,16 @@ TWELVE_API_KEY = os.getenv("TWELVE_API_KEY", "")
 SWEEP_LOOKBACK = 32
 BOS_LOOKBACK   = 5
 PIVOT_N        = 3
-PRZ_BUFFER     = 3.0
+# PRZ_BUFFER: flat-dollar fallback only (see _prz_buffer_for() below) -- was
+# the ONLY buffer used until the 9 ก.ย. 2026 fix. Root cause it was replaced
+# as the default: a flat $3.00 never scaled to either the timeframe (an H4
+# harmonic pattern's X-A-B-C-D legs span a much wider price range than an H1
+# one) or the symbol (this same scan_harmonic() call also runs for BTCUSD,
+# which trades ~$60,000+ -- $3.00 is negligible noise there). Kept as the
+# fallback for when ATR can't be computed (too little history, degenerate
+# data), so behavior never breaks, it just stops being the normal case.
+PRZ_BUFFER          = 3.0
+PRZ_BUFFER_ATR_MULT = float(os.getenv("ALPHA_PRZ_BUFFER_ATR_MULT", "0.5"))
 BB_PERIOD      = 20
 BB_STD         = 2.0
 
@@ -336,11 +345,52 @@ def find_pivots(df: pd.DataFrame, n: int = PIVOT_N):
             swings.append((i, float(l), "L"))
     return swings
 
+def _tf_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """Average high-low range over df's last `period` bars -- used to scale
+    the harmonic PRZ buffer to the REAL volatility of whichever timeframe
+    (and symbol) produced the pattern, instead of a flat dollar amount that
+    only ever made sense for one specific timeframe/symbol combination.
+    Returns 0.0 on too-little/degenerate data so the caller can fall back
+    to the flat PRZ_BUFFER."""
+    if df is None or len(df) < 2:
+        return 0.0
+    rng = (df["high"] - df["low"]).tail(period).mean()
+    return float(rng) if rng > 0 else 0.0
+
+def _prz_buffer_for(df: pd.DataFrame) -> float:
+    atr = _tf_atr(df)
+    return atr * PRZ_BUFFER_ATR_MULT if atr > 0 else PRZ_BUFFER
+
 def scan_harmonic(df_1h, df_4h) -> list:
+    """Scan H1 and H4 independently for 5-point XABCD harmonic patterns.
+    [CHANGED 9 ก.ย. 2026, owner-reported gap: "สิ่งที่ระบบต้องหาคือ harmonic
+    ระดับ h1 กับ h4 ที่ต่างกัน"] Previously scanned both timeframes but
+    merged the results into one undifferentiated list -- no record of which
+    timeframe a match came from, a flat $3.00 PRZ buffer regardless of
+    timeframe, and match order (which one compute_signal() actually uses,
+    via the first hit in this list) determined only by pattern-type
+    priority, with H1 silently winning ties over H4 purely because it was
+    first in the old `for df in [df_1h, df_4h]` loop -- never an intentional
+    "H1 beats H4" design choice. Fixed to match how the rest of this file
+    already treats these two timeframes (e.g. kivanc_score_raw below: H4
+    pinbar +3 outweighs H1 pinbar +2):
+      1. Each result now carries `tf` ("H1"/"H4") -- flows through prz_name
+         into the Telegram alert's Pattern line and signal_log so a match
+         is traceable to the timeframe it came from.
+      2. The PRZ buffer around D is now ATR-scaled per timeframe (see
+         _prz_buffer_for()) instead of a flat 3.0 -- naturally wider for H4
+         than H1, and correctly scaled per-symbol too (this same function
+         also runs for BTCUSD/US100/JPN225 via the extra-symbol scan).
+      3. Final ordering: pattern-type priority still comes first (Gartley/
+         Bat/ABCD=1, Butterfly/Crab/Cypher=2, DeepCrab=3), but within the
+         same priority tier H4 (the bigger-picture timeframe) now ranks
+         ahead of H1.
+    """
     results = []
-    for df in [df_1h, df_4h]:
+    for tf_name, df in [("H1", df_1h), ("H4", df_4h)]:
         swings = find_pivots(df)
         if len(swings) < 5: continue
+        buffer = _prz_buffer_for(df)
         for i in range(len(swings)-4):
             pts = swings[i:i+5]
             kinds = [p[2] for p in pts]
@@ -354,13 +404,19 @@ def scan_harmonic(df_1h, df_4h) -> list:
                    abs(r_CD-pat["CD"][0]) <= pat["CD"][1]:
                     results.append({
                         "name": name, "direction": pat["dir"], "priority": pat["p"],
-                        "prz_mid": D, "prz_high": D+PRZ_BUFFER, "prz_low": D-PRZ_BUFFER,
+                        "tf": tf_name,
+                        "prz_mid": D, "prz_high": D+buffer, "prz_low": D-buffer,
                     })
     seen = set(); final = []
     for r in results:
-        key = r["direction"]+"_"+str(round(r["prz_mid"],1))
+        # tf included in the key: an H1 and an H4 match that happen to land
+        # on a similar price are two genuinely different pieces of evidence,
+        # not duplicates -- only collapse repeats within the SAME timeframe
+        # (adjacent sliding XABCD windows on one scan often re-find the same D).
+        key = r["tf"]+"_"+r["direction"]+"_"+str(round(r["prz_mid"],1))
         if key not in seen: seen.add(key); final.append(r)
-    return sorted(final, key=lambda x: x["priority"])
+    tf_rank = {"H4": 0, "H1": 1}
+    return sorted(final, key=lambda x: (x["priority"], tf_rank.get(x["tf"], 1)))
 
 def get_context_adj(direction: str, score: int) -> tuple:
     total_adj = 0; reasons = []
@@ -734,7 +790,14 @@ def compute_signal(
     prz_opposite = None
     for prz in prz_list:
         if prz["direction"]==direction and prz["prz_low"]<=price<=prz["prz_high"]:
-            prz_match = prz; prz_name = prz["name"]
+            prz_match = prz
+            # [CHANGED 9 ก.ย. 2026] tf now folded into prz_name so which
+            # timeframe (H1/H4) the harmonic PRZ came from is visible
+            # everywhere prz_name already flows -- validate_scenario()'s
+            # pattern arg, the Telegram alert's 🦋 Pattern line
+            # (format_signal_message), CloudSignal.pattern, and
+            # signal_log's pattern column.
+            prz_name = f'{prz["name"]} ({prz["tf"]})'
             prz_priority = "primary" if prz["priority"]==1 else "secondary"
             break
     for prz in prz_list:
