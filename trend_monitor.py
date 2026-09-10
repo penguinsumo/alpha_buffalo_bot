@@ -19,7 +19,10 @@ from dataclasses import dataclass
 from typing import Optional
 
 from auto_fibo_entry import compute_auto_fibo, AutoFiboEstimate, DIRECTION_UP, DIRECTION_DOWN
-from signal_engine import scan_harmonic, get_kivanc_swing_zone, find_nearest_zone_rvol
+from signal_engine import (
+    scan_harmonic, get_kivanc_swing_zone, find_nearest_zone_rvol,
+    build_harmonic_forecast, compute_cascade,
+)
 
 # ── Logging Setup ──────────────────────────────────────────
 logger = logging.getLogger(__name__)
@@ -82,6 +85,29 @@ AUTO_FIBO_ENABLED = os.getenv("ALPHA_TREND_AUTO_FIBO_ENABLED", "true").lower() i
 # opt-in-but-default-ON precedent as AUTO_FIBO_ENABLED above -- never gates
 # bias/action. Set ALPHA_TREND_ZONE_RVOL_ENABLED=false to turn it off.
 ZONE_RVOL_ENABLED = os.getenv("ALPHA_TREND_ZONE_RVOL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+
+# ── Harmonic Pattern Forecast (big-picture "awareness") [ADDED 10 ก.ย.
+# 2026, owner's request] ─────────────────────────────────────────────
+# Owner: "จะทำยังงงัยให้ระบบเรา awareness เองได้ว่าเรามีถาะใหญ่เปนแบบที่
+# คุณหามา เพื่อที่จะคาดการณ์ทิศทางใน h4 แท่งต่อ แล้วกลายเปนภาพ new day โดยมี
+# harmonic เปนตัวชี้นำ" -- wants the system to routinely surface the same
+# "which harmonic pattern is price in right now, and what's next" view
+# used to anticipate the next H4 candle's direction. Confirmed scope:
+#   - Show the ACTIVE trend-aligned pattern (if price is inside one) + the
+#     NEXT trend-aligned target ahead + a confidence-ranked list of EVERY
+#     pattern found (see signal_engine.build_harmonic_forecast()).
+#   - Detail is OWNER-ONLY for now -- format_harmonic_forecast_message()
+#     below, sent to ADMIN_ID only by alpha_buffalo_signal.py, never
+#     broadcast to the general room. format_trend_message()'s own PRZ/
+#     Zone Strength blocks above are unaffected by this flag.
+#   - DOES affect this module's `action` field (escalates to
+#     PATTERN_ACTIVE below) -- but never touches compute_signal() or
+#     execution, which stay governed entirely by score_manager's own
+#     thresholds; this is a display/labeling change only.
+# Set ALPHA_TREND_HARMONIC_FORECAST_ENABLED=false to turn the whole thing
+# off (computation, action escalation, and the owner-only message all
+# stop).
+HARMONIC_FORECAST_ENABLED = os.getenv("ALPHA_TREND_HARMONIC_FORECAST_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 
 
 def _confirmed_swing_pivots(series: "pd.Series", pivot_bars: int, is_high: bool):
@@ -152,6 +178,7 @@ class TrendResult:
     timestamp: str
     auto_fibo: Optional[AutoFiboEstimate] = None   # opt-in, see AUTO_FIBO_ENABLED
     zone_rvol: Optional[dict] = None   # opt-in, see ZONE_RVOL_ENABLED -- {"support": {...}/None, "resistance": {...}/None}
+    harmonic_forecast: Optional[dict] = None   # opt-in, see HARMONIC_FORECAST_ENABLED -- {"active": {...}/None, "next_target": {...}/None, "ranked": [...]}
 
 
 def calc_tf_trend(df: pd.DataFrame, tf_name: str) -> TFTrend:
@@ -279,6 +306,16 @@ def analyze_trend(
         except Exception:
             auto_fibo = None
 
+    # Shared harmonic scan -- feeds BOTH Zone Strength (RVOL) and the
+    # Harmonic Forecast below, computed once (when either is enabled) so
+    # H1/H4 aren't scanned for patterns twice per cycle.
+    prz_list = None
+    if ZONE_RVOL_ENABLED or HARMONIC_FORECAST_ENABLED:
+        try:
+            prz_list = scan_harmonic(df_1h, df_4h)
+        except Exception:
+            prz_list = None
+
     # Support/Resistance RVOL (VSA volume strength, display-only) — see
     # ZONE_RVOL_ENABLED above. Pulls the nearest support/resistance from
     # ALL THREE existing zone sources and compares each zone-forming
@@ -288,17 +325,35 @@ def analyze_trend(
     zone_rvol = None
     if ZONE_RVOL_ENABLED:
         try:
-            prz_list = scan_harmonic(df_1h, df_4h)
             k_high, k_low, k_high_idx, k_low_idx = get_kivanc_swing_zone(
                 df_1h, pivot_n=10, return_idx=True
             )
             zone_rvol = find_nearest_zone_rvol(
-                price, prz_list, df_1h, df_4h,
+                price, prz_list or [], df_1h, df_4h,
                 k_high, k_low, k_high_idx, k_low_idx,
                 auto_fibo,
             )
         except Exception:
             zone_rvol = None
+
+    # Harmonic Pattern Forecast (big-picture "awareness", owner-only
+    # display) — see HARMONIC_FORECAST_ENABLED above. Uses the SAME
+    # cascade direction compute_signal() itself uses (compute_cascade()),
+    # so "active" here mirrors exactly which pattern a live V5_SNIPER
+    # would actually bind to. Skipped entirely when the cascade is
+    # NEUTRAL, same as compute_signal() (which returns None outright in
+    # that case) -- there is no trend-aligned direction to forecast
+    # against.
+    harmonic_forecast = None
+    if HARMONIC_FORECAST_ENABLED:
+        try:
+            cascade_direction = compute_cascade(df_4h, df_1h, df_15m)["direction"]
+            if cascade_direction != "NEUTRAL":
+                harmonic_forecast = build_harmonic_forecast(
+                    prz_list or [], cascade_direction, price, auto_fibo,
+                )
+        except Exception:
+            harmonic_forecast = None
 
     # ── Action ────────────────────────────────────────────
     pressures = [t.pressure for t in [m15, h1, h4] if t.pressure]
@@ -309,6 +364,22 @@ def analyze_trend(
     else:
         action = "WAIT_AND_SEE"
 
+    # Harmonic Pattern Forecast escalation [ADDED 10 ก.ย. 2026, owner's
+    # request: "ให้มีผลต่อ action ด้วย"] -- when price is CURRENTLY sitting
+    # inside a harmonic PRZ that agrees with the cascade direction (the
+    # exact same match compute_signal() would bind to for a live
+    # V5_SNIPER pattern label -- see harmonic_forecast["active"] above),
+    # that is a materially stronger, more specific setup than the generic
+    # HH/HL + pressure vote above, so it overrides WATCH_SETUP/
+    # WAIT_AND_SEE with PATTERN_ACTIVE. Display-only escalation -- see
+    # format_trend_message() below for the generic (non-admin-leaking)
+    # wording shown to the general room, and
+    # format_harmonic_forecast_message() for the owner-only detail behind
+    # it. Never touches compute_signal()/execution -- those stay governed
+    # entirely by score_manager's own thresholds, independent of this.
+    if HARMONIC_FORECAST_ENABLED and harmonic_forecast and harmonic_forecast.get("active"):
+        action = "PATTERN_ACTIVE"
+
     return TrendResult(
         symbol=symbol, session=session, price=price,
         m15=m15, h1=h1, h4=h4,
@@ -316,6 +387,7 @@ def analyze_trend(
         timestamp=now.strftime("%a %d %b %Y | %H:%M"),
         auto_fibo=auto_fibo,
         zone_rvol=zone_rvol,
+        harmonic_forecast=harmonic_forecast,
     )
 
 
@@ -395,12 +467,98 @@ def format_trend_message(tr: TrendResult) -> str:
     # Action
     if tr.action == "WAIT_AND_SEE":
         lines.append("⏳ Wait and See...")
+    elif tr.action == "PATTERN_ACTIVE":
+        # [ADDED 10 ก.ย. 2026] Escalated by the Harmonic Pattern Forecast
+        # (see HARMONIC_FORECAST_ENABLED / analyze_trend()) -- deliberately
+        # generic wording here, same as WATCH_SETUP below. The actual
+        # pattern name/PRZ/confidence behind this stays owner-only, see
+        # format_harmonic_forecast_message().
+        bias_sym = "Δ+" if tr.bias == "BUY" else ("Δ-" if tr.bias == "SELL" else "~")
+        lines.append(f"🔥 Strong {bias_sym} Setup Forming...")
     elif tr.action == "WATCH_SETUP":
         bias_sym = "Δ+" if tr.bias == "BUY" else ("Δ-" if tr.bias == "SELL" else "~")
         lines.append(f"👀 Watch for {bias_sym} Setup...")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━")
     lines.append("⚠️ Not financial advice. Trade at your own risk.")
+
+    return "\n".join(lines)
+
+
+def format_harmonic_forecast_message(tr: TrendResult) -> str:
+    """
+    [OWNER-ONLY, ADDED 10 ก.ย. 2026, owner's request] The full detail
+    behind PATTERN_ACTIVE above -- the active trend-aligned pattern (if
+    any), the next trend-aligned target ahead, and every harmonic pattern
+    scan_harmonic() currently sees on H1+H4, ranked by confidence.
+    Intentionally kept OUT of format_trend_message()'s broadcast to the
+    general room -- the owner asked this detail stay owner-only for now.
+    Caller is responsible for sending this ONLY to ADMIN_ID (see
+    alpha_buffalo_signal.py's signal_loop()).
+
+    confidence % is a RULE-BASED HEURISTIC (pattern-type tier + timeframe
+    weight + cascade-direction agreement + Auto Fibo big-picture zone
+    confluence -- see signal_engine.score_harmonic_confidence()), NOT a
+    backtested statistical win-rate or ML-calibrated probability. It's a
+    ranking aid to compare the patterns the system already found against
+    each other -- a proper backtested/learned version of this is a
+    separate "AI learning" roadmap item the owner mentioned, not this.
+    """
+    fc = tr.harmonic_forecast
+    if not fc or not fc.get("ranked"):
+        return (
+            f"🔮 {tr.symbol} HARMONIC FORECAST (Owner Only)\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "No trend-aligned harmonic pattern data available right now "
+            "(cascade neutral, or no pattern detected on H1/H4)."
+        )
+
+    lines = [
+        f"🔮 {tr.symbol} HARMONIC FORECAST (Owner Only)",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"💰 Price   : {tr.price:,.2f}",
+        "",
+    ]
+
+    active = fc.get("active")
+    if active:
+        lines.append("🎯 ACTIVE NOW (price inside this PRZ, matches trend):")
+        lines.append(
+            f"    {active['name']} ({active['tf']}) {active['direction']}  "
+            f"PRZ {active['prz_low']:,.2f}-{active['prz_high']:,.2f}  "
+            f"Confidence: {active['confidence']:.0f}%"
+        )
+    else:
+        lines.append("🎯 ACTIVE NOW : none — price isn't inside any trend-aligned PRZ yet")
+    lines.append("")
+
+    next_target = fc.get("next_target")
+    if next_target:
+        lines.append("⏭️ NEXT TARGET (nearest trend-aligned PRZ ahead):")
+        lines.append(
+            f"    {next_target['name']} ({next_target['tf']}) {next_target['direction']}  "
+            f"PRZ {next_target['prz_low']:,.2f}-{next_target['prz_high']:,.2f}  "
+            f"~{next_target['distance']:,.2f} away  Confidence: {next_target['confidence']:.0f}%"
+        )
+        lines.append("")
+
+    lines.append("📋 All detected patterns (ranked by confidence):")
+    for e in fc["ranked"][:8]:
+        if e["is_active"]:
+            flag = "  [ACTIVE]"
+        elif not e["matches_cascade"]:
+            flag = "  (counter-trend)"
+        else:
+            flag = ""
+        lines.append(
+            f"    {e['confidence']:>3.0f}%  {e['name']} ({e['tf']}) {e['direction']}  "
+            f"{e['prz_low']:,.2f}-{e['prz_high']:,.2f}{flag}"
+        )
+
+    lines.append("")
+    lines.append("⚠️ Confidence = rule-based heuristic (pattern tier + "
+                  "timeframe + cascade agreement + Auto Fibo confluence), "
+                  "NOT a backtested win-rate. Ranking aid only.")
 
     return "\n".join(lines)
 

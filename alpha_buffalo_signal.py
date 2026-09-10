@@ -18,7 +18,8 @@ from trend_monitor import (analyze_trend, format_trend_message,
                             format_signal_message, format_welcome_message,
                             should_send_trend_alert,
                             format_multi_symbol_trend_digest,
-                            format_reentry_message)
+                            format_reentry_message,
+                            format_harmonic_forecast_message)
 import binance_feed
 from binance_feed import get_ohlcv_binance
 from sweep_reentry import (sweep_reentry_enabled, sweep_reentry_watcher,
@@ -621,6 +622,17 @@ def signal_loop():
             if should_send_trend_alert(trend.session):
                 send_telegram(format_trend_message(trend))
                 log(f"📊 Trend: {trend.session} {trend.bias}")
+                # Harmonic Pattern Forecast detail [ADDED 10 ก.ย. 2026,
+                # owner's request] -- owner-only for now, NOT broadcast to
+                # NOTIFY_IDS/the general room (send_telegram() with no
+                # chat_id broadcasts; passing chat_id=ADMIN_ID restricts
+                # it to just the owner, same pattern used elsewhere in
+                # this file for owner-only sends). The general Trend
+                # Update above already carries a generic escalated action
+                # line (🔥 Strong Setup Forming) when this is active -- it
+                # just doesn't name the pattern/PRZ/confidence.
+                if trend.harmonic_forecast and trend.harmonic_forecast.get("ranked"):
+                    send_telegram(format_harmonic_forecast_message(trend), chat_id=ADMIN_ID)
 
             sig = compute_signal(df_4h, df_1h, df_15m)
             if sig:

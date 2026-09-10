@@ -563,6 +563,134 @@ def find_nearest_zone_rvol(
     return result
 
 
+# ═══════════════════════════════════════════════════════════
+# Harmonic Pattern Forecast / Confidence Ranking [ADDED 10 ก.ย. 2026,
+# owner's request]
+# ═══════════════════════════════════════════════════════════
+# Owner (after being shown a manual scan_harmonic() dump of every pattern
+# currently detected on XAUUSD H1/H4): "จะทำยังงงัยให้ระบบเราawarenessเองได้
+# ว่าเรามีถาะใหญ่เปนแบบที่คุณหามา เพื่อที่จะคาดการณื ทิศทางในh4แท่งต่อ แล้ว
+# กลายเปนภาพnewday โดยมี harmonicเปนตัวชี้นำ" -- wants the system itself to
+# routinely "see" the same big-picture harmonic view (which pattern price is
+# sitting in right now, and which one is next), to help anticipate the next
+# H4 candle's direction, with harmonic patterns as the guiding signal.
+# Scope confirmed via clarifying questions:
+#   1. Show BOTH the active pattern + the next un-reached target ahead, AND
+#      the full ranked list of every pattern scan_harmonic() found -- with a
+#      confidence % estimating which one is most likely "the" one.
+#   2. Detail stays OWNER-ONLY for now (not broadcast to the general room)
+#      -- see trend_monitor.format_harmonic_forecast_message() and its
+#      ADMIN_ID-only send site in alpha_buffalo_signal.py.
+#   3. SHOULD affect trend_monitor's `action` field (escalates to
+#      PATTERN_ACTIVE when a trend-aligned pattern is active) -- but never
+#      touches compute_signal()/execution, which stay governed entirely by
+#      score_manager's own thresholds.
+#
+# IMPORTANT: confidence here is a RULE-BASED HEURISTIC built from weighting
+# conventions this file already uses elsewhere (PATTERNS' own priority
+# tiers; kivanc_score_raw's existing H4>H1 weighting; cascade direction as
+# the master trend signal; Auto Fibo big-picture zone confluence) -- it is
+# NOT a backtested statistical win-rate or an ML-calibrated probability.
+# The owner separately mentioned the project has an "AI learning" track
+# planned to study real outcomes over time -- that is a proper backtested/
+# learned version of this idea and is out of scope here; this heuristic is
+# meant as an honest, explainable ranking aid in the meantime, not a
+# replacement for it, and is labeled as such everywhere it's displayed.
+
+HARMONIC_CONFIDENCE_TIER_PTS = {1: 40, 2: 25, 3: 10}   # PATTERNS' own "p" (Gartley/Bat/ABCD=1 tightest, ... DeepCrab=3 loosest)
+HARMONIC_CONFIDENCE_TF_PTS   = {"H4": 25, "H1": 15}    # bigger-picture timeframe weighted higher, same convention as kivanc_score_raw's H4(+3)>H1(+2)
+HARMONIC_CONFIDENCE_CASCADE_PTS    = 25   # pattern direction agrees with the current H4+H1 cascade direction
+HARMONIC_CONFIDENCE_CONFLUENCE_PTS = 10   # PRZ overlaps the Auto Fibo big-picture zone, same implied direction
+# Max score: 40 + 25 + 25 + 10 = 100 -- expressed as a 0-100 "%" for display.
+
+
+def score_harmonic_confidence(
+    prz: dict,
+    cascade_direction: str,
+    auto_fibo: Optional["AutoFiboEstimate"] = None,
+) -> float:
+    """Rule-based 0-100 confidence score for one scan_harmonic() match --
+    see the module-level docstring above for what this is and is NOT.
+    Never raises: any missing field is treated as the least-favorable case
+    (lowest tier, H1 weight, no bonuses)."""
+    tier = HARMONIC_CONFIDENCE_TIER_PTS.get(prz.get("priority"), 10)
+    tf_pts = HARMONIC_CONFIDENCE_TF_PTS.get(prz.get("tf"), 15)
+    cascade_pts = HARMONIC_CONFIDENCE_CASCADE_PTS if prz.get("direction") == cascade_direction else 0
+
+    confluence_pts = 0
+    if auto_fibo is not None:
+        af_dir = "BUY" if auto_fibo.direction == DIRECTION_UP else "SELL"
+        if af_dir == prz.get("direction"):
+            lo, hi = prz.get("prz_low"), prz.get("prz_high")
+            if lo is not None and hi is not None and hi >= auto_fibo.zone_lo and lo <= auto_fibo.zone_hi:
+                confluence_pts = HARMONIC_CONFIDENCE_CONFLUENCE_PTS
+
+    return float(tier + tf_pts + cascade_pts + confluence_pts)
+
+
+def build_harmonic_forecast(
+    prz_list: list,
+    cascade_direction: str,
+    price: float,
+    auto_fibo: Optional["AutoFiboEstimate"] = None,
+) -> dict:
+    """The full "big picture" harmonic forecast: which pattern (if any)
+    price is sitting in RIGHT NOW that agrees with the trend, which
+    trend-aligned pattern is the next one ahead, and every pattern
+    scan_harmonic() found ranked by confidence.
+
+    "active": mirrors EXACTLY what compute_signal() would bind to for a
+    live V5_SNIPER pattern label right now -- the FIRST match in
+    scan_harmonic()'s own priority/tf-ranked order whose direction agrees
+    with `cascade_direction` and whose PRZ currently contains `price` (same
+    iteration/condition as compute_signal()'s own prz_match loop). None
+    when no such match exists.
+
+    "next_target": among the trend-aligned patterns price has NOT reached
+    yet, whichever one is nearest by price distance -- the zone price would
+    plausibly move toward next, continuing the current cascade direction.
+    None when there is no trend-aligned pattern ahead.
+
+    "ranked": every pattern scan_harmonic() found (both directions, both
+    timeframes), each with its confidence %, sorted highest-confidence
+    first (ties broken by nearest distance) -- lets a caller see the full
+    picture, including a counter-trend pattern sitting at the same PRZ.
+
+    Never raises -- an empty/None prz_list simply returns everything None/[].
+    """
+    prz_list = prz_list or []
+
+    active_raw = None
+    for prz in prz_list:
+        lo, hi = prz.get("prz_low"), prz.get("prz_high")
+        if prz.get("direction") == cascade_direction and lo is not None and hi is not None and lo <= price <= hi:
+            active_raw = prz
+            break
+
+    ranked = []
+    for prz in prz_list:
+        conf = score_harmonic_confidence(prz, cascade_direction, auto_fibo)
+        lo, hi = prz.get("prz_low"), prz.get("prz_high")
+        mid = prz.get("prz_mid")
+        in_zone = lo is not None and hi is not None and lo <= price <= hi
+        ranked.append({
+            "name": prz.get("name"), "tf": prz.get("tf"), "direction": prz.get("direction"),
+            "prz_low": lo, "prz_high": hi, "prz_mid": mid,
+            "confidence": conf,
+            "distance": abs(price - mid) if mid is not None else None,
+            "in_zone": in_zone,
+            "matches_cascade": prz.get("direction") == cascade_direction,
+            "is_active": prz is active_raw,
+        })
+    ranked.sort(key=lambda e: (-e["confidence"], e["distance"] if e["distance"] is not None else float("inf")))
+
+    active = next((e for e in ranked if e["is_active"]), None)
+    upcoming = [e for e in ranked if e["matches_cascade"] and not e["in_zone"] and e["distance"] is not None]
+    next_target = min(upcoming, key=lambda e: e["distance"]) if upcoming else None
+
+    return {"active": active, "next_target": next_target, "ranked": ranked}
+
+
 def get_context_adj(direction: str, score: int) -> tuple:
     total_adj = 0; reasons = []
     for plugin, func_name, kwargs in [
