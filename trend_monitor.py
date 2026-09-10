@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from auto_fibo_entry import compute_auto_fibo, AutoFiboEstimate, DIRECTION_UP, DIRECTION_DOWN
+from signal_engine import scan_harmonic, get_kivanc_swing_zone, find_nearest_zone_rvol
 
 # ── Logging Setup ──────────────────────────────────────────
 logger = logging.getLogger(__name__)
@@ -68,6 +69,19 @@ STRUCTURE_UNKNOWN   = ""        # disabled, or not enough confirmed swings yet
 # alone would have shown the wrong zone. Set
 # ALPHA_TREND_AUTO_FIBO_ENABLED=false to restore the old display-off behavior.
 AUTO_FIBO_ENABLED = os.getenv("ALPHA_TREND_AUTO_FIBO_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+
+# ── Support/Resistance RVOL (VSA volume strength) display [ADDED 10 ก.ย.
+# 2026, owner's request] ─────────────────────────────────────────────
+# Owner: "เราจะมาดูเรื่องการเปรียบเทียบ VSA volume ระหว่างแนวรับกับแนวต้าน
+# เพื่อดูว่าแต่ละ zone ไหนมีความแข็งแกร่งมากกว่ากัน" -- compare VSA volume
+# between the nearest support (below price) and nearest resistance (above
+# price) across all three existing zone sources (harmonic PRZ, Kivanc swing
+# zone, Auto Fibo big-picture), to show which side is more likely to hold
+# ("ถ้าหลุดแนวหมายถึง SL ที่เราตั้งเอาไม่อยู่" -- if the level breaks, the SL
+# we set won't hold). Display-only in the Telegram Trend Update, same
+# opt-in-but-default-ON precedent as AUTO_FIBO_ENABLED above -- never gates
+# bias/action. Set ALPHA_TREND_ZONE_RVOL_ENABLED=false to turn it off.
+ZONE_RVOL_ENABLED = os.getenv("ALPHA_TREND_ZONE_RVOL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 
 
 def _confirmed_swing_pivots(series: "pd.Series", pivot_bars: int, is_high: bool):
@@ -137,6 +151,7 @@ class TrendResult:
     action:    str     # "WAIT_AND_SEE" / "WATCH_SETUP" / "SIGNAL_READY"
     timestamp: str
     auto_fibo: Optional[AutoFiboEstimate] = None   # opt-in, see AUTO_FIBO_ENABLED
+    zone_rvol: Optional[dict] = None   # opt-in, see ZONE_RVOL_ENABLED -- {"support": {...}/None, "resistance": {...}/None}
 
 
 def calc_tf_trend(df: pd.DataFrame, tf_name: str) -> TFTrend:
@@ -264,6 +279,27 @@ def analyze_trend(
         except Exception:
             auto_fibo = None
 
+    # Support/Resistance RVOL (VSA volume strength, display-only) — see
+    # ZONE_RVOL_ENABLED above. Pulls the nearest support/resistance from
+    # ALL THREE existing zone sources and compares each zone-forming
+    # candle's own volume against its recent average. Wrapped in
+    # try/except, same as auto_fibo above, so a computation issue can
+    # never break the Trend Update.
+    zone_rvol = None
+    if ZONE_RVOL_ENABLED:
+        try:
+            prz_list = scan_harmonic(df_1h, df_4h)
+            k_high, k_low, k_high_idx, k_low_idx = get_kivanc_swing_zone(
+                df_1h, pivot_n=10, return_idx=True
+            )
+            zone_rvol = find_nearest_zone_rvol(
+                price, prz_list, df_1h, df_4h,
+                k_high, k_low, k_high_idx, k_low_idx,
+                auto_fibo,
+            )
+        except Exception:
+            zone_rvol = None
+
     # ── Action ────────────────────────────────────────────
     pressures = [t.pressure for t in [m15, h1, h4] if t.pressure]
     if len(pressures) >= 2:
@@ -279,6 +315,7 @@ def analyze_trend(
         bias=bias, action=action,
         timestamp=now.strftime("%a %d %b %Y | %H:%M"),
         auto_fibo=auto_fibo,
+        zone_rvol=zone_rvol,
     )
 
 
@@ -326,6 +363,32 @@ def format_trend_message(tr: TrendResult) -> str:
         lines.append("")
         lines.append(f"🧭 PRZ Zone (Big Picture 4H) : {dir_label}")
         lines.append(f"    Zone : {af.zone_lo:,.2f} - {af.zone_hi:,.2f}  |  Ext : {af.ext_target:,.2f}")
+
+    # Support/Resistance RVOL (VSA volume strength, via ALPHA_TREND_ZONE_RVOL_ENABLED)
+    # — nearest support below price vs nearest resistance above price,
+    # each zone's own RVOL (that zone-forming candle's volume vs its recent
+    # average) as a read on how likely that level is to actually hold if
+    # price reaches it. Display-only, never changes bias/action.
+    if ZONE_RVOL_ENABLED and tr.zone_rvol:
+        sup = tr.zone_rvol.get("support")
+        res = tr.zone_rvol.get("resistance")
+        if sup or res:
+            lines.append("")
+            lines.append("📊 Zone Strength (RVOL)")
+            if sup:
+                rvol_str = f"{sup['rvol']:.2f}x" if sup["rvol"] is not None else "N/A"
+                lines.append(f"    🟢 Support    : {sup['level']:,.2f}  ({sup['source']})  RVOL {rvol_str}")
+            if res:
+                rvol_str = f"{res['rvol']:.2f}x" if res["rvol"] is not None else "N/A"
+                lines.append(f"    🔴 Resistance : {res['level']:,.2f}  ({res['source']})  RVOL {rvol_str}")
+            if sup and res and sup["rvol"] is not None and res["rvol"] is not None:
+                if sup["rvol"] > res["rvol"]:
+                    verdict = "Support looks stronger (higher RVOL) — more likely to hold"
+                elif res["rvol"] > sup["rvol"]:
+                    verdict = "Resistance looks stronger (higher RVOL) — more likely to hold"
+                else:
+                    verdict = "Support/Resistance about equal strength"
+                lines.append(f"    ⚖️ {verdict}")
 
     lines.append("")
 

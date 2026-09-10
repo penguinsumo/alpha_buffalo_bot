@@ -53,6 +53,16 @@ class AutoFiboEstimate:
     ext_target: float  # ext_level extension — reference target only
     zone_lo:    float
     zone_hi:    float
+    # [ADDED 10 ก.ย. 2026, owner's request -- support/resistance RVOL] The
+    # `.iloc` position (in the ORIGINAL df passed to compute_auto_fibo, not
+    # `window`/`safe_df`) of the swing_high/swing_low candle -- i.e. the
+    # actual bar this level was formed on, so a caller can look up that
+    # bar's real volume (RVOL: how strongly the market participated when
+    # this level was made) instead of only having the bare price. None when
+    # not computed (e.g. an AutoFiboEstimate built directly by a test/caller
+    # that doesn't need this).
+    swing_high_idx: Optional[int] = None
+    swing_low_idx:  Optional[int] = None
 
     def in_zone(self, price: float, tolerance: float = 0.0) -> bool:
         return (self.zone_lo - tolerance) <= price <= (self.zone_hi + tolerance)
@@ -93,6 +103,14 @@ def compute_auto_fibo(
     low_offset_from_end  = lows[::-1].argmin()
     high_more_recent = high_offset_from_end < low_offset_from_end
 
+    # .iloc position of each extremum IN THE ORIGINAL df -- window is
+    # safe_df.tail(N) and safe_df is df.iloc[:-1] (only the last row
+    # dropped), so a 0-indexed position within safe_df is the SAME position
+    # within df; only window's own start offset needs adding back.
+    _window_start = len(safe_df) - len(window)
+    swing_high_idx = _window_start + (len(window) - 1 - high_offset_from_end)
+    swing_low_idx  = _window_start + (len(window) - 1 - low_offset_from_end)
+
     if high_more_recent:
         direction  = DIRECTION_UP
         entry_near = swing_high - span * golden_low
@@ -113,4 +131,6 @@ def compute_auto_fibo(
         ext_target=ext_target,
         zone_lo=min(entry_near, entry_deep),
         zone_hi=max(entry_near, entry_deep),
+        swing_high_idx=swing_high_idx,
+        swing_low_idx=swing_low_idx,
     )

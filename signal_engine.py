@@ -261,23 +261,32 @@ def get_bb(df: pd.DataFrame) -> dict:
     std   = close.rolling(BB_PERIOD).std().iloc[-1]
     return {"upper": float(mid+BB_STD*std), "mid": float(mid), "lower": float(mid-BB_STD*std)}
 
-def get_kivanc_swing_zone(df_1h: pd.DataFrame, pivot_n: int = 10):
+def get_kivanc_swing_zone(df_1h: pd.DataFrame, pivot_n: int = 10, return_idx: bool = False):
+    """return_idx=False (default): unchanged, returns (swing_high, swing_low)
+    exactly as before -- every existing caller keeps working byte-identical.
+    return_idx=True [ADDED 10 ก.ย. 2026, owner's request -- support/
+    resistance RVOL]: also returns each swing's .iloc position in df_1h
+    (None if that swing was never found), so a caller can look up the real
+    candle that formed the level and measure its volume."""
     if df_1h is None or len(df_1h) < pivot_n * 2 + 1:
-        return None, None
+        return (None, None, None, None) if return_idx else (None, None)
     swing_high = None; swing_low = None
+    swing_high_idx = None; swing_low_idx = None
     highs = df_1h["high"].values; lows = df_1h["low"].values
     n = len(df_1h)
     for i in range(n - pivot_n - 1, pivot_n - 1, -1):
         if swing_high is None:
             if all(highs[i] > highs[i-j] for j in range(1, pivot_n+1)) and \
                all(highs[i] > highs[i+j] for j in range(1, pivot_n+1)):
-                swing_high = float(highs[i])
+                swing_high = float(highs[i]); swing_high_idx = i
         if swing_low is None:
             if all(lows[i] < lows[i-j] for j in range(1, pivot_n+1)) and \
                all(lows[i] < lows[i+j] for j in range(1, pivot_n+1)):
-                swing_low = float(lows[i])
+                swing_low = float(lows[i]); swing_low_idx = i
         if swing_high is not None and swing_low is not None:
             break
+    if return_idx:
+        return swing_high, swing_low, swing_high_idx, swing_low_idx
     return swing_high, swing_low
 
 def detect_h1_spike_at_kivanc(df_1h, direction, fib_zone_high, fib_zone_low,
@@ -415,6 +424,7 @@ def scan_harmonic(df_1h, df_4h) -> list:
             kinds = [p[2] for p in pts]
             if not all(kinds[j] != kinds[j+1] for j in range(4)): continue
             X,A,B,C,D = [p[1] for p in pts]
+            D_idx = pts[4][0]   # .iloc position of D's candle in this tf's own df
             XA = abs(A-X); AB = abs(B-A)
             if XA < 0.001 or AB < 0.001: continue
             r_AB = AB/XA; r_CD = abs(D-C)/XA
@@ -423,7 +433,7 @@ def scan_harmonic(df_1h, df_4h) -> list:
                    abs(r_CD-pat["CD"][0]) <= pat["CD"][1]:
                     results.append({
                         "name": name, "direction": pat["dir"], "priority": pat["p"],
-                        "tf": tf_name,
+                        "tf": tf_name, "d_idx": D_idx,
                         "prz_mid": D, "prz_high": D+buffer, "prz_low": D-buffer,
                     })
     seen = set(); final = []
@@ -436,6 +446,122 @@ def scan_harmonic(df_1h, df_4h) -> list:
         if key not in seen: seen.add(key); final.append(r)
     tf_rank = {"H4": 0, "H1": 1}
     return sorted(final, key=lambda x: (x["priority"], tf_rank.get(x["tf"], 1)))
+
+
+# ═══════════════════════════════════════════════════════════
+# Support/Resistance RVOL [ADDED 10 ก.ย. 2026, owner's request]
+# ═══════════════════════════════════════════════════════════
+# Owner: "เราจะมาดูเรื่องการเปรียบเทียบ VSA volume ระหว่างแนวรับกับแนวต้าน
+# เพื่อดูว่าแต่ละ zone ไหนมีความแข็งแกร่งมากกว่ากัน" (compare VSA volume
+# between support and resistance to see which zone is stronger), then on
+# the nearest-zone-only vs. every-zone question: "หาแนวรับที่ใกล้ที่สุดใต้
+# ราคา กับแนวต้านที่ใกล้ที่สุดเหนือราคา" (find the nearest support below
+# price and nearest resistance above price), reasoning "ถ้าหลุดแนวหมายถึง
+# SL ที่เราตั้งเอาไม่อยู่" (if the level breaks, the SL we set won't hold --
+# i.e. this is meant to gauge how much the SL/zone can actually be trusted).
+#
+# ALL THREE existing zone sources feed this -- their common denominator is
+# that every zone is ultimately anchored to one real candle (a pivot high/
+# low or an XABCD point D), so "the zone's volume" is that one candle's
+# volume, never an aggregate:
+#   - harmonic PRZ (scan_harmonic(): prz_mid @ d_idx, on H1 or H4 per `tf`)
+#   - Kivanc swing zone (get_kivanc_swing_zone(df_1h, pivot_n=10,
+#     return_idx=True): swing_high/swing_low @ their own idx, always H1)
+#   - Auto Fibo big-picture zone (compute_auto_fibo(df_4h) -- 9 ก.ย. 2026
+#     fix: swing_high/swing_low @ swing_high_idx/swing_low_idx, always H4)
+# Display-only for now (Telegram Trend Update) -- does NOT gate any signal.
+
+def compute_rvol_at_idx(df: pd.DataFrame, idx: Optional[int], window: int = 50) -> Optional[float]:
+    """RVOL (Relative Volume) of the candle at .iloc[idx] in df: that
+    candle's own volume divided by the average volume of the `window` bars
+    strictly BEFORE it (same averaging convention as is_high_volume() above
+    -- the candle itself is never included in its own average). >1.0 means
+    that candle traded on above-average volume (a "stronger" zone -- more
+    real participation when the level was made); <1.0 means below-average
+    (a "weaker" zone, more likely to be swept through).
+
+    Returns None (never raises) when df/idx is missing, idx is out of
+    range, there isn't at least 1 bar of history before idx, "volume" isn't
+    a column, or the average works out to <= 0 (no volume data to compare
+    against) -- the caller treats None as "can't tell," not "weak."
+    """
+    if df is None or idx is None or "volume" not in df.columns:
+        return None
+    if idx < 0 or idx >= len(df):
+        return None
+    lo = max(0, idx - window)
+    if lo >= idx:
+        return None
+    avg = float(df["volume"].iloc[lo:idx].mean())
+    if avg <= 0:
+        return None
+    candle_vol = float(df["volume"].iloc[idx])
+    return candle_vol / avg
+
+
+def find_nearest_zone_rvol(
+    price: float,
+    prz_list: list,
+    df_1h: Optional[pd.DataFrame],
+    df_4h: Optional[pd.DataFrame],
+    kivanc_swing_high: Optional[float],
+    kivanc_swing_low: Optional[float],
+    kivanc_high_idx: Optional[int],
+    kivanc_low_idx: Optional[int],
+    auto_fibo: Optional["AutoFiboEstimate"],
+    rvol_window: int = 50,
+) -> dict:
+    """Nearest support (below `price`) and nearest resistance (above
+    `price`) across every zone source this file already computes, each
+    with its RVOL. "Support" and "resistance" here are purely geometric
+    (a zone's own level vs. current price) -- a harmonic PRZ tagged
+    direction="SELL" still counts as support if its level happens to sit
+    below price; the harmonic direction label is not reused for this.
+
+    Returns {"support": entry_or_None, "resistance": entry_or_None} where
+    each entry is {"level", "source" (e.g. "Harmonic H4", "Kivanc H1",
+    "Auto Fibo H4"), "rvol" (float or None if it couldn't be computed)}.
+    Never raises -- a source with missing/degenerate data is simply
+    skipped, not treated as a crash.
+    """
+    candidates = []   # (level, df, idx, source_label)
+
+    for prz in (prz_list or []):
+        d_idx = prz.get("d_idx")
+        tf = prz.get("tf")
+        src_df = df_1h if tf == "H1" else df_4h if tf == "H4" else None
+        if prz.get("prz_mid") is not None and src_df is not None and d_idx is not None:
+            candidates.append((prz["prz_mid"], src_df, d_idx, f'Harmonic {tf}'))
+
+    if kivanc_swing_high is not None and kivanc_high_idx is not None:
+        candidates.append((kivanc_swing_high, df_1h, kivanc_high_idx, "Kivanc H1"))
+    if kivanc_swing_low is not None and kivanc_low_idx is not None:
+        candidates.append((kivanc_swing_low, df_1h, kivanc_low_idx, "Kivanc H1"))
+
+    if auto_fibo is not None:
+        if auto_fibo.swing_high is not None and getattr(auto_fibo, "swing_high_idx", None) is not None:
+            candidates.append((auto_fibo.swing_high, df_4h, auto_fibo.swing_high_idx, "Auto Fibo H4"))
+        if auto_fibo.swing_low is not None and getattr(auto_fibo, "swing_low_idx", None) is not None:
+            candidates.append((auto_fibo.swing_low, df_4h, auto_fibo.swing_low_idx, "Auto Fibo H4"))
+
+    support_candidates    = [c for c in candidates if c[0] < price]
+    resistance_candidates = [c for c in candidates if c[0] > price]
+
+    result = {"support": None, "resistance": None}
+    if support_candidates:
+        level, src_df, idx, source = max(support_candidates, key=lambda c: c[0])
+        result["support"] = {
+            "level": level, "source": source,
+            "rvol": compute_rvol_at_idx(src_df, idx, rvol_window),
+        }
+    if resistance_candidates:
+        level, src_df, idx, source = min(resistance_candidates, key=lambda c: c[0])
+        result["resistance"] = {
+            "level": level, "source": source,
+            "rvol": compute_rvol_at_idx(src_df, idx, rvol_window),
+        }
+    return result
+
 
 def get_context_adj(direction: str, score: int) -> tuple:
     total_adj = 0; reasons = []
