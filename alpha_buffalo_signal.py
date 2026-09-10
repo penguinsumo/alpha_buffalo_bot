@@ -16,7 +16,7 @@ import uvicorn
 from signal_engine import compute_signal, signal_to_dict, get_bb
 from trend_monitor import (analyze_trend, format_trend_message,
                             format_signal_message, format_welcome_message,
-                            should_send_trend_alert,
+                            should_send_trend_alert, get_session,
                             format_multi_symbol_trend_digest,
                             format_reentry_message,
                             format_harmonic_forecast_message)
@@ -231,6 +231,16 @@ _notify_raw     = os.getenv("NOTIFY_IDS", ADMIN_ID)
 NOTIFY_IDS      = [x.strip() for x in _notify_raw.split(",") if x.strip()]
 TELEGRAM_API    = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL","1800"))
+# [ADDED 11 ก.ย. 2026, owner's request: "ทำให้ state ไวขึ้นต่อราคาจริง"]
+# Cadence for the DEDICATED trend-only loop (see trend_loop() below) --
+# deliberately separate from POLL_INTERVAL above. The owner explicitly
+# chose a separate, faster loop over just lowering POLL_INTERVAL globally,
+# so Trend/Harmonic/Auto-Fibo state refreshes far more often WITHOUT also
+# speeding up compute_signal() (the live trading engine) or its TwelveData
+# API-call footprint. Default 300s (5 min) vs POLL_INTERVAL's 1800s (30
+# min) -- 6x fresher trend awareness at the cost of ~6x more OHLCV fetches
+# for trend purposes only.
+TREND_POLL_INTERVAL = int(os.getenv("ALPHA_TREND_POLL_INTERVAL_SEC", "300"))
 TWELVE_KEY      = os.getenv("TWELVE_API_KEY","")
 SYMBOL          = os.getenv("TRADE_SYMBOL","XAUUSD")
 
@@ -618,21 +628,15 @@ def signal_loop():
                 expire_stale_command()
             except Exception as e:
                 log(f"⚠️ execution_bridge check_tp1_and_queue_be error: {e}")
-            trend = analyze_trend(df_4h, df_1h, df_15m, SYMBOL)
-            if should_send_trend_alert(trend.session):
-                send_telegram(format_trend_message(trend))
-                log(f"📊 Trend: {trend.session} {trend.bias}")
-                # Harmonic Pattern Forecast detail [ADDED 10 ก.ย. 2026,
-                # owner's request] -- owner-only for now, NOT broadcast to
-                # NOTIFY_IDS/the general room (send_telegram() with no
-                # chat_id broadcasts; passing chat_id=ADMIN_ID restricts
-                # it to just the owner, same pattern used elsewhere in
-                # this file for owner-only sends). The general Trend
-                # Update above already carries a generic escalated action
-                # line (🔥 Strong Setup Forming) when this is active -- it
-                # just doesn't name the pattern/PRZ/confidence.
-                if trend.harmonic_forecast and trend.harmonic_forecast.get("ranked"):
-                    send_telegram(format_harmonic_forecast_message(trend), chat_id=ADMIN_ID)
+            # [CHANGED 11 ก.ย. 2026, owner's request] Trend Update
+            # computation/sending moved OUT of this loop entirely -- see
+            # trend_loop() below, running on its own faster, dedicated
+            # cadence (ALPHA_TREND_POLL_INTERVAL_SEC). This loop still
+            # needs a cheap session LABEL for format_signal_message()/
+            # log_signal() below, without paying for a full analyze_trend()
+            # call (real trend structure/Harmonic/Auto-Fibo state) that
+            # nothing here actually consumes.
+            session = get_session(datetime.now(BKK))
 
             sig = compute_signal(df_4h, df_1h, df_15m)
             if sig:
@@ -648,7 +652,7 @@ def signal_loop():
                 msg = format_signal_message(
                     direction=sig.direction, signal_type=sig.signal_type,
                     entry=sig.entry, sl=sig.sl, tp1=tp1, tp2=tp2,
-                    pattern=sig.pattern, score=sig.score, session=trend.session,
+                    pattern=sig.pattern, score=sig.score, session=session,
                 )
                 send_telegram(msg)
                 log(f"Signal: {sig.direction} {sig.signal_type} Score:{sig.score}")
@@ -709,7 +713,7 @@ def signal_loop():
                         log_signal(
                             symbol=SYMBOL, direction=r["direction"],
                             category="SWEEP_REENTRY", entry=r["entry"],
-                            sl=r["sl"], tp=r["tp"], session=trend.session,
+                            sl=r["sl"], tp=r["tp"], session=session,
                             ea_executes=True, trade1_entry=r["trade1_entry"],
                             source="reentry",
                         )
@@ -729,6 +733,57 @@ def signal_loop():
             log(traceback.format_exc())
         _touch_heartbeat()
         time.sleep(POLL_INTERVAL)
+
+def trend_loop():
+    """
+    [ADDED 11 ก.ย. 2026, owner's request] Dedicated background loop that
+    refreshes analyze_trend() (Trend/Harmonic Forecast/Auto Fibo state) on
+    its OWN, faster cadence (TREND_POLL_INTERVAL / ALPHA_TREND_POLL_INTERVAL_SEC,
+    default 300s/5min) -- fully decoupled from signal_loop()'s own
+    POLL_INTERVAL (default 1800s/30min). This is what actually makes
+    "state" responsive to real price ("ไวขึ้นต่อราคาจริง"): analyze_trend()
+    itself was never slow, it was just only ever RUN as often as the live
+    trading engine polled, which is a coarser cadence than trend awareness
+    needs. Splitting this into its own loop means compute_signal()'s own
+    cadence and TwelveData API-call footprint are completely untouched --
+    the owner explicitly chose this over just lowering POLL_INTERVAL
+    globally.
+
+    Sends go through should_send_trend_alert()'s event-driven gate only
+    (session change, bias/action flip, per-TF state change, harmonic
+    active-pattern change, or a new Auto Fibo swing) -- there is
+    deliberately NO periodic timer here, per the owner's explicit choice
+    ("Event-driven เท่านั้น") over a fixed-interval alternative. Being
+    polled more often just means those triggers are noticed sooner, not
+    that more messages get sent on a schedule.
+    """
+    log("🧭 Trend loop started")
+    while True:
+        try:
+            if is_market_open():
+                df_4h  = get_ohlcv("4h",  150)
+                df_1h  = get_ohlcv("1h",  200)
+                df_15m = get_ohlcv("15min", 96)
+                if df_4h is not None and df_1h is not None and df_15m is not None:
+                    trend = analyze_trend(df_4h, df_1h, df_15m, SYMBOL)
+                    if should_send_trend_alert(trend):
+                        send_telegram(format_trend_message(trend))
+                        log(f"📊 Trend: {trend.session} {trend.bias}")
+                        # Harmonic Pattern Forecast detail -- owner-only,
+                        # NOT broadcast to NOTIFY_IDS/the general room (see
+                        # format_harmonic_forecast_message()'s own
+                        # docstring). The general Trend Update above
+                        # already carries a generic escalated action line
+                        # (🔥 Strong Setup Forming) when this is active --
+                        # it just doesn't name the pattern/PRZ/confidence.
+                        if trend.harmonic_forecast and trend.harmonic_forecast.get("ranked"):
+                            send_telegram(format_harmonic_forecast_message(trend), chat_id=ADMIN_ID)
+                else:
+                    log("⚠️ trend_loop: ดึงข้อมูลไม่ครบ")
+        except Exception as e:
+            log(f"trend_loop error: {e}")
+            log(traceback.format_exc())
+        time.sleep(TREND_POLL_INTERVAL)
 
 def _signal_loop_watchdog():
     """
@@ -1017,6 +1072,7 @@ def _start_background_threads():
     log("🐃 ALPHA BUFFALO v5 background threads starting")
     threading.Thread(target=command_loop, daemon=True).start()
     threading.Thread(target=signal_loop, daemon=True).start()
+    threading.Thread(target=trend_loop, daemon=True).start()
     threading.Thread(target=_signal_loop_watchdog, daemon=True).start()
 
 if __name__ == "__main__":

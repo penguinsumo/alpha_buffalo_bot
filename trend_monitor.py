@@ -744,14 +744,99 @@ def get_session(dt: datetime) -> str:
     return "Asia"
 
 
-# ── Session Trigger ───────────────────────────────────────
-_last_session_alert = ""
+# ── Trend Alert Trigger [CHANGED 11 ก.ย. 2026, owner's request] ────────
+# Owner: "อยากให้ส่ง Trend Update ถี่ขึ้น (ไม่รอ session เปลี่ยน)" ->
+# "Event-driven เท่านั้น" (explicitly chose event-driven over a fixed
+# periodic timer). Signature changed from should_send_trend_alert(session:
+# str) to should_send_trend_alert(tr: TrendResult) -- session-change is
+# still ONE of the triggers (kept, unchanged in spirit), but it's no
+# longer the ONLY one. Now also fires on:
+#   - bias or action changing (e.g. WATCH_SETUP -> PATTERN_ACTIVE)
+#   - any per-TF state changing (M15/H1/H4 Impulse/Pullback/Sideways/etc)
+#   - the ACTIVE harmonic pattern changing (a new one becomes active, the
+#     active one clears, or a different one takes over the same slot)
+#   - a new Auto Fibo big-picture swing forming (direction or
+#     swing_high/swing_low shifting -- this is a genuinely rare event on
+#     its own, since compute_auto_fibo()'s rolling window only changes
+#     when a new extreme actually forms or the old one ages out)
+# No periodic timer -- purely event-driven, per the owner's explicit
+# choice. Meant to be paired with a DEDICATED, faster trend-only polling
+# loop (see alpha_buffalo_signal.py's trend_loop() /
+# ALPHA_TREND_POLL_INTERVAL_SEC) so these triggers are actually evaluated
+# often, without changing signal_loop()'s own POLL_INTERVAL or
+# compute_signal()'s API-call footprint -- the owner explicitly chose to
+# decouple trend refresh cadence from the live trading engine's cadence
+# rather than speeding both up together.
 
-def should_send_trend_alert(session: str) -> bool:
-    """ส่ง Trend Alert เมื่อ session เปลี่ยน"""
-    global _last_session_alert
-    if session != _last_session_alert:
-        _last_session_alert = session
-        logger.debug(f"Session alert triggered: {session}")
+
+@dataclass
+class _TrendAlertState:
+    session:             str = ""
+    bias:                str = ""
+    action:              str = ""
+    m15_state:           str = ""
+    h1_state:            str = ""
+    h4_state:            str = ""
+    harmonic_active_key: Optional[str] = None
+    auto_fibo_key:       Optional[str] = None
+
+
+_last_trend_alert_state = _TrendAlertState()
+
+
+def _harmonic_active_key(tr: "TrendResult") -> Optional[str]:
+    """A stable identity string for the CURRENTLY active harmonic pattern
+    (name+timeframe+direction+PRZ midpoint), or None when nothing is
+    active -- used to detect "the active pattern changed" without caring
+    about its confidence % (which can jitter slightly bar to bar even
+    when it's still fundamentally the same pattern)."""
+    if not tr.harmonic_forecast:
+        return None
+    active = tr.harmonic_forecast.get("active")
+    if not active:
+        return None
+    mid = active.get("prz_mid")
+    return f"{active.get('name')}|{active.get('tf')}|{active.get('direction')}|{round(mid, 1) if mid is not None else ''}"
+
+
+def _auto_fibo_key(tr: "TrendResult") -> Optional[str]:
+    """A stable identity string for the current Auto Fibo big-picture
+    swing (direction + swing extremes, rounded to avoid float-noise
+    false positives), or None when Auto Fibo isn't available this pass."""
+    if not tr.auto_fibo:
+        return None
+    return f"{tr.auto_fibo.direction}|{round(tr.auto_fibo.swing_high, 1)}|{round(tr.auto_fibo.swing_low, 1)}"
+
+
+def should_send_trend_alert(tr: "TrendResult") -> bool:
+    """True when anything meaningful changed since the last alert we
+    actually sent (not just since the last poll) -- see the module-level
+    comment above for the full trigger list. Updates the tracked
+    "last sent" state and returns True only when it actually changes."""
+    global _last_trend_alert_state
+    prev = _last_trend_alert_state
+    harmonic_key = _harmonic_active_key(tr)
+    fibo_key = _auto_fibo_key(tr)
+
+    changed = (
+        tr.session != prev.session
+        or tr.bias != prev.bias
+        or tr.action != prev.action
+        or tr.m15.state != prev.m15_state
+        or tr.h1.state != prev.h1_state
+        or tr.h4.state != prev.h4_state
+        or harmonic_key != prev.harmonic_active_key
+        or fibo_key != prev.auto_fibo_key
+    )
+    if changed:
+        _last_trend_alert_state = _TrendAlertState(
+            session=tr.session, bias=tr.bias, action=tr.action,
+            m15_state=tr.m15.state, h1_state=tr.h1.state, h4_state=tr.h4.state,
+            harmonic_active_key=harmonic_key, auto_fibo_key=fibo_key,
+        )
+        logger.debug(
+            f"Trend alert triggered: session={tr.session} bias={tr.bias} "
+            f"action={tr.action} harmonic={harmonic_key} fibo={fibo_key}"
+        )
         return True
     return False
