@@ -25,6 +25,9 @@ from binance_feed import get_ohlcv_binance
 from sweep_reentry import (sweep_reentry_enabled, sweep_reentry_watcher,
                             fib_618_reference)
 from signal_log import log_signal
+from harmonic_pattern_log import (log_new_active_pattern,
+                                    outcome_check_allowed as harmonic_outcome_check_allowed,
+                                    check_pending_harmonic_outcomes)
 
 BKK = timezone(timedelta(hours=7))
 
@@ -766,6 +769,26 @@ def trend_loop():
                 df_15m = get_ohlcv("15min", 96)
                 if df_4h is not None and df_1h is not None and df_15m is not None:
                     trend = analyze_trend(df_4h, df_1h, df_15m, SYMBOL)
+                    # [NEW, not opt-in, 11 ก.ย. 2026] Phase 2 of the "จำและ
+                    # คาดการณ์แม่นขึ้น" harmonic-accuracy strategy: log every
+                    # NEW active pattern (deduped in-process, see
+                    # harmonic_pattern_log.log_new_active_pattern()) so its
+                    # eventual WIN/LOSS/EXPIRED outcome can later calibrate
+                    # score_harmonic_confidence() with real data (Phase 3,
+                    # not built yet). Independent of should_send_trend_alert()
+                    # below -- logging is about building history, not about
+                    # whether a Telegram message goes out this cycle.
+                    try:
+                        log_new_active_pattern(SYMBOL, trend.harmonic_forecast)
+                    except Exception as e:
+                        log(f"harmonic_pattern_log log error: {e}")
+                    if harmonic_outcome_check_allowed():
+                        try:
+                            n = check_pending_harmonic_outcomes(get_ohlcv)
+                            if n:
+                                log(f"🔮 harmonic_pattern_log resolved {n} pattern(s)")
+                        except Exception as e:
+                            log(f"harmonic_pattern_log outcome-check error: {e}")
                     if should_send_trend_alert(trend):
                         send_telegram(format_trend_message(trend))
                         log(f"📊 Trend: {trend.session} {trend.bias}")

@@ -604,6 +604,18 @@ HARMONIC_CONFIDENCE_CONFLUENCE_PTS = 10   # PRZ overlaps the Auto Fibo big-pictu
 # Max score: 40 + 25 + 25 + 10 = 100 -- expressed as a 0-100 "%" for display.
 
 
+def _has_auto_fibo_confluence(prz: dict, auto_fibo: Optional["AutoFiboEstimate"]) -> bool:
+    """Shared by score_harmonic_confidence() and build_harmonic_forecast()
+    so the two never drift apart on what counts as 'confluence'."""
+    if auto_fibo is None:
+        return False
+    af_dir = "BUY" if auto_fibo.direction == DIRECTION_UP else "SELL"
+    if af_dir != prz.get("direction"):
+        return False
+    lo, hi = prz.get("prz_low"), prz.get("prz_high")
+    return lo is not None and hi is not None and hi >= auto_fibo.zone_lo and lo <= auto_fibo.zone_hi
+
+
 def score_harmonic_confidence(
     prz: dict,
     cascade_direction: str,
@@ -616,14 +628,7 @@ def score_harmonic_confidence(
     tier = HARMONIC_CONFIDENCE_TIER_PTS.get(prz.get("priority"), 10)
     tf_pts = HARMONIC_CONFIDENCE_TF_PTS.get(prz.get("tf"), 15)
     cascade_pts = HARMONIC_CONFIDENCE_CASCADE_PTS if prz.get("direction") == cascade_direction else 0
-
-    confluence_pts = 0
-    if auto_fibo is not None:
-        af_dir = "BUY" if auto_fibo.direction == DIRECTION_UP else "SELL"
-        if af_dir == prz.get("direction"):
-            lo, hi = prz.get("prz_low"), prz.get("prz_high")
-            if lo is not None and hi is not None and hi >= auto_fibo.zone_lo and lo <= auto_fibo.zone_hi:
-                confluence_pts = HARMONIC_CONFIDENCE_CONFLUENCE_PTS
+    confluence_pts = HARMONIC_CONFIDENCE_CONFLUENCE_PTS if _has_auto_fibo_confluence(prz, auto_fibo) else 0
 
     return float(tier + tf_pts + cascade_pts + confluence_pts)
 
@@ -656,7 +661,18 @@ def build_harmonic_forecast(
     first (ties broken by nearest distance) -- lets a caller see the full
     picture, including a counter-trend pattern sitting at the same PRZ.
 
-    Never raises -- an empty/None prz_list simply returns everything None/[].
+    "tf_conflict": [ADDED 11 ก.ย. 2026, Phase 1 of the owner's "จำและ
+    คาดการณ์แม่นขึ้น" harmonic-accuracy strategy] True when the single
+    highest-confidence pattern on H4 and the single highest-confidence
+    pattern on H1 (regardless of direction or whether either is
+    trend-aligned/in-zone -- i.e. "what is each timeframe's best guess
+    right now") point in OPPOSITE directions. False when they agree, or
+    when either timeframe currently has no detected pattern at all (no
+    conflict to report). This is a heads-up flag only -- it does not
+    change `active`/`next_target` selection or touch compute_signal().
+
+    Never raises -- an empty/None prz_list simply returns everything None/[]
+    (tf_conflict included, since with no data there's nothing to conflict).
     """
     prz_list = prz_list or []
 
@@ -675,12 +691,14 @@ def build_harmonic_forecast(
         in_zone = lo is not None and hi is not None and lo <= price <= hi
         ranked.append({
             "name": prz.get("name"), "tf": prz.get("tf"), "direction": prz.get("direction"),
+            "priority": prz.get("priority"),
             "prz_low": lo, "prz_high": hi, "prz_mid": mid,
             "confidence": conf,
             "distance": abs(price - mid) if mid is not None else None,
             "in_zone": in_zone,
             "matches_cascade": prz.get("direction") == cascade_direction,
             "is_active": prz is active_raw,
+            "auto_fibo_confluence": _has_auto_fibo_confluence(prz, auto_fibo),
         })
     ranked.sort(key=lambda e: (-e["confidence"], e["distance"] if e["distance"] is not None else float("inf")))
 
@@ -688,7 +706,11 @@ def build_harmonic_forecast(
     upcoming = [e for e in ranked if e["matches_cascade"] and not e["in_zone"] and e["distance"] is not None]
     next_target = min(upcoming, key=lambda e: e["distance"]) if upcoming else None
 
-    return {"active": active, "next_target": next_target, "ranked": ranked}
+    h4_top = next((e for e in ranked if e["tf"] == "H4"), None)
+    h1_top = next((e for e in ranked if e["tf"] == "H1"), None)
+    tf_conflict = bool(h4_top and h1_top and h4_top["direction"] != h1_top["direction"])
+
+    return {"active": active, "next_target": next_target, "ranked": ranked, "tf_conflict": tf_conflict}
 
 
 def get_context_adj(direction: str, score: int) -> tuple:

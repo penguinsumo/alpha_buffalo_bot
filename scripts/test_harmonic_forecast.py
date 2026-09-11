@@ -109,12 +109,12 @@ check("score: totally empty dict never raises",
 # 2. build_harmonic_forecast()
 # ═══════════════════════════════════════════════════════════
 
-check("build_harmonic_forecast: empty prz_list -> everything None/[]",
+check("build_harmonic_forecast: empty prz_list -> everything None/[]/False",
       build_harmonic_forecast([], "BUY", 100.0, None) ==
-      {"active": None, "next_target": None, "ranked": []})
+      {"active": None, "next_target": None, "ranked": [], "tf_conflict": False})
 check("build_harmonic_forecast: None prz_list -> never raises, same as []",
       build_harmonic_forecast(None, "BUY", 100.0, None) ==
-      {"active": None, "next_target": None, "ranked": []})
+      {"active": None, "next_target": None, "ranked": [], "tf_conflict": False})
 
 # Fixture: price=100. Four candidates --
 #  A: priority 2, H1, BUY, in-zone [95-105]   (earlier in list, lower tier)
@@ -166,6 +166,50 @@ check("build_harmonic_forecast: only a counter-trend candidate exists -> "
       "active=None, next_target=None, but it's still in 'ranked'",
       fc_none["active"] is None and fc_none["next_target"] is None
       and len(fc_none["ranked"]) == 1)
+
+check("build_harmonic_forecast: ranked entries carry 'priority' straight "
+      "through from the raw prz dict (needed for harmonic_pattern_log "
+      "bucketing later)",
+      next(e for e in fc["ranked"] if e["name"] == "A_Bat")["priority"] == 2)
+check("build_harmonic_forecast: ranked entries carry 'auto_fibo_confluence' "
+      "(False here since no auto_fibo was passed)",
+      all(e["auto_fibo_confluence"] is False for e in fc["ranked"]))
+fc_confluence = build_harmonic_forecast([prz_B], "BUY", 100.0, af_buy_overlap)
+check("build_harmonic_forecast: 'auto_fibo_confluence' is True on a ranked "
+      "entry when score_harmonic_confidence() would also award the "
+      "confluence bonus for it (same _has_auto_fibo_confluence() helper)",
+      fc_confluence["ranked"][0]["auto_fibo_confluence"] is True)
+
+
+# ═══════════════════════════════════════════════════════════
+# 2b. build_harmonic_forecast() -- tf_conflict
+# ═══════════════════════════════════════════════════════════
+
+# A (H1, BUY) is the only H1 candidate and the only match overall in the
+# earlier fixture -- no H4 candidate at all there once D is excluded... but
+# the full fc fixture ([A,B,C,D]) DOES have both H4 entries (B=BUY, D=SELL)
+# and both H1 entries (A=BUY, C=BUY) -- best-by-confidence-per-TF: H4 top is
+# B (BUY, higher confidence than D since D loses the cascade bonus), H1 top
+# is whichever of A/C ranks higher (both BUY) -- so no conflict expected.
+check("build_harmonic_forecast: H4-top (B, BUY) and H1-top (A or C, BUY) "
+      "agree -> tf_conflict False",
+      fc["tf_conflict"] is False)
+
+# Force an actual conflict: H4's only/best candidate is SELL, H1's only/
+# best candidate is BUY.
+prz_h4_sell_only = {"name": "H4_Sell", "tf": "H4", "direction": "SELL", "priority": 1,
+                     "prz_low": 200.0, "prz_high": 210.0, "prz_mid": 205.0}
+prz_h1_buy_only  = {"name": "H1_Buy",  "tf": "H1", "direction": "BUY",  "priority": 1,
+                     "prz_low": 95.0,  "prz_high": 105.0, "prz_mid": 100.0}
+fc_conflict = build_harmonic_forecast([prz_h4_sell_only, prz_h1_buy_only], "BUY", 100.0, None)
+check("build_harmonic_forecast: H4's best pattern (SELL) disagrees with "
+      "H1's best pattern (BUY) -> tf_conflict True",
+      fc_conflict["tf_conflict"] is True)
+
+fc_h4_only = build_harmonic_forecast([prz_h4_sell_only], "BUY", 100.0, None)
+check("build_harmonic_forecast: only H4 has a candidate (no H1 data at "
+      "all) -> tf_conflict False, nothing to compare against",
+      fc_h4_only["tf_conflict"] is False)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -222,6 +266,24 @@ msg_admin = tm.format_harmonic_forecast_message(tr_active)
 check("format_harmonic_forecast_message(): owner-only message DOES name "
       "the active pattern, its PRZ and a confidence %",
       "Test_Gartley" in msg_admin and "ACTIVE NOW" in msg_admin and "Confidence" in msg_admin)
+check("format_harmonic_forecast_message(): no TF CONFLICT warning when "
+      "tf_conflict is False (single H1 pattern here, nothing to conflict "
+      "with)",
+      "TF CONFLICT" not in msg_admin)
+
+import types
+dummy_ranked_entry = {"name": "Dummy", "tf": "H4", "direction": "BUY", "priority": 1,
+                       "prz_low": 1990.0, "prz_high": 2000.0, "prz_mid": 1995.0,
+                       "confidence": 65.0, "distance": 5.0, "in_zone": False,
+                       "matches_cascade": True, "is_active": False, "auto_fibo_confluence": False}
+tr_conflict = types.SimpleNamespace(
+    symbol="XAUUSD", price=2000.0,
+    harmonic_forecast={"active": None, "next_target": None, "ranked": [dummy_ranked_entry], "tf_conflict": True},
+)
+msg_conflict = tm.format_harmonic_forecast_message(tr_conflict)
+check("format_harmonic_forecast_message(): tf_conflict True -> TF CONFLICT "
+      "warning line shown",
+      "TF CONFLICT" in msg_conflict)
 
 # Cascade NEUTRAL -> compute_signal() itself would bail out (direction ==
 # NEUTRAL: return None) so there is nothing meaningful to forecast against
@@ -294,6 +356,14 @@ src_runtime = inspect.getsource(runtime)
 check("alpha_buffalo_signal.py: owner-only forecast send site uses "
       "chat_id=ADMIN_ID (never a bare broadcast to NOTIFY_IDS)",
       "format_harmonic_forecast_message(trend), chat_id=ADMIN_ID" in src_runtime)
+check("alpha_buffalo_signal.py: trend_loop() logs every new active "
+      "harmonic pattern via harmonic_pattern_log.log_new_active_pattern() "
+      "(Phase 2 of the harmonic-accuracy strategy)",
+      "log_new_active_pattern(SYMBOL, trend.harmonic_forecast)" in src_runtime)
+check("alpha_buffalo_signal.py: trend_loop() also checks pending harmonic "
+      "outcomes, throttled via harmonic_outcome_check_allowed()",
+      "harmonic_outcome_check_allowed()" in src_runtime
+      and "check_pending_harmonic_outcomes(get_ohlcv)" in src_runtime)
 
 
 print()

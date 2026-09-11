@@ -517,8 +517,14 @@ def format_harmonic_forecast_message(tr: TrendResult) -> str:
         f"🔮 {tr.symbol} HARMONIC FORECAST (Owner Only)",
         "━━━━━━━━━━━━━━━━━━━━━",
         f"💰 Price   : {tr.price:,.2f}",
-        "",
     ]
+    if fc.get("tf_conflict"):
+        lines.append(
+            "⚠️ TF CONFLICT: H1's best pattern and H4's best pattern "
+            "point in opposite directions right now -- treat the big "
+            "picture as unsettled until they agree."
+        )
+    lines.append("")
 
     active = fc.get("active")
     if active:
