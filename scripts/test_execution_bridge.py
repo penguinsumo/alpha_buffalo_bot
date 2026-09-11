@@ -35,6 +35,7 @@ Exits non-zero on any failure.
 import inspect
 import os
 import sys
+import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -296,6 +297,98 @@ check("check_tp1_and_queue_be(): never overwrites an unrelated already-pending c
 
 
 # ═══════════════════════════════════════════════════════════
+# 6b. check_tp1_and_queue_be() -- Heikin Ashi merge (11 ก.ย. 2026)
+# ═══════════════════════════════════════════════════════════
+
+def _ha_df(prices):
+    opens = [prices[0]] + prices[:-1]
+    highs = [max(o, c) + 0.1 for o, c in zip(opens, prices)]
+    lows = [min(o, c) - 0.1 for o, c in zip(opens, prices)]
+    return pd.DataFrame({"open": opens, "high": highs, "low": lows, "close": prices})
+
+
+df_reversal_down = _ha_df([4408, 4406, 4404, 4402, 4400, 4398])  # clean downtrend -> 2 red HA at the end
+df_no_reversal    = _ha_df([4390, 4395, 4400, 4405, 4408, 4411])  # clean uptrend, no reversal
+
+reset()
+eb.queue_open_command(direction="BUY", entry=4400.0, sl=4390.0, tp_final=4420.0,
+                       be_price=4400.10, partial=[{"pct": 50, "price": 4410.0, "reason": "x"}])
+eb.record_fill(eb._open_position["signal_id"], "4", 4400.5)
+eb.record_ack(eb._pending_command["command_id"], True)
+check("check_tp1_and_queue_be(): price alone hasn't reached TP1 (4406 < 4410) "
+      "and df_15m omitted -> still no-op, exact previous behavior preserved",
+      eb.check_tp1_and_queue_be(4406.0) is False)
+check("check_tp1_and_queue_be(): price hasn't reached TP1 but df_15m shows no "
+      "Heikin Ashi reversal either -> still no-op",
+      eb.check_tp1_and_queue_be(4406.0, df_no_reversal) is False)
+check("check_tp1_and_queue_be(): price hasn't reached TP1 (4406 < 4410) BUT the "
+      "last 2 M15 Heikin Ashi candles reversed against the BUY -> fires anyway",
+      eb.check_tp1_and_queue_be(4406.0, df_reversal_down) is True
+      and eb._pending_command["action"] == "PARTIAL_CLOSE_MOVE_BE"
+      and eb._pending_command["new_sl"] == 4400.10
+      and "Heikin Ashi" in eb._pending_command["reason"])
+check("check_tp1_and_queue_be(): Heikin-Ashi-triggered fire also sets "
+      "be_issued, same as a price-triggered one",
+      eb._open_position["be_issued"] is True)
+
+# A broken/garbage df_15m must never crash the check -- price-only fallback still works.
+reset()
+eb.queue_open_command(direction="BUY", entry=4400.0, sl=4390.0, tp_final=4420.0,
+                       be_price=4400.10, partial=[{"pct": 50, "price": 4410.0, "reason": "x"}])
+eb.record_fill(eb._open_position["signal_id"], "5", 4400.5)
+eb.record_ack(eb._pending_command["command_id"], True)
+check("check_tp1_and_queue_be(): garbage df_15m (missing columns) never "
+      "raises -- falls back to price-only, still no-op below TP1",
+      eb.check_tp1_and_queue_be(4406.0, pd.DataFrame({"nonsense": [1, 2, 3]})) is False)
+check("check_tp1_and_queue_be(): with the same garbage df_15m, price reaching "
+      "TP1 still fires normally",
+      eb.check_tp1_and_queue_be(4410.0, pd.DataFrame({"nonsense": [1, 2, 3]})) is True)
+
+
+# ═══════════════════════════════════════════════════════════
+# 6c. track_manual_position() / /trackmanual
+# ═══════════════════════════════════════════════════════════
+
+reset()
+check("track_manual_position(): registers a manual BUY as filled immediately "
+      "(no OPEN/fill round-trip needed)",
+      eb.track_manual_position("BUY", 4302.50, 4295.00, tp1=4310.00) is True
+      and eb._open_position["filled"] is True
+      and eb._open_position["manual"] is True
+      and eb._open_position["direction"] == "BUY"
+      and eb._open_position["entry"] == 4302.50
+      and eb._open_position["tp1"] == 4310.00)
+check("track_manual_position(): default be_price is entry+0.10 for a BUY, "
+      "same convention as /testopen",
+      eb._open_position["be_price"] == 4302.60)
+check("track_manual_position(): never queues anything to the EA -- no "
+      "pending command created",
+      eb._pending_command is None)
+check("track_manual_position(): the newly-tracked manual position is "
+      "immediately eligible for check_tp1_and_queue_be()",
+      eb.check_tp1_and_queue_be(4310.0) is True)
+
+reset()
+check("track_manual_position(): refuses when a position is already tracked "
+      "(same one-at-a-time guard as queue_open_command())",
+      eb.track_manual_position("BUY", 4302.50, 4295.00, tp1=4310.00) is True
+      and eb.track_manual_position("SELL", 4400.0, 4410.0, tp1=4380.0) is False)
+
+reset()
+check("track_manual_position(): invalid direction -> False, never raises",
+      eb.track_manual_position("SIDEWAYS", 4302.50, 4295.00, tp1=4310.00) is False)
+check("track_manual_position(): missing entry/sl/tp1 -> False, never raises",
+      eb.track_manual_position("BUY", None, 4295.00, tp1=4310.00) is False
+      and eb.track_manual_position("BUY", 4302.50, None, tp1=4310.00) is False
+      and eb.track_manual_position("BUY", 4302.50, 4295.00, tp1=None) is False)
+
+reset()
+check("track_manual_position(): default be_price for a SELL is entry-0.10",
+      eb.track_manual_position("SELL", 4400.0, 4410.0, tp1=4380.0) is True
+      and eb._open_position["be_price"] == 4399.90)
+
+
+# ═══════════════════════════════════════════════════════════
 # 7. expire_stale_command() -- the wall-clock backstop for a dead EA
 # ═══════════════════════════════════════════════════════════
 
@@ -349,8 +442,9 @@ check("expire_stale_command(): after expiry, a brand-new signal can queue again"
 import alpha_buffalo_signal as runtime
 
 src = inspect.getsource(runtime.signal_loop)
-check("signal_loop() calls check_tp1_and_queue_be() on every price tick",
-      "check_tp1_and_queue_be(price)" in src)
+check("signal_loop() calls check_tp1_and_queue_be() on every price tick, "
+      "now passing df_15m too (11 ก.ย. 2026, Heikin Ashi merge)",
+      "check_tp1_and_queue_be(price, df_15m)" in src)
 check("signal_loop() calls expire_stale_command() every pass (the dead-EA backstop)",
       "expire_stale_command()" in src)
 check("signal_loop() calls queue_open_command() right after the main XAUUSD Telegram alert",
@@ -375,6 +469,14 @@ check("/closeea admin command wired to execution_bridge.queue_close_all()",
 check("/testopen admin command wired to execution_bridge.queue_open_command()",
       '"/testopen"' in cmd_src and "queue_open_command(" in cmd_src
       and 'ADMIN_ID' in cmd_src)
+check("/trackmanual admin command wired to execution_bridge.track_manual_position()",
+      '"/trackmanual"' in cmd_src and "track_manual_position(" in cmd_src
+      and 'ADMIN_ID' in cmd_src)
+check("/trackmanual falls back to a live M15 BB edge when tp1 is omitted "
+      "(same default calc_exits() uses for new signals)",
+      "get_bb(df)" in cmd_src and 'bb["upper"] if direction == "BUY" else bb["lower"]' in cmd_src)
+check("/help lists /trackmanual",
+      "/trackmanual" in inspect.getsource(runtime.handle_cmd))
 
 
 # ═══════════════════════════════════════════════════════════

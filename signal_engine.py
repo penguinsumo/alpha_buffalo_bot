@@ -261,6 +261,55 @@ def get_bb(df: pd.DataFrame) -> dict:
     std   = close.rolling(BB_PERIOD).std().iloc[-1]
     return {"upper": float(mid+BB_STD*std), "mid": float(mid), "lower": float(mid-BB_STD*std)}
 
+
+# ── Heikin Ashi [ADDED 11 ก.ย. 2026, owner's request -- "TF15 ย่อยของ v4 ...
+# TP เป็น upperline BB 15 นาที หรือมี Heikin Ashi แดง 2 แท่ง"] ────────────
+# Standard Heikin Ashi transform, used as an early momentum-reversal signal
+# that can fire TP1 even before price physically reaches the BB-based tp1
+# price -- see execution_bridge.check_tp1_and_queue_be()'s df_15m param.
+def compute_heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
+    """Standard Heikin Ashi candles from a regular OHLC df: ha_close is the
+    average of the real O/H/L/C; ha_open recursively averages the PREVIOUS
+    Heikin Ashi bar's open+close (seeded from the first real bar's
+    open+close average). Returns a DataFrame with 'ha_open'/'ha_close'
+    columns aligned to df's row order. Never raises -- None/empty df
+    returns an empty DataFrame with the same columns."""
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=["ha_open", "ha_close"])
+    o = df["open"].astype(float).values
+    h = df["high"].astype(float).values
+    l = df["low"].astype(float).values
+    c = df["close"].astype(float).values
+    n = len(df)
+    ha_close = (o + h + l + c) / 4.0
+    ha_open = [0.0] * n
+    ha_open[0] = (o[0] + c[0]) / 2.0
+    for i in range(1, n):
+        ha_open[i] = (ha_open[i - 1] + ha_close[i - 1]) / 2.0
+    return pd.DataFrame({"ha_open": ha_open, "ha_close": ha_close})
+
+
+def heikin_ashi_reversed(df: pd.DataFrame, direction: str, n: int = 2) -> bool:
+    """True when the last `n` Heikin Ashi candles on `df` have ALL closed
+    against `direction` -- red (ha_close < ha_open) for a BUY position,
+    green (ha_close > ha_open) for a SELL position. Used as a momentum-
+    reversal exit trigger, independent of any price level. Never raises:
+    fewer than n bars, an unrecognized direction, or bad input all return
+    False (never guesses a reversal it can't actually see)."""
+    try:
+        ha = compute_heikin_ashi(df)
+        if len(ha) < n:
+            return False
+        tail = ha.tail(n)
+        if direction == "BUY":
+            return bool((tail["ha_close"] < tail["ha_open"]).all())
+        elif direction == "SELL":
+            return bool((tail["ha_close"] > tail["ha_open"]).all())
+        return False
+    except Exception:
+        return False
+
+
 def get_kivanc_swing_zone(df_1h: pd.DataFrame, pivot_n: int = 10, return_idx: bool = False):
     """return_idx=False (default): unchanged, returns (swing_high, swing_low)
     exactly as before -- every existing caller keeps working byte-identical.

@@ -142,6 +142,53 @@ def queue_open_command(direction, entry, sl, tp_final, be_price, partial, reason
         return False
 
 
+def track_manual_position(direction, entry, sl, tp1, tp_final=None,
+                           be_price=None, close_pct=50.0, reason="manual") -> bool:
+    """[ADDED 11 ก.ย. 2026, owner's request -- /trackmanual] Register a
+    trade the OWNER opened by hand (e.g. a manually-drawn XABCD/Auto-Fibo
+    entry on TradingView, not something this bot signaled) so the SAME
+    auto-management this module already gives bot-opened trades --
+    TP1-hit-> move-to-BE (check_tp1_and_queue_be(), Heikin-Ashi-reversal-
+    aware) and the BB-mid trailing stop (check_trailing_stop()) -- also
+    applies to it, exactly as if the bot itself had opened it.
+
+    Does NOT queue anything to the EA -- the position already exists on
+    the broker. This only starts SERVER-SIDE tracking from this call
+    onward, marked 'filled' immediately (there is no OPEN/fill round-trip
+    to wait for). Refuses if a position is already tracked (bot-opened or
+    another manual one) -- same one-at-a-time guard as
+    queue_open_command(), since this module's whole design assumes a
+    single account / single open position (AllowMultiple=false on the EA
+    side) throughout."""
+    global _open_position
+    try:
+        if _open_position is not None:
+            print(f"⚠️ execution_bridge: /trackmanual skipped, position already tracked "
+                  f"(signal_id={_open_position.get('signal_id')})")
+            return False
+        if direction not in ("BUY", "SELL"):
+            return False
+        if entry is None or sl is None or tp1 is None:
+            return False
+        entry = float(entry); sl = float(sl); tp1 = float(tp1)
+        if be_price is None:
+            be_price = round(entry + 0.10, 2) if direction == "BUY" else round(entry - 0.10, 2)
+        signal_id = uuid.uuid4().hex[:8]
+        _open_position = {
+            "signal_id": signal_id, "direction": direction, "entry": entry,
+            "sl": sl, "tp_final": tp_final, "tp1": tp1, "close_pct": close_pct,
+            "be_price": be_price, "filled": True, "ticket": None,
+            "fill_price": entry, "be_issued": False, "be_done": False,
+            "manual": True,
+        }
+        print(f"📌 execution_bridge: /trackmanual now tracking {direction} XAUUSD "
+              f"entry={entry} sl={sl} tp1={tp1} be_price={be_price} ({reason})")
+        return True
+    except Exception as e:
+        print(f"⚠️ execution_bridge track_manual_position error: {e}")
+        return False
+
+
 def queue_close_all(reason="manual"):
     """Manual kill-switch -- e.g. the /closeea admin Telegram command.
     Overrides whatever command is currently pending: closing takes
@@ -159,12 +206,29 @@ def queue_close_all(reason="manual"):
         return False
 
 
-def check_tp1_and_queue_be(current_price: float) -> bool:
+def check_tp1_and_queue_be(current_price: float, df_15m=None) -> bool:
     """Call every signal_loop() pass (cheap -- in-memory only, no network):
     if a position is tracked as open, filled, and price has now reached
     TP1 in the trade's favor, and the move-to-breakeven command hasn't
     been issued yet, queue it. Only ever acts on the position THIS module
-    is tracking -- never infers from price alone that a position exists."""
+    is tracking -- never infers from price alone that a position exists.
+
+    [CHANGED 11 ก.ย. 2026, owner's request -- "TF15 ย่อยของ v4 เมื่อถึงแนว
+    ขอบ Bollinger ต้องทำคู่ขนานดูราคาล่าสุด ... TP เป็น upperline BB 15
+    นาที หรือมี Heikin Ashi แดง สองแท่ง"] TP1 now counts as "hit" on
+    WHICHEVER comes first: price reaching pos['tp1'] (unchanged, still the
+    BB-based level from calc_exits()), OR the last 2 M15 Heikin Ashi
+    candles closing against the trade's direction (red for BUY, green for
+    SELL) -- an earlier momentum-reversal exit that can fire even before
+    price physically reaches the BB level. df_15m is optional and
+    backward-compatible: omitted (or None), this behaves EXACTLY as
+    before (price-only). The queued ACTION is unchanged
+    (PARTIAL_CLOSE_MOVE_BE, same close_pct/be_price) -- deliberately
+    merged into this existing check rather than a second, independently-
+    queued exit path, since only one command can ever be pending at a
+    time (_pending_command) and two separate triggers racing for that
+    slot would be needless complexity for what is really the same event
+    (TP1 reached) with a wider definition of 'reached'."""
     global _pending_command
     try:
         pos = _open_position
@@ -173,22 +237,33 @@ def check_tp1_and_queue_be(current_price: float) -> bool:
         if current_price is None:
             return False
         current_price = float(current_price)
-        hit = (pos["direction"] == "BUY" and current_price >= pos["tp1"]) or \
-              (pos["direction"] == "SELL" and current_price <= pos["tp1"])
-        if not hit:
+        price_hit = (pos["direction"] == "BUY" and current_price >= pos["tp1"]) or \
+                    (pos["direction"] == "SELL" and current_price <= pos["tp1"])
+
+        ha_hit = False
+        if not price_hit and df_15m is not None:
+            try:
+                from signal_engine import heikin_ashi_reversed
+                ha_hit = heikin_ashi_reversed(df_15m, pos["direction"])
+            except Exception as e:
+                print(f"⚠️ execution_bridge check_tp1_and_queue_be Heikin Ashi check error: {e}")
+                ha_hit = False
+
+        if not (price_hit or ha_hit):
             return False
         if _pending_command is not None:
             # Don't stomp an unrelated pending command (e.g. a just-queued
             # CLOSE_ALL, or the OPEN itself not yet ACKed).
             return False
+        reason = "TP1 hit" if price_hit else "TP1 hit (Heikin Ashi reversal, 2x M15)"
         _pending_command = {
             "command_id": _new_command_id(), "action": "PARTIAL_CLOSE_MOVE_BE",
-            "reason": "TP1 hit", "symbol": "XAUUSD",
+            "reason": reason, "symbol": "XAUUSD",
             "close_pct": pos["close_pct"], "new_sl": pos["be_price"],
             "queued_at": time.time(),
         }
         pos["be_issued"] = True
-        print(f"📤 execution_bridge: TP1 hit @ {current_price} -> queued "
+        print(f"📤 execution_bridge: {reason} @ {current_price} -> queued "
               f"PARTIAL_CLOSE_MOVE_BE (close_pct={pos['close_pct']}, new_sl={pos['be_price']})")
         return True
     except Exception as e:

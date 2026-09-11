@@ -622,7 +622,7 @@ def signal_loop():
                 from execution_bridge import (
                     check_tp1_and_queue_be, check_trailing_stop, expire_stale_command,
                 )
-                check_tp1_and_queue_be(price)
+                check_tp1_and_queue_be(price, df_15m)
                 try:
                     bb_mid = get_bb(df_15m)["mid"]
                     check_trailing_stop(price, bb_mid)
@@ -1010,6 +1010,60 @@ def handle_cmd(text, chat_id):
                             "(use /closeea first, then retry).", chat_id)
             except Exception as e:
                 send_telegram(f"testopen error: {e}", chat_id)
+    elif t == "/trackmanual" or t.startswith("/trackmanual "):
+        # [NEW, 11 ก.ย. 2026, owner's request] Admin-only: register a
+        # trade the OWNER opened BY HAND (e.g. a manually-drawn XABCD/
+        # Auto-Fibo entry on TradingView, like the 4302/03 example
+        # discussed) so this module's existing auto-management -- TP1
+        # hit -> move to BE (now Heikin-Ashi-reversal-aware too) and the
+        # BB-mid trailing stop -- applies to it exactly as if the bot
+        # itself had opened it. Does NOT touch the EA/broker at all --
+        # the position already exists there; this only starts SERVER-
+        # SIDE tracking. Usage: /trackmanual <buy|sell> <entry> <sl>
+        # [tp1] -- tp1 is optional and defaults to the live M15
+        # Bollinger Band edge (upper for BUY, lower for SELL), the same
+        # default new bot signals use in calc_exits().
+        if str(chat_id) != str(ADMIN_ID):
+            send_telegram("Unauthorized", chat_id)
+        else:
+            usage = "Usage: /trackmanual <buy|sell> <entry> <sl> [tp1]\n(tp1 optional -- defaults to the live M15 BB edge)"
+            try:
+                parts = t.split()
+                if len(parts) < 4:
+                    send_telegram(usage, chat_id)
+                else:
+                    direction = "SELL" if parts[1] == "sell" else "BUY"
+                    entry = float(parts[2])
+                    sl = float(parts[3])
+                    tp1 = float(parts[4]) if len(parts) > 4 else None
+                    if tp1 is None:
+                        df = get_ohlcv("15min", 30)
+                        if df is None:
+                            send_telegram(
+                                "trackmanual error: could not fetch live M15 data for "
+                                "a default TP1 -- pass one explicitly instead.", chat_id)
+                            tp1 = None
+                        else:
+                            bb = get_bb(df)
+                            tp1 = round(bb["upper"] if direction == "BUY" else bb["lower"], 2)
+                    if tp1 is not None:
+                        from execution_bridge import track_manual_position
+                        ok = track_manual_position(direction=direction, entry=entry, sl=sl, tp1=tp1)
+                        if ok:
+                            send_telegram(
+                                f"📌 Tracking manual {direction} XAUUSD @ {entry:,.2f} "
+                                f"SL={sl:,.2f} TP1={tp1:,.2f}\nMove-to-BE (BB upper/lower "
+                                f"OR 2x M15 Heikin Ashi reversal) and the BB-mid trailing "
+                                f"stop now apply automatically, same as a bot-opened trade.",
+                                chat_id)
+                        else:
+                            send_telegram(
+                                "trackmanual skipped -- a position is already tracked open "
+                                "(use /closeea first, then retry).", chat_id)
+            except (ValueError, IndexError):
+                send_telegram(usage, chat_id)
+            except Exception as e:
+                send_telegram(f"trackmanual error: {e}", chat_id)
     elif t == "/testalert" or t.startswith("/testalert "):
         # [NEW, 9 ก.ย. 2026] Admin-only manual smoke test for the
         # entry-consistency fix -- owner asked to SEE the "SESSION SIGNAL
@@ -1067,6 +1121,9 @@ def handle_cmd(text, chat_id):
                      "/testopen [buy|sell] (admin only -- manual smoke test: queues a "
                      "real OPEN at the current price, small fixed SL/TP, to verify the "
                      "EA pipeline end-to-end -- use on a DEMO account)\n"
+                     "/trackmanual <buy|sell> <entry> <sl> [tp1] (admin only -- register "
+                     "a trade YOU opened by hand so BE/trailing-stop/BB+Heikin-Ashi exit "
+                     "auto-manage it too, same as a bot-opened trade)\n"
                      "/testalert [buy|sell] (admin only -- fires a simulated SESSION "
                      "SIGNAL FIRING alert with Entry deliberately offset from live price, "
                      "to verify Entry/SL now display consistently -- no order queued)")
